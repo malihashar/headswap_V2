@@ -2,16 +2,26 @@ name: klein4b_mask_crop_stitch
 pipeline: klein
 
 # FLUX.2 [klein] 4B distilled — Apache 2.0
-unet_name: flux-2-klein-4b.safetensors
-# Prefer fp8 when present (Comfy template name); loader falls back to unet_name
-unet_name_fp8: flux-2-klein-4b-fp8.safetensors
+# Primary checkpoint: official BFL FP8 (Comfy template widget name).
+# Source: https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8
+# Docs:   https://docs.comfy.org/tutorials/flux/flux-2-klein
+unet_name: flux-2-klein-4b-fp8.safetensors
+# Fallback if only the bf16 Comfy-Org package was downloaded
+unet_name_fallback: flux-2-klein-4b.safetensors
+
+# Text encoder: Comfy-Org Klein 4B packaging (docs link)
+# https://huggingface.co/Comfy-Org/flux2-klein-4B
 clip_name: qwen_3_4b.safetensors
 clip_type: flux2
+
+# VAE: Comfy docs link this from Comfy-Org/flux2-dev
+# https://huggingface.co/Comfy-Org/flux2-dev
 vae_name: flux2-vae.safetensors
 
-# Optional BFS head-swap LoRA (run A/B with and without)
+# OPTIONAL community head-swap LoRA (MIT). Keep strength 0 unless A/B testing.
+# https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap
 bfs_lora_name: bfs_head_v1.1_optional_flux-klein_4b.safetensors
-bfs_lora_strength: 0.0   # 0 = off (recommended first); try 0.8–1.0 in A/B
+bfs_lora_strength: 0.0
 
 steps: 4
 cfg: 1.0
@@ -21,8 +31,8 @@ seed: 46
 denoise: 1.0
 
 # Locality
-max_body_dim: 1280          # full body kept for stitch; edit happens on crop
-crop_long_side: 1024        # working resolution for head crop
+max_body_dim: 1280
+crop_long_side: 1024
 mask_expand_px: 18
 mask_blur_px: 12
 div_by: 16
@@ -36,7 +46,6 @@ prompt: >-
 
 negative_prompt: ""
 
-# Face reference prep
 face_side_pad: 0.35
 face_top_pad: 0.65
 face_bot_pad: 0.25

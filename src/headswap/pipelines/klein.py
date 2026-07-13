@@ -50,8 +50,8 @@ class KleinMaskCropPipeline(BasePipeline):
         unet_dir = models / "diffusion_models"
         unet_name = resolve_model_file(
             unet_dir,
-            self.cfg.get("unet_name_fp8", "flux-2-klein-4b-fp8.safetensors"),
-            fallbacks=[self.cfg.get("unet_name", "flux-2-klein-4b.safetensors")],
+            self.cfg.get("unet_name", "flux-2-klein-4b-fp8.safetensors"),
+            fallbacks=[self.cfg.get("unet_name_fallback", "flux-2-klein-4b.safetensors")],
         )
         key = f"klein::{unet_name}::{self.cfg.get('bfs_lora_name')}::{self.cfg.get('bfs_lora_strength')}"
         if key in rt.models:

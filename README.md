@@ -7,9 +7,9 @@ Higher-quality open-source head swap for Magic Hour, focused on **determinism** 
 **Primary:** `klein4b_mask_crop_stitch` — FLUX.2 [klein] 4B distilled + head/hair mask + crop → multi-ref edit → soft stitch  
 **Fallback:** `qwen_improved_mask_crop` — same locality pattern on current Qwen 2511 + BFS V5  
 
-The current production full-frame Qwen+Lightning path (`qwen_baseline`) stays as the control / legacy arm.
+Model/URL validation (official sources only): see [`docs/VALIDATION.md`](docs/VALIDATION.md).
 
-Re-run GPU eval before cutting over; mock ranking is for harness smoke only.
+The current production full-frame Qwen+Lightning path (`qwen_baseline`) stays as the control / legacy arm.
 
 ## What’s in this repo
 
@@ -50,7 +50,10 @@ pytest -q
 ```bash
 export COMFYUI_PATH=/content/ComfyUI   # or /workspace/ComfyUI
 bash scripts/setup_comfyui.sh
-python3 scripts/download_models.py --set all --comfy "$COMFYUI_PATH"
+python3 scripts/download_models.py --set klein --verify-only   # confirm URLs first
+python3 scripts/download_models.py --set all                   # required only
+# optional Klein extras (BFS LoRA, bf16 UNET):
+# python3 scripts/download_models.py --set klein --include-optional
 python3 scripts/prepare_eval_set.py 24
 # Optional: replace data/eval/bodies + faces with real consented photos
 python3 scripts/run_compare.py --gpu --limit 12
