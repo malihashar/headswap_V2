@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download model weights for headswap_V2.
+Download model weights for headswap_V2 via huggingface_hub (no curl/aria2).
 
 Sources are limited to verified official repos (see docs/VALIDATION.md):
   - Black Forest Labs FLUX.2 [klein] 4B (Apache 2.0)
@@ -9,7 +9,10 @@ Sources are limited to verified official repos (see docs/VALIDATION.md):
   - lightx2v Lightning LoRA (Apache 2.0)
   - Alissonerdx BFS LoRAs (MIT; optional)
 
-Every required URL is checked via the Hugging Face API (file present + size)
+Files are cached by huggingface_hub, then placed under:
+  {COMFYUI_PATH}/models/{diffusion_models|text_encoders|vae|loras}/
+
+Every required artifact is checked via the Hugging Face API (file present + size)
 and a resolve probe (HTTP 302 with X-Linked-Size) before download.
 """
 from __future__ import annotations
@@ -17,7 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
+import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -25,7 +28,10 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-UA = "headswap-v2-downloader/1.1 (validation-required)"
+UA = "headswap-v2-downloader/1.2 (huggingface_hub)"
+
+# Comfy-Org/flux2-klein-4B resolve redirects to this twin (same split_files blobs).
+COMFY_KLEIN_4B_TWIN = "Comfy-Org/vae-text-encorder-for-flux-klein-4b"
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,8 @@ class Artifact:
     repo_path: str
     required: bool
     notes: str
+    # Optional override when API siblings live on a redirect twin repo.
+    download_repo_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +55,6 @@ class Artifact:
 # ---------------------------------------------------------------------------
 KLEIN_REQUIRED: list[Artifact] = [
     Artifact(
-        # Official BFL FP8 distilled UNET (Comfy template widget name)
         url="https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors",
         subdir="diffusion_models",
         filename="flux-2-klein-4b-fp8.safetensors",
@@ -57,8 +64,6 @@ KLEIN_REQUIRED: list[Artifact] = [
         notes="FLUX.2 Klein 4B distilled FP8 diffusion model (Apache 2.0).",
     ),
     Artifact(
-        # Comfy-Org text encoder packaging referenced by Comfy docs.
-        # Resolves via 307 to Comfy-Org/vae-text-encorder-for-flux-klein-4b (same files).
         url="https://huggingface.co/Comfy-Org/flux2-klein-4B/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",
         subdir="text_encoders",
         filename="qwen_3_4b.safetensors",
@@ -66,9 +71,9 @@ KLEIN_REQUIRED: list[Artifact] = [
         repo_path="split_files/text_encoders/qwen_3_4b.safetensors",
         required=True,
         notes="Qwen3-4B text encoder used by Klein 4B ComfyUI workflows.",
+        download_repo_id=COMFY_KLEIN_4B_TWIN,
     ),
     Artifact(
-        # VAE linked from Comfy Klein docs (also present in flux2-klein-4B package).
         url="https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
         subdir="vae",
         filename="flux2-vae.safetensors",
@@ -90,7 +95,6 @@ KLEIN_OPTIONAL: list[Artifact] = [
         notes="OPTIONAL community head-swap LoRA (MIT). Off by default in configs/klein4b.yaml.",
     ),
     Artifact(
-        # Alternate full-precision distilled UNET from Comfy-Org packaging (larger than FP8).
         url="https://huggingface.co/Comfy-Org/flux2-klein-4B/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors",
         subdir="diffusion_models",
         filename="flux-2-klein-4b.safetensors",
@@ -98,6 +102,7 @@ KLEIN_OPTIONAL: list[Artifact] = [
         repo_path="split_files/diffusion_models/flux-2-klein-4b.safetensors",
         required=False,
         notes="OPTIONAL bf16 distilled UNET (~7.8GB). Prefer FP8 unless you need bf16.",
+        download_repo_id=COMFY_KLEIN_4B_TWIN,
     ),
 ]
 
@@ -150,6 +155,17 @@ QWEN_REQUIRED: list[Artifact] = [
 ]
 
 
+def _require_hub():
+    try:
+        from huggingface_hub import hf_hub_download  # noqa: F401
+    except ImportError as exc:
+        raise SystemExit(
+            "huggingface_hub is required. Install with:\n"
+            "  pip install -U huggingface_hub\n"
+            f"({exc})"
+        ) from exc
+
+
 def _http_json(url: str):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=60) as resp:
@@ -158,7 +174,6 @@ def _http_json(url: str):
 
 def api_file_size(repo_id: str, repo_path: str) -> int | None:
     """Return file size from HF API siblings/tree, or None if missing."""
-    # Prefer siblings listing on the model card API
     model = _http_json(f"https://huggingface.co/api/models/{repo_id}")
     for sib in model.get("siblings") or []:
         if sib.get("rfilename") == repo_path:
@@ -168,7 +183,6 @@ def api_file_size(repo_id: str, repo_path: str) -> int | None:
             lfs = sib.get("lfs") or {}
             if lfs.get("size"):
                 return int(lfs["size"])
-    # Fallback: tree on parent dir
     parent = repo_path.rsplit("/", 1)[0] if "/" in repo_path else ""
     tree_url = f"https://huggingface.co/api/models/{repo_id}/tree/main"
     if parent:
@@ -186,9 +200,9 @@ def api_file_size(repo_id: str, repo_path: str) -> int | None:
 def resolve_probe(url: str) -> tuple[int, int | None]:
     """
     Probe Hugging Face resolve URL without downloading the full file.
-    Returns (hf_status, linked_size). Success means HF returns 302/307 with X-Linked-Size.
-    Note: the subsequent CDN hop can 403 in some sandboxes; linked size is the integrity signal.
+    Success means HF returns 302/307 with X-Linked-Size.
     """
+
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
@@ -199,13 +213,11 @@ def resolve_probe(url: str) -> tuple[int, int | None]:
         opener.open(req, timeout=60)
         return 200, None
     except urllib.error.HTTPError as e:
-        # Relative redirects (307 to another HF path) — follow one hop manually
         loc = e.headers.get("Location")
         linked = e.headers.get("X-Linked-Size")
         if e.code in (301, 302, 303, 307, 308) and loc:
             if loc.startswith("/"):
                 loc = "https://huggingface.co" + loc
-                # second hop
                 try:
                     opener.open(urllib.request.Request(loc, headers={"User-Agent": UA}), timeout=60)
                 except urllib.error.HTTPError as e2:
@@ -217,19 +229,16 @@ def resolve_probe(url: str) -> tuple[int, int | None]:
 
 def verify_artifact(art: Artifact) -> None:
     size = api_file_size(art.repo_id, art.repo_path)
-    if size is None:
-        # Official Comfy-Org/flux2-klein-4B redirects to vae-text-encorder twin; siblings live there.
-        if art.repo_id == "Comfy-Org/flux2-klein-4B":
-            twin = "Comfy-Org/vae-text-encorder-for-flux-klein-4b"
-            size = api_file_size(twin, art.repo_path)
-            if size is None:
-                raise RuntimeError(
-                    f"Missing on HF API: {art.repo_id}:{art.repo_path} "
-                    f"(also checked twin {twin})"
-                )
-            print(f"  api: {art.repo_id} → twin {twin} :: {art.repo_path} ({size} bytes)")
-        else:
-            raise RuntimeError(f"Missing on HF API: {art.repo_id}:{art.repo_path}")
+    if size is None and art.download_repo_id:
+        size = api_file_size(art.download_repo_id, art.repo_path)
+        if size is None:
+            raise RuntimeError(
+                f"Missing on HF API: {art.repo_id}:{art.repo_path} "
+                f"(also checked {art.download_repo_id})"
+            )
+        print(f"  api: {art.repo_id} → {art.download_repo_id} :: {art.repo_path} ({size} bytes)")
+    elif size is None:
+        raise RuntimeError(f"Missing on HF API: {art.repo_id}:{art.repo_path}")
     else:
         print(f"  api: {art.repo_id}:{art.repo_path} ({size} bytes)")
 
@@ -239,26 +248,86 @@ def verify_artifact(art: Artifact) -> None:
             f"Resolve probe failed for {art.url} (status={status}, x-linked-size={linked})"
         )
     print(f"  resolve: HTTP {status}, X-Linked-Size={linked}")
-    if abs(linked - size) > 0 and art.repo_id != "Comfy-Org/flux2-dev":
-        # Allow tiny mismatch only if sizes roughly equal (packaging twins)
-        if abs(linked - size) > 1024:
-            # flux2-dev VAE vs klein package VAE can differ slightly; warn only
-            print(f"  warn: size mismatch api={size} linked={linked}")
+    if linked and size and abs(linked - size) > 1024:
+        print(f"  warn: size mismatch api={size} linked={linked}")
 
 
-def download(url: str, dest_dir: Path, filename: str) -> None:
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    path = dest_dir / filename
-    if path.exists() and path.stat().st_size > 1_000_000:
-        print(f"  exists: {filename} ({path.stat().st_size} bytes)")
+def _place_into_comfy(cached_path: Path, dest: Path) -> None:
+    """Put a cached hub file into the ComfyUI models layout (prefer link over copy)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() or dest.is_symlink():
+        if dest.is_symlink() or dest.stat().st_size > 1_000_000:
+            print(f"  exists: {dest} ({dest.stat().st_size if dest.exists() else 'symlink'} bytes)")
+            return
+        dest.unlink()
+
+    cached_path = cached_path.resolve()
+    try:
+        os.link(cached_path, dest)
+        print(f"  hardlinked → {dest}")
         return
-    print(f"  downloading: {filename}")
-    if subprocess.call(["which", "aria2c"], stdout=subprocess.DEVNULL) == 0:
-        subprocess.check_call(
-            ["aria2c", "-c", "-x", "16", "-s", "16", "-k", "1M", "-d", str(dest_dir), "-o", filename, url]
-        )
-    else:
-        subprocess.check_call(["curl", "-L", "-A", UA, url, "-o", str(path)])
+    except OSError:
+        pass
+    try:
+        dest.symlink_to(cached_path)
+        print(f"  symlinked → {dest}")
+        return
+    except OSError:
+        pass
+    shutil.copy2(cached_path, dest)
+    print(f"  copied → {dest}")
+
+
+def download_artifact(art: Artifact, models_root: Path, revision: str = "main") -> Path:
+    """
+    Download via huggingface_hub into the HF cache, then place under ComfyUI models/.
+    Resumable downloads / local caching are handled by huggingface_hub.
+    """
+    from huggingface_hub import hf_hub_download
+
+    dest = models_root / art.subdir / art.filename
+    if dest.exists() and not dest.is_symlink() and dest.stat().st_size > 1_000_000:
+        print(f"  exists: {dest.name} ({dest.stat().st_size} bytes)")
+        return dest
+
+    repo_candidates = [art.download_repo_id or art.repo_id]
+    if art.download_repo_id and art.repo_id not in repo_candidates:
+        repo_candidates.append(art.repo_id)
+    elif not art.download_repo_id and art.repo_id == "Comfy-Org/flux2-klein-4B":
+        repo_candidates.append(COMFY_KLEIN_4B_TWIN)
+
+    last_err: Exception | None = None
+    cached: str | None = None
+    for repo_id in repo_candidates:
+        print(f"  hf_hub_download: {repo_id} :: {art.repo_path}")
+        kwargs = {
+            "repo_id": repo_id,
+            "filename": art.repo_path,
+            "revision": revision,
+            "repo_type": "model",
+        }
+        # resume_download is always-on in recent huggingface_hub; keep for older installs.
+        try:
+            cached = hf_hub_download(**kwargs, resume_download=True)
+        except TypeError:
+            # Newer hub removed the kwarg — download is still resumable/cached.
+            try:
+                cached = hf_hub_download(**kwargs)
+            except Exception as exc:
+                last_err = exc
+                print(f"  retry next repo after: {exc}")
+                continue
+        except Exception as exc:
+            last_err = exc
+            print(f"  retry next repo after: {exc}")
+            continue
+        break
+
+    if not cached:
+        raise RuntimeError(f"Failed to download {art.filename}: {last_err}")
+
+    _place_into_comfy(Path(cached), dest)
+    return dest
 
 
 def select_artifacts(kind: str, include_optional: bool) -> list[Artifact]:
@@ -273,6 +342,8 @@ def select_artifacts(kind: str, include_optional: bool) -> list[Artifact]:
 
 
 def main() -> int:
+    _require_hub()
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--comfy", default=os.environ.get("COMFYUI_PATH", "/content/ComfyUI"))
     ap.add_argument("--set", choices=["klein", "qwen", "all"], default="klein")
@@ -285,6 +356,11 @@ def main() -> int:
         "--verify-only",
         action="store_true",
         help="Validate URLs via HF API + resolve probe; do not download.",
+    )
+    ap.add_argument(
+        "--revision",
+        default="main",
+        help="Hugging Face revision/branch/tag (default: main).",
     )
     args = ap.parse_args()
 
@@ -300,10 +376,11 @@ def main() -> int:
         return 0
 
     root = Path(args.comfy) / "models"
-    print(f"\nDownloading into {root}")
+    print(f"\nDownloading into {root} (via huggingface_hub cache)")
     for art in arts:
-        download(art.url, root / art.subdir, art.filename)
-    print("Done.")
+        print(f"\n↓ {art.filename}")
+        download_artifact(art, root, revision=args.revision)
+    print("\nDone.")
     return 0
 
 

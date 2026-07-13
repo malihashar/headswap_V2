@@ -50,8 +50,9 @@ pytest -q
 ```bash
 export COMFYUI_PATH=/content/ComfyUI   # or /workspace/ComfyUI
 bash scripts/setup_comfyui.sh
+pip install -U huggingface_hub
 python3 scripts/download_models.py --set klein --verify-only   # confirm URLs first
-python3 scripts/download_models.py --set all                   # required only
+python3 scripts/download_models.py --set all                   # required only (hf_hub_download)
 # optional Klein extras (BFS LoRA, bf16 UNET):
 # python3 scripts/download_models.py --set klein --include-optional
 python3 scripts/prepare_eval_set.py 24

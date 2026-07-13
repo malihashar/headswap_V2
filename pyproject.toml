@@ -15,6 +15,7 @@ dependencies = [
   "PyYAML>=6.0",
   "tqdm>=4.66",
   "requests>=2.31",
+  "huggingface_hub>=0.24.0",
 ]
 
 [project.optional-dependencies]
