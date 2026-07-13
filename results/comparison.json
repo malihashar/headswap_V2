@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-07-13T21:13:45.048321+00:00",
+  "latency_budget_s": 30.0,
+  "ranking": [
+    {
+      "pipeline": "klein4b_mask_crop_stitch",
+      "path": "/Users/ali/repos/headswap_V2/results/qwen_improved/metrics.json",
+      "success_rate": 1.0,
+      "latency_p95": 0.01887670799624175,
+      "within_latency_budget": true,
+      "body_psnr_mean": 48.15659856796265,
+      "identity_mean": null,
+      "composite_score": 0.8,
+      "force_mock": true,
+      "n_pairs": 24
+    },
+    {
+      "pipeline": "qwen_improved_mask_crop",
+      "path": "/Users/ali/repos/headswap_V2/results/qwen_improved/metrics.json",
+      "success_rate": 1.0,
+      "latency_p95": 0.01744387499638833,
+      "within_latency_budget": true,
+      "body_psnr_mean": 48.16028022766113,
+      "identity_mean": null,
+      "composite_score": 0.8,
+      "force_mock": true,
+      "n_pairs": 24
+    },
+    {
+      "pipeline": "qwen_baseline",
+      "path": "/Users/ali/repos/headswap_V2/results/qwen_improved/metrics.json",
+      "success_rate": 1.0,
+      "latency_p95": 0.013605499996629078,
+      "within_latency_budget": true,
+      "body_psnr_mean": 31.402417023976643,
+      "identity_mean": null,
+      "composite_score": 0.7570120851198832,
+      "force_mock": true,
+      "n_pairs": 24
+    }
+  ],
+  "recommendation": {
+    "promote": "klein4b_mask_crop_stitch",
+    "fallback": "qwen_improved_mask_crop",
+    "rationale": "Winner selected by composite score = 0.6*success + 0.2*body_preserve + 0.2*identity with -0.15 penalty if p95 latency > 30.0s. Mock-only run: empirical ranking is harness-smoke only; recommended production promote is Klein 4B with Qwen-improved as fallback.",
+    "production_note": "If runs are force_mock=true, promote FLUX.2 Klein 4B mask-crop-stitch as the primary production candidate per research; re-confirm with GPU metrics before cutover.",
+    "empirical_mock_leader": "klein4b_mask_crop_stitch"
+  }
+}

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "headswap-v2"
+version = "0.1.0"
+description = "Magic Hour head-swap V2: FLUX.2 Klein 4B prototype + eval harness"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=10.0",
+  "opencv-python-headless>=4.8",
+  "PyYAML>=6.0",
+  "tqdm>=4.66",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+gpu = [
+  "torch",
+  "torchvision",
+  "insightface",
+  "onnxruntime-gpu",
+]
+dev = [
+  "pytest>=7.4",
+]
+
+[project.scripts]
+headswap-prepare-eval = "headswap.eval.dataset:main_prepare"
+headswap-run = "headswap.cli:main_run"
+headswap-evaluate = "headswap.cli:main_evaluate"
+headswap-compare = "headswap.cli:main_compare"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,35 @@
+name: qwen_baseline
+pipeline: qwen_baseline
+
+unet_name: qwen_image_edit_2511_fp8mixed.safetensors
+clip_name: qwen_2.5_vl_7b_fp8_scaled.safetensors
+clip_type: qwen_image
+vae_name: qwen_image_vae.safetensors
+
+headswap_lora_name: bfs_head_v5_2511_merged_version_rank_16_fp16.safetensors
+headswap_lora_strength: 1.0
+lightning_lora_name: Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors
+lightning_lora_strength: 1.25
+
+steps: 6
+cfg: 1.1
+cfg_norm_strength: 1.0
+auraflow_shift: 5
+sampler: euler
+scheduler: simple
+seed: 46
+denoise: 1.0
+max_dim: 576
+div_by: 8
+
+prompt: >-
+  Replace the entire head in image 1 with the head from image 2.
+  Match image 2 identity strongly.
+  Preserve body, pose, clothes, and background of image 1.
+
+negative_prompt: ""
+
+face_side_pad: 0.35
+face_top_pad: 0.65
+face_bot_pad: 0.15
+blur_pad_face: true

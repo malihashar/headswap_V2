@@ -1,0 +1,44 @@
+name: qwen_improved_mask_crop
+pipeline: qwen_improved
+
+unet_name: qwen_image_edit_2511_fp8mixed.safetensors
+clip_name: qwen_2.5_vl_7b_fp8_scaled.safetensors
+clip_type: qwen_image
+vae_name: qwen_image_vae.safetensors
+
+headswap_lora_name: bfs_head_v5_2511_merged_version_rank_16_fp16.safetensors
+headswap_lora_strength: 1.0
+# Slightly gentler Lightning to recover texture vs baseline 1.25
+lightning_lora_name: Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors
+lightning_lora_strength: 1.0
+
+steps: 8
+cfg: 1.1
+cfg_norm_strength: 1.0
+auraflow_shift: 5
+sampler: euler
+scheduler: simple
+seed: 46
+denoise: 1.0
+
+max_body_dim: 1024
+crop_long_side: 768
+mask_expand_px: 18
+mask_blur_px: 12
+div_by: 8
+
+# Official BFS V5 prompt (deterministic cue token)
+prompt: >-
+  head_swap: start with Picture 1 as the base image, keeping its lighting,
+  environment, and background. remove the head from Picture 1 completely and
+  replace it with the head from Picture 2, strictly preserving the hair, eye
+  color, and nose structure of Picture 2. copy the eye direction, head rotation,
+  and micro-expressions from Picture 1. high quality, sharp details, 4k.
+
+negative_prompt: ""
+
+face_side_pad: 0.35
+face_top_pad: 0.65
+face_bot_pad: 0.25
+blur_pad_face: false
+include_shoulders: true

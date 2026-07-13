@@ -1,0 +1,532 @@
+{
+  "generated_at": "2026-07-13T21:13:44.199825+00:00",
+  "config": "/Users/ali/repos/headswap_V2/configs/qwen_baseline.yaml",
+  "pipeline": "qwen_baseline",
+  "force_mock": true,
+  "n_pairs": 24,
+  "summary": {
+    "success_rate": 1.0,
+    "n_success": 24,
+    "latency_p50": 0.013021624996326864,
+    "latency_p95": 0.013605499996629078,
+    "latency_mean": 0.01309461283259831,
+    "identity_mean": null,
+    "body_psnr_mean": 31.402417023976643,
+    "by_difficulty": {
+      "hard": {
+        "n": 9,
+        "success_rate": 1.0
+      },
+      "easy": {
+        "n": 15,
+        "success_rate": 1.0
+      }
+    }
+  },
+  "pairs": [
+    {
+      "pair_id": "pair_000",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013636083996971138,
+      "identity_cosine": null,
+      "body_preserve_psnr": 32.194339752197266,
+      "seam_edge_delta": 30.312118530273438,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "hard",
+      "tags": [
+        "synthetic",
+        "long_hair_mismatch"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_000/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_001",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013460333997500129,
+      "identity_cosine": null,
+      "body_preserve_psnr": 30.76725196838379,
+      "seam_edge_delta": 39.790157318115234,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "hard",
+      "tags": [
+        "synthetic",
+        "long_hair_mismatch"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_001/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_002",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013423624994175043,
+      "identity_cosine": null,
+      "body_preserve_psnr": 31.48166847229004,
+      "seam_edge_delta": 30.162857055664062,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "hard",
+      "tags": [
+        "synthetic",
+        "long_hair_mismatch"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_002/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_003",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013007166002353188,
+      "identity_cosine": null,
+      "body_preserve_psnr": 32.19416809082031,
+      "seam_edge_delta": 25.83490562438965,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "hard",
+      "tags": [
+        "synthetic",
+        "long_hair_mismatch"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_003/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_004",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013422000003629364,
+      "identity_cosine": null,
+      "body_preserve_psnr": 30.76736068725586,
+      "seam_edge_delta": 37.43400573730469,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "hard",
+      "tags": [
+        "synthetic",
+        "long_hair_mismatch"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_004/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_005",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013382749995798804,
+      "identity_cosine": null,
+      "body_preserve_psnr": 31.481834411621094,
+      "seam_edge_delta": 34.95566177368164,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "hard",
+      "tags": [
+        "synthetic",
+        "long_hair_mismatch"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_005/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_006",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013169125006243121,
+      "identity_cosine": null,
+      "body_preserve_psnr": 31.481782913208008,
+      "seam_edge_delta": 26.881790161132812,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "hard",
+      "tags": [
+        "synthetic",
+        "long_hair_mismatch"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_006/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_007",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013605499996629078,
+      "identity_cosine": null,
+      "body_preserve_psnr": 32.19440841674805,
+      "seam_edge_delta": 34.556053161621094,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "hard",
+      "tags": [
+        "synthetic",
+        "long_hair_mismatch"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_007/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_008",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013525999995181337,
+      "identity_cosine": null,
+      "body_preserve_psnr": 31.481861114501953,
+      "seam_edge_delta": 34.59015655517578,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "hard",
+      "tags": [
+        "synthetic",
+        "long_hair_mismatch"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_008/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_009",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.012738957993860822,
+      "identity_cosine": null,
+      "body_preserve_psnr": 30.77566146850586,
+      "seam_edge_delta": 24.034624099731445,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_009/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_010",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.012955040998349432,
+      "identity_cosine": null,
+      "body_preserve_psnr": 30.77566146850586,
+      "seam_edge_delta": 25.64223289489746,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_010/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_011",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.012485541999922134,
+      "identity_cosine": null,
+      "body_preserve_psnr": 32.22337341308594,
+      "seam_edge_delta": 18.651607513427734,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_011/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_012",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013184249997721054,
+      "identity_cosine": null,
+      "body_preserve_psnr": 30.77566146850586,
+      "seam_edge_delta": 26.67937469482422,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_012/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_013",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.012774583003192674,
+      "identity_cosine": null,
+      "body_preserve_psnr": 32.223506927490234,
+      "seam_edge_delta": 23.42579460144043,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_013/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_014",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.012670084004639648,
+      "identity_cosine": null,
+      "body_preserve_psnr": 31.499614715576172,
+      "seam_edge_delta": 19.51732063293457,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_014/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_015",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013021624996326864,
+      "identity_cosine": null,
+      "body_preserve_psnr": 31.499664306640625,
+      "seam_edge_delta": 30.78251838684082,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_015/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_016",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013417708003544249,
+      "identity_cosine": null,
+      "body_preserve_psnr": 31.499540328979492,
+      "seam_edge_delta": 23.45486831665039,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_016/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_017",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013264834000437986,
+      "identity_cosine": null,
+      "body_preserve_psnr": 30.067276000976562,
+      "seam_edge_delta": 36.92220687866211,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_017/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_018",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.012705207998806145,
+      "identity_cosine": null,
+      "body_preserve_psnr": 30.77556800842285,
+      "seam_edge_delta": 26.12992286682129,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_018/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_019",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.012989333001314662,
+      "identity_cosine": null,
+      "body_preserve_psnr": 31.4997501373291,
+      "seam_edge_delta": 21.81477928161621,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_019/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_020",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.012893833001726307,
+      "identity_cosine": null,
+      "body_preserve_psnr": 30.77558708190918,
+      "seam_edge_delta": 24.540979385375977,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_020/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_021",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013003082996874582,
+      "identity_cosine": null,
+      "body_preserve_psnr": 32.223506927490234,
+      "seam_edge_delta": 24.568336486816406,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_021/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_022",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.013007875000766944,
+      "identity_cosine": null,
+      "body_preserve_psnr": 30.77558708190918,
+      "seam_edge_delta": 32.69511413574219,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_022/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    },
+    {
+      "pair_id": "pair_023",
+      "pipeline": "qwen_baseline",
+      "latency_s": 0.01252616699639475,
+      "identity_cosine": null,
+      "body_preserve_psnr": 32.22337341308594,
+      "seam_edge_delta": 21.145259857177734,
+      "face_detected": true,
+      "success": true,
+      "fail_reasons": [],
+      "difficulty": "easy",
+      "tags": [
+        "synthetic",
+        "frontal"
+      ],
+      "result_path": "/Users/ali/repos/headswap_V2/results/qwen_baseline/images/pair_023/result.png",
+      "meta": {
+        "pipeline": "qwen_baseline",
+        "mode": "mock_full_frame_drift"
+      }
+    }
+  ]
+}
