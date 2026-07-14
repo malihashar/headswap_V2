@@ -7,7 +7,8 @@ Architecture:
   2. Download into local staging (/content/_hf_dl_staging).
   3. Verify size against scripts/models.json (or refreshed HF API sizes).
   4. Promote the complete file into --store-dir (Drive).
-  5. Symlink into {COMFYUI_PATH}/models/<subdir>/.
+  5. Delete staging copy + hub-cache leftovers for that file (staging keeps in-progress only).
+  6. Symlink into {COMFYUI_PATH}/models/<subdir>/.
 
 Backend ladder (auto):
   Hub HTTP (HF_HUB_DISABLE_XET=1) x2 → aria2 resume x2 → fail
@@ -223,6 +224,36 @@ def is_complete(path: Path, expected_size: int) -> bool:
         return path.stat().st_size == expected_size
     except OSError:
         return False
+
+
+def wait_until_complete(
+    path: Path, expected_size: int, *, attempts: int = 10, delay_sec: float = 1.0
+) -> bool:
+    """Drive/FUSE can lag on size visibility right after promote — retry briefly."""
+    for i in range(attempts):
+        if is_complete(path, expected_size):
+            return True
+        if i + 1 < attempts:
+            time.sleep(delay_sec)
+    try:
+        got = path.stat().st_size if path.exists() else -1
+    except OSError:
+        got = -1
+    print(f"  warn: size check still failing for {path} (got {got}, want {expected_size})")
+    return False
+
+
+def staging_usage_bytes(staging_dir: Path) -> int:
+    if not staging_dir.exists():
+        return 0
+    total = 0
+    for p in staging_dir.rglob("*"):
+        if p.is_file():
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+    return total
 
 
 def _bytes_under(root: Path, patterns: list[str] | None = None) -> int:
@@ -488,10 +519,11 @@ def promote_to_store(staging_file: Path, dest: Path) -> None:
     try:
         if tmp.exists():
             tmp.unlink()
+        print(f"  promote: copying {staging_file} → {tmp}")
         shutil.copy2(staging_file, tmp)
         if tmp.stat().st_size != staging_file.stat().st_size:
             raise RuntimeError("promote size mismatch")
-        tmp.replace(dest)
+        os.replace(tmp, dest)
     except Exception:
         if tmp.exists():
             try:
@@ -499,7 +531,138 @@ def promote_to_store(staging_file: Path, dest: Path) -> None:
             except OSError:
                 pass
         raise
-    print(f"  promoted → {dest}")
+    print(f"  promoted → {dest} ({dest.stat().st_size} bytes)")
+
+
+def _force_unlink(path: Path) -> tuple[bool, int]:
+    """Delete a file; return (ok, bytes_freed)."""
+    if not path.exists() and not path.is_symlink():
+        return False, 0
+    try:
+        size = path.stat().st_size if path.exists() else 0
+    except OSError:
+        size = 0
+    print(f"  cleanup DELETE file: {path} ({size} bytes)")
+    try:
+        path.unlink(missing_ok=True)
+    except TypeError:
+        # Older Python
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False, 0
+    except OSError as exc:
+        print(f"  cleanup ERROR unlink {path}: {exc}")
+        return False, 0
+    if path.exists() or path.is_symlink():
+        print(f"  cleanup ERROR still exists after unlink: {path}")
+        return False, 0
+    print(f"  cleanup OK deleted: {path}")
+    return True, size
+
+
+def _force_rmtree(path: Path) -> tuple[bool, int]:
+    """Recursively delete a directory; log every file removed."""
+    if not path.exists() and not path.is_symlink():
+        print(f"  cleanup skip missing dir: {path}")
+        return False, 0
+    if path.is_symlink() or path.is_file():
+        return _force_unlink(path)
+    freed = 0
+    print(f"  cleanup DELETE tree: {path}")
+    # Delete files deepest-first with explicit logging
+    try:
+        for root, dirs, files in os.walk(path, topdown=False):
+            root_p = Path(root)
+            for name in files:
+                ok, n = _force_unlink(root_p / name)
+                if ok:
+                    freed += n
+            for name in dirs:
+                d = root_p / name
+                print(f"  cleanup DELETE dir: {d}")
+                try:
+                    d.rmdir()
+                    print(f"  cleanup OK rmdir: {d}")
+                except OSError as exc:
+                    print(f"  cleanup ERROR rmdir {d}: {exc}")
+        print(f"  cleanup DELETE dir: {path}")
+        path.rmdir()
+        print(f"  cleanup OK rmdir: {path}")
+    except OSError as exc:
+        print(f"  cleanup ERROR rmtree {path}: {exc}; falling back to shutil.rmtree")
+        shutil.rmtree(path, ignore_errors=False)
+    if path.exists():
+        print(f"  cleanup ERROR tree still exists: {path}")
+        return False, freed
+    print(f"  cleanup OK tree gone: {path}")
+    return True, freed
+
+
+def cleanup_staging_for_artifact(
+    art: Artifact,
+    staging_dir: Path,
+    *,
+    staging_file: Path | None = None,
+) -> None:
+    """
+    Remove completed staging payloads for one artifact.
+
+    Must run immediately after a successful promote. Deletes:
+      - the explicit staging_file path
+      - aria2 sidecars (filename*)
+      - entire staging/_hub_cache and staging/hf_home
+    """
+    staging_dir = staging_dir.resolve()
+    before = staging_usage_bytes(staging_dir)
+    print(f"  cleanup BEGIN staging_dir={staging_dir}")
+    print(f"  cleanup staging usage before: {before} bytes ({before / (1024**3):.2f} GiB)")
+
+    targets: list[Path] = []
+    if staging_file is not None:
+        targets.append(Path(staging_file))
+    targets.append(staging_dir / art.filename)
+    # aria2 / partial siblings next to the flat file
+    targets.extend(sorted(staging_dir.glob(f"{art.filename}*")))
+
+    seen: set[Path] = set()
+    freed = 0
+    for p in targets:
+        try:
+            rp = p.resolve() if p.exists() or p.is_symlink() else p
+        except OSError:
+            rp = p
+        if rp in seen:
+            continue
+        seen.add(rp)
+        if p.is_dir() and not p.is_symlink():
+            continue
+        ok, n = _force_unlink(p)
+        if ok:
+            freed += n
+
+    # Always wipe disposable hub caches under THIS staging_dir after promote.
+    for tree_name in ("_hub_cache", "hf_home"):
+        tree = staging_dir / tree_name
+        ok, n = _force_rmtree(tree)
+        if ok:
+            freed += n
+
+    after = staging_usage_bytes(staging_dir)
+    print(f"  cleanup staging usage after:  {after} bytes ({after / (1024**3):.2f} GiB)")
+    print(
+        f"  cleanup END for {art.filename}: "
+        f"freed~{freed / (1024**3):.2f} GiB, delta={(before - after) / (1024**3):.2f} GiB"
+    )
+    leftover = staging_dir / art.filename
+    if leftover.exists() or leftover.is_symlink():
+        raise RuntimeError(
+            f"cleanup failed: staging file still present: {leftover} "
+            f"({leftover.stat().st_size if leftover.exists() else '?'} bytes)"
+        )
+    hub = staging_dir / "_hub_cache"
+    if hub.exists():
+        raise RuntimeError(f"cleanup failed: _hub_cache still present: {hub}")
 
 
 def link_into_comfy(store_file: Path, comfy_file: Path) -> None:
@@ -531,6 +694,47 @@ def link_into_comfy(store_file: Path, comfy_file: Path) -> None:
     print(f"  copied → {comfy_file}")
 
 
+def _finish_promoted_artifact(
+    art: Artifact,
+    *,
+    staging_file: Path | None,
+    staging_dir: Path,
+    store_file: Path,
+    comfy_file: Path,
+) -> Path:
+    """
+    After a successful promote (shutil.copy2 into the store):
+      try:    create Comfy symlink/link/copy from the store file
+      finally: always delete staging .safetensors + _hub_cache
+
+    Cleanup runs even if symlink creation or other post-promote steps fail.
+    """
+    print(f"  finish: store={store_file}")
+    print(f"  finish: staging_dir={staging_dir.resolve()}")
+    if staging_file is not None:
+        print(f"  finish: staging_file={staging_file}")
+
+    link_err: Exception | None = None
+    try:
+        link_into_comfy(store_file, comfy_file)
+    except Exception as exc:
+        link_err = exc
+        print(f"  warn: post-promote link step failed: {exc}")
+    finally:
+        # Always delete staging copy left by promote's shutil.copy2.
+        cleanup_staging_for_artifact(
+            art,
+            staging_dir,
+            staging_file=staging_file or (staging_dir / art.filename),
+        )
+
+    if link_err is not None:
+        # Staging is already gone; retry link once from store only.
+        print("  retrying Comfy link after staging cleanup")
+        link_into_comfy(store_file, comfy_file)
+    return store_file
+
+
 def ensure_artifact(
     art: Artifact,
     *,
@@ -544,11 +748,17 @@ def ensure_artifact(
 ) -> Path:
     store_file = store_path_for(store_dir, art)
     comfy_file = comfy_path_for(comfy, art)
+    staging_dir = Path(staging_dir)
 
-    if is_complete(store_file, art.size):
+    if is_complete(store_file, art.size) or wait_until_complete(store_file, art.size, attempts=3):
         print(f"  store complete ({art.size} bytes) — skip download")
-        link_into_comfy(store_file, comfy_file)
-        return store_file
+        return _finish_promoted_artifact(
+            art,
+            staging_file=staging_dir / art.filename,
+            staging_dir=staging_dir,
+            store_file=store_file,
+            comfy_file=comfy_file,
+        )
 
     if store_file.exists():
         print(
@@ -593,18 +803,64 @@ def ensure_artifact(
 
     last_err: Exception | None = None
     for i, (name, fn) in enumerate(steps, 1):
+        # Another attempt (or prior flaky promote) may already have completed the store.
+        if is_complete(store_file, art.size) or wait_until_complete(
+            store_file, art.size, attempts=3
+        ):
+            print(f"  store already complete before attempt {i} — cleaning staging")
+            return _finish_promoted_artifact(
+                art,
+                staging_file=staging_dir / art.filename,
+                staging_dir=staging_dir,
+                store_file=store_file,
+                comfy_file=comfy_file,
+            )
+
         print(f"  attempt {i}/{len(steps)} backend={name}")
+        staging_file: Path | None = None
+        promoted_ok = False
+        link_err: Exception | None = None
         try:
             staging_file = fn()
             if not is_complete(staging_file, art.size):
                 raise RuntimeError("staging incomplete after backend returned")
+            # promote uses shutil.copy2 — staging .safetensors remains until finally.
             promote_to_store(staging_file, store_file)
-            link_into_comfy(store_file, comfy_file)
-            return store_file
+            if not wait_until_complete(store_file, art.size, attempts=15, delay_sec=1.0):
+                raise RuntimeError(
+                    f"store incomplete after promote: {store_file} "
+                    f"(staging was {staging_file.stat().st_size} bytes)"
+                )
+            promoted_ok = True
+            try:
+                link_into_comfy(store_file, comfy_file)
+            except Exception as exc:
+                link_err = exc
+                print(f"  warn: symlink/link after promote failed: {exc}")
         except Exception as exc:
             last_err = exc
             print(f"  attempt {i} failed: {exc}")
-            continue
+            if is_complete(store_file, art.size) or wait_until_complete(
+                store_file, art.size, attempts=5, delay_sec=1.0
+            ):
+                promoted_ok = True
+            else:
+                continue
+        finally:
+            # Runs after successful shutil.copy2 promote even if link_into_comfy fails.
+            if promoted_ok:
+                print("  finally: delete staging .safetensors after copy2 promote")
+                cleanup_staging_for_artifact(
+                    art,
+                    staging_dir,
+                    staging_file=staging_file or (staging_dir / art.filename),
+                )
+
+        if promoted_ok:
+            if link_err is not None:
+                print("  retrying Comfy link after staging cleanup")
+                link_into_comfy(store_file, comfy_file)
+            return store_file
 
     raise RuntimeError(f"All download attempts failed for {art.filename}: {last_err}")
 
@@ -763,6 +1019,11 @@ def main() -> int:
             stall_window_sec=args.stall_window_sec,
             stall_min_bytes=args.stall_min_bytes,
         )
+
+    # Final sweep: drop any leftover staging copies of store-complete models
+    for art in arts:
+        if is_complete(store_path_for(store_dir, art), art.size):
+            cleanup_staging_for_artifact(art, staging_dir)
 
     print("\nDone.")
     return 0
