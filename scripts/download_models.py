@@ -1,169 +1,74 @@
 #!/usr/bin/env python3
 """
-Download model weights for headswap_V2 via huggingface_hub (no curl/aria2).
+Download model weights for headswap_V2 (Colab-robust).
 
-Sources are limited to verified official repos (see docs/VALIDATION.md):
-  - Black Forest Labs FLUX.2 [klein] 4B (Apache 2.0)
-  - Comfy-Org packaging linked from https://docs.comfy.org/tutorials/flux/flux-2-klein
-  - Comfy-Org Qwen Image Edit 2511 packaging
-  - lightx2v Lightning LoRA (Apache 2.0)
-  - Alissonerdx BFS LoRAs (MIT; optional)
+Architecture:
+  1. Never write partial files to Google Drive.
+  2. Download into local staging (/content/_hf_dl_staging).
+  3. Verify size against scripts/models.json (or refreshed HF API sizes).
+  4. Promote the complete file into --store-dir (Drive).
+  5. Symlink into {COMFYUI_PATH}/models/<subdir>/.
 
-Files are cached by huggingface_hub, then placed under:
-  {COMFYUI_PATH}/models/{diffusion_models|text_encoders|vae|loras}/
+Backend ladder (auto):
+  Hub HTTP (HF_HUB_DISABLE_XET=1) x2 → aria2 resume x2 → fail
 
-Every required artifact is checked via the Hugging Face API (file present + size)
-and a resolve probe (HTTP 302 with X-Linked-Size) before download.
+A stall watchdog kills any backend that transfers <1 MiB in --stall-window-sec
+(default 5 minutes) and advances the ladder.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 import shutil
+import signal
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
-UA = "headswap-v2-downloader/1.2 (huggingface_hub)"
+UA = "headswap-v2-downloader/2.0 (colab-staging)"
+DEFAULT_MANIFEST = Path(__file__).resolve().parent / "models.json"
+DEFAULT_DRIVE_STORE = Path("/content/drive/MyDrive/headswap_V2/models")
+DEFAULT_STAGING = Path("/content/_hf_dl_staging")
 
-# Comfy-Org/flux2-klein-4B resolve redirects to this twin (same split_files blobs).
-COMFY_KLEIN_4B_TWIN = "Comfy-Org/vae-text-encorder-for-flux-klein-4b"
+
+class StallError(RuntimeError):
+    """Raised when a download backend transfers too few bytes in the stall window."""
 
 
 @dataclass(frozen=True)
 class Artifact:
-    """One downloadable weight file."""
-
-    url: str
-    subdir: str
     filename: str
+    size: int
+    path: str  # ComfyUI models subdir
     repo_id: str
     repo_path: str
+    url: str
     required: bool
-    notes: str
-    # Optional override when API siblings live on a redirect twin repo.
+    set_name: str
     download_repo_id: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# Verified required Klein set (matches ComfyUI official docs)
-# https://docs.comfy.org/tutorials/flux/flux-2-klein
-# ---------------------------------------------------------------------------
-KLEIN_REQUIRED: list[Artifact] = [
-    Artifact(
-        url="https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors",
-        subdir="diffusion_models",
-        filename="flux-2-klein-4b-fp8.safetensors",
-        repo_id="black-forest-labs/FLUX.2-klein-4b-fp8",
-        repo_path="flux-2-klein-4b-fp8.safetensors",
-        required=True,
-        notes="FLUX.2 Klein 4B distilled FP8 diffusion model (Apache 2.0).",
-    ),
-    Artifact(
-        url="https://huggingface.co/Comfy-Org/flux2-klein-4B/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",
-        subdir="text_encoders",
-        filename="qwen_3_4b.safetensors",
-        repo_id="Comfy-Org/flux2-klein-4B",
-        repo_path="split_files/text_encoders/qwen_3_4b.safetensors",
-        required=True,
-        notes="Qwen3-4B text encoder used by Klein 4B ComfyUI workflows.",
-        download_repo_id=COMFY_KLEIN_4B_TWIN,
-    ),
-    Artifact(
-        url="https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
-        subdir="vae",
-        filename="flux2-vae.safetensors",
-        repo_id="Comfy-Org/flux2-dev",
-        repo_path="split_files/vae/flux2-vae.safetensors",
-        required=True,
-        notes="Shared FLUX.2 VAE used by Klein ComfyUI templates.",
-    ),
-]
-
-KLEIN_OPTIONAL: list[Artifact] = [
-    Artifact(
-        url="https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap/resolve/main/bfs_head_v1.1_optional_flux-klein_4b.safetensors",
-        subdir="loras",
-        filename="bfs_head_v1.1_optional_flux-klein_4b.safetensors",
-        repo_id="Alissonerdx/BFS-Best-Face-Swap",
-        repo_path="bfs_head_v1.1_optional_flux-klein_4b.safetensors",
-        required=False,
-        notes="OPTIONAL community head-swap LoRA (MIT). Off by default in configs/klein4b.yaml.",
-    ),
-    Artifact(
-        url="https://huggingface.co/Comfy-Org/flux2-klein-4B/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors",
-        subdir="diffusion_models",
-        filename="flux-2-klein-4b.safetensors",
-        repo_id="Comfy-Org/flux2-klein-4B",
-        repo_path="split_files/diffusion_models/flux-2-klein-4b.safetensors",
-        required=False,
-        notes="OPTIONAL bf16 distilled UNET (~7.8GB). Prefer FP8 unless you need bf16.",
-        download_repo_id=COMFY_KLEIN_4B_TWIN,
-    ),
-]
-
-QWEN_REQUIRED: list[Artifact] = [
-    Artifact(
-        url="https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/main/split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors",
-        subdir="diffusion_models",
-        filename="qwen_image_edit_2511_fp8mixed.safetensors",
-        repo_id="Comfy-Org/Qwen-Image-Edit_ComfyUI",
-        repo_path="split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors",
-        required=True,
-        notes="Qwen Image Edit 2511 ComfyUI split diffusion model.",
-    ),
-    Artifact(
-        url="https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors",
-        subdir="vae",
-        filename="qwen_image_vae.safetensors",
-        repo_id="Comfy-Org/Qwen-Image_ComfyUI",
-        repo_path="split_files/vae/qwen_image_vae.safetensors",
-        required=True,
-        notes="Qwen Image VAE.",
-    ),
-    Artifact(
-        url="https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
-        subdir="text_encoders",
-        filename="qwen_2.5_vl_7b_fp8_scaled.safetensors",
-        repo_id="Comfy-Org/Qwen-Image_ComfyUI",
-        repo_path="split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
-        required=True,
-        notes="Qwen2.5-VL 7B text encoder (fp8 scaled).",
-    ),
-    Artifact(
-        url="https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-        subdir="loras",
-        filename="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-        repo_id="lightx2v/Qwen-Image-Edit-2511-Lightning",
-        repo_path="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
-        required=True,
-        notes="Lightning 4-step LoRA for Qwen Image Edit 2511 (Apache 2.0).",
-    ),
-    Artifact(
-        url="https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap/resolve/main/bfs_head_v5_2511_merged_version_rank_16_fp16.safetensors",
-        subdir="loras",
-        filename="bfs_head_v5_2511_merged_version_rank_16_fp16.safetensors",
-        repo_id="Alissonerdx/BFS-Best-Face-Swap",
-        repo_path="bfs_head_v5_2511_merged_version_rank_16_fp16.safetensors",
-        required=True,
-        notes="BFS Head V5 LoRA for Qwen 2511 (MIT).",
-    ),
-]
+def _on_colab() -> bool:
+    return Path("/content").exists()
 
 
-def _require_hub():
-    try:
-        from huggingface_hub import hf_hub_download  # noqa: F401
-    except ImportError as exc:
-        raise SystemExit(
-            "huggingface_hub is required. Install with:\n"
-            "  pip install -U huggingface_hub\n"
-            f"({exc})"
-        ) from exc
+def configure_hub_env(*, disable_xet: bool) -> None:
+    """Must run before importing huggingface_hub."""
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
+    if disable_xet:
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        print("HF_HUB_DISABLE_XET=1 (classic HTTP path; avoids Colab Xet stalls)")
+    else:
+        print("Xet left enabled (HF_HUB_DISABLE_XET not set)")
 
 
 def _http_json(url: str):
@@ -174,23 +79,26 @@ def _http_json(url: str):
 
 def api_file_size(repo_id: str, repo_path: str) -> int | None:
     """Return file size from HF API siblings/tree, or None if missing."""
-    model = _http_json(f"https://huggingface.co/api/models/{repo_id}")
+    try:
+        model = _http_json(f"https://huggingface.co/api/models/{repo_id}")
+    except Exception:
+        model = {}
     for sib in model.get("siblings") or []:
         if sib.get("rfilename") == repo_path:
-            size = sib.get("size")
+            size = sib.get("size") or (sib.get("lfs") or {}).get("size")
             if size:
                 return int(size)
-            lfs = sib.get("lfs") or {}
-            if lfs.get("size"):
-                return int(lfs["size"])
     parent = repo_path.rsplit("/", 1)[0] if "/" in repo_path else ""
     tree_url = f"https://huggingface.co/api/models/{repo_id}/tree/main"
     if parent:
         tree_url += "/" + "/".join(urllib.parse.quote(p) for p in parent.split("/"))
-    items = _http_json(tree_url)
+    try:
+        items = _http_json(tree_url)
+    except Exception:
+        return None
     name = repo_path.split("/")[-1]
     for item in items:
-        if item.get("path", "").endswith(name) or item.get("path") == repo_path:
+        if item.get("path") == repo_path or item.get("path", "").endswith(name):
             size = item.get("size") or (item.get("lfs") or {}).get("size")
             if size:
                 return int(size)
@@ -198,11 +106,6 @@ def api_file_size(repo_id: str, repo_path: str) -> int | None:
 
 
 def resolve_probe(url: str) -> tuple[int, int | None]:
-    """
-    Probe Hugging Face resolve URL without downloading the full file.
-    Success means HF returns 302/307 with X-Linked-Size.
-    """
-
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
@@ -227,123 +130,504 @@ def resolve_probe(url: str) -> tuple[int, int | None]:
         return e.code, int(linked) if linked else None
 
 
+def load_manifest(path: Path) -> dict[str, Any]:
+    with path.open() as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Manifest must be an object: {path}")
+    return data
+
+
+def save_manifest(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
+def artifact_from_manifest(filename: str, entry: dict[str, Any]) -> Artifact:
+    return Artifact(
+        filename=filename,
+        size=int(entry["size"]),
+        path=str(entry["path"]),
+        repo_id=str(entry["repo_id"]),
+        repo_path=str(entry["repo_path"]),
+        url=str(entry["url"]),
+        required=bool(entry.get("required", True)),
+        set_name=str(entry.get("set", "all")),
+        download_repo_id=entry.get("download_repo_id") or None,
+    )
+
+
+def select_artifacts(
+    manifest: dict[str, Any], kind: str, include_optional: bool
+) -> list[Artifact]:
+    out: list[Artifact] = []
+    for filename, entry in manifest.items():
+        art = artifact_from_manifest(filename, entry)
+        if kind != "all" and art.set_name != kind:
+            continue
+        if not art.required and not include_optional:
+            continue
+        out.append(art)
+    return out
+
+
+def refresh_manifest_sizes(manifest: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(manifest)
+    for filename, entry in updated.items():
+        repo = entry.get("download_repo_id") or entry["repo_id"]
+        size = api_file_size(repo, entry["repo_path"])
+        if size is None and entry.get("download_repo_id"):
+            size = api_file_size(entry["repo_id"], entry["repo_path"])
+        if size is None:
+            print(f"  warn: could not refresh size for {filename}")
+            continue
+        if int(entry.get("size") or 0) != size:
+            print(f"  updated {filename}: {entry.get('size')} → {size}")
+        entry = dict(entry)
+        entry["size"] = size
+        updated[filename] = entry
+    return updated
+
+
 def verify_artifact(art: Artifact) -> None:
     size = api_file_size(art.repo_id, art.repo_path)
     if size is None and art.download_repo_id:
         size = api_file_size(art.download_repo_id, art.repo_path)
-        if size is None:
-            raise RuntimeError(
-                f"Missing on HF API: {art.repo_id}:{art.repo_path} "
-                f"(also checked {art.download_repo_id})"
-            )
-        print(f"  api: {art.repo_id} → {art.download_repo_id} :: {art.repo_path} ({size} bytes)")
-    elif size is None:
+    if size is None:
         raise RuntimeError(f"Missing on HF API: {art.repo_id}:{art.repo_path}")
-    else:
-        print(f"  api: {art.repo_id}:{art.repo_path} ({size} bytes)")
-
+    print(f"  api: {art.repo_id}:{art.repo_path} ({size} bytes)")
+    if size != art.size:
+        print(f"  warn: manifest size {art.size} != api size {size}")
     status, linked = resolve_probe(art.url)
     if status not in (200, 302, 303, 307, 308) or not linked:
         raise RuntimeError(
             f"Resolve probe failed for {art.url} (status={status}, x-linked-size={linked})"
         )
     print(f"  resolve: HTTP {status}, X-Linked-Size={linked}")
-    if linked and size and abs(linked - size) > 1024:
-        print(f"  warn: size mismatch api={size} linked={linked}")
 
 
-def _place_into_comfy(cached_path: Path, dest: Path) -> None:
-    """Put a cached hub file into the ComfyUI models layout (prefer link over copy)."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() or dest.is_symlink():
-        if dest.is_symlink() or dest.stat().st_size > 1_000_000:
-            print(f"  exists: {dest} ({dest.stat().st_size if dest.exists() else 'symlink'} bytes)")
-            return
-        dest.unlink()
+def store_path_for(store_dir: Path, art: Artifact) -> Path:
+    return store_dir / art.path / art.filename
 
-    cached_path = cached_path.resolve()
+
+def comfy_path_for(comfy: Path, art: Artifact) -> Path:
+    return comfy / "models" / art.path / art.filename
+
+
+def is_complete(path: Path, expected_size: int) -> bool:
     try:
-        os.link(cached_path, dest)
-        print(f"  hardlinked → {dest}")
-        return
+        if not path.exists():
+            return False
+        return path.stat().st_size == expected_size
     except OSError:
-        pass
+        return False
+
+
+def _bytes_under(root: Path, patterns: list[str] | None = None) -> int:
+    if not root.exists():
+        return 0
+    total = 0
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        if patterns and not any(pat in p.name for pat in patterns):
+            continue
+        try:
+            total += p.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def run_with_stall_watch(
+    target: Callable[..., None],
+    *,
+    args: tuple = (),
+    kwargs: dict | None = None,
+    watch_roots: list[Path],
+    watch_name_hints: list[str],
+    stall_window_sec: int,
+    stall_min_bytes: int,
+    poll_sec: float = 5.0,
+) -> None:
+    """Run target in a child process; kill on stall."""
+    kwargs = kwargs or {}
+    ctx = mp.get_context("spawn")
+    proc = ctx.Process(target=target, args=args, kwargs=kwargs)
+    proc.start()
+    last_bytes = sum(_bytes_under(r, watch_name_hints) for r in watch_roots)
+    last_progress = time.monotonic()
     try:
-        dest.symlink_to(cached_path)
-        print(f"  symlinked → {dest}")
-        return
-    except OSError:
-        pass
-    shutil.copy2(cached_path, dest)
-    print(f"  copied → {dest}")
+        while proc.is_alive():
+            time.sleep(poll_sec)
+            cur = sum(_bytes_under(r, watch_name_hints) for r in watch_roots)
+            if cur - last_bytes >= stall_min_bytes:
+                last_bytes = cur
+                last_progress = time.monotonic()
+                print(f"  progress: {cur:,} bytes watched")
+            elif time.monotonic() - last_progress >= stall_window_sec:
+                print(
+                    f"  STALL: <{stall_min_bytes} bytes in {stall_window_sec}s "
+                    f"(watched={cur:,}); terminating backend"
+                )
+                proc.terminate()
+                proc.join(timeout=15)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=5)
+                raise StallError(
+                    f"Download stalled (<{stall_min_bytes} B / {stall_window_sec}s)"
+                )
+        if proc.exitcode not in (0, None):
+            raise RuntimeError(f"Download worker exited with code {proc.exitcode}")
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=5)
 
 
-def download_artifact(art: Artifact, models_root: Path, revision: str = "main") -> Path:
-    """
-    Download via huggingface_hub into the HF cache, then place under ComfyUI models/.
-    Resumable downloads / local caching are handled by huggingface_hub.
-    """
+def _hub_worker(
+    repo_id: str,
+    repo_path: str,
+    revision: str,
+    hub_cache: str,
+    staging_file: str,
+    expected_size: int,
+) -> None:
+    os.environ["HF_HUB_DISABLE_XET"] = os.environ.get("HF_HUB_DISABLE_XET", "1")
+    os.environ["HF_HUB_CACHE"] = hub_cache
+    os.environ["HF_HOME"] = str(Path(hub_cache).parent / "hf_home")
     from huggingface_hub import hf_hub_download
 
-    dest = models_root / art.subdir / art.filename
-    if dest.exists() and not dest.is_symlink() and dest.stat().st_size > 1_000_000:
-        print(f"  exists: {dest.name} ({dest.stat().st_size} bytes)")
-        return dest
+    kwargs = {
+        "repo_id": repo_id,
+        "filename": repo_path,
+        "revision": revision,
+        "repo_type": "model",
+        "cache_dir": hub_cache,
+    }
+    try:
+        cached = hf_hub_download(**kwargs, resume_download=True)
+    except TypeError:
+        cached = hf_hub_download(**kwargs)
+    cached_path = Path(cached)
+    if cached_path.stat().st_size != expected_size:
+        raise SystemExit(
+            f"Hub download size mismatch: got {cached_path.stat().st_size}, "
+            f"expected {expected_size}"
+        )
+    dest = Path(staging_file)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Copy into flat staging name (still local disk only).
+    shutil.copy2(cached_path, dest)
+    if dest.stat().st_size != expected_size:
+        raise SystemExit("Staging copy size mismatch")
+
+
+def hub_download_to_staging(
+    art: Artifact,
+    *,
+    staging_dir: Path,
+    revision: str,
+    stall_window_sec: int,
+    stall_min_bytes: int,
+) -> Path:
+    staging_file = staging_dir / art.filename
+    hub_cache = staging_dir / "_hub_cache"
+    hub_cache.mkdir(parents=True, exist_ok=True)
+    staging_dir.mkdir(parents=True, exist_ok=True)
 
     repo_candidates = [art.download_repo_id or art.repo_id]
     if art.download_repo_id and art.repo_id not in repo_candidates:
         repo_candidates.append(art.repo_id)
-    elif not art.download_repo_id and art.repo_id == "Comfy-Org/flux2-klein-4B":
-        repo_candidates.append(COMFY_KLEIN_4B_TWIN)
 
     last_err: Exception | None = None
-    cached: str | None = None
     for repo_id in repo_candidates:
-        print(f"  hf_hub_download: {repo_id} :: {art.repo_path}")
-        kwargs = {
-            "repo_id": repo_id,
-            "filename": art.repo_path,
-            "revision": revision,
-            "repo_type": "model",
-        }
-        # resume_download is always-on in recent huggingface_hub; keep for older installs.
+        print(f"  hub: {repo_id} :: {art.repo_path}")
         try:
-            cached = hf_hub_download(**kwargs, resume_download=True)
-        except TypeError:
-            # Newer hub removed the kwarg — download is still resumable/cached.
-            try:
-                cached = hf_hub_download(**kwargs)
-            except Exception as exc:
-                last_err = exc
-                print(f"  retry next repo after: {exc}")
-                continue
+            run_with_stall_watch(
+                _hub_worker,
+                args=(
+                    repo_id,
+                    art.repo_path,
+                    revision,
+                    str(hub_cache),
+                    str(staging_file),
+                    art.size,
+                ),
+                watch_roots=[hub_cache, staging_dir],
+                watch_name_hints=[art.filename, Path(art.repo_path).name, ".incomplete"],
+                stall_window_sec=stall_window_sec,
+                stall_min_bytes=stall_min_bytes,
+            )
+            if is_complete(staging_file, art.size):
+                return staging_file
+            last_err = RuntimeError("staging file incomplete after hub download")
         except Exception as exc:
             last_err = exc
-            print(f"  retry next repo after: {exc}")
+            print(f"  hub attempt failed: {exc}")
             continue
-        break
-
-    if not cached:
-        raise RuntimeError(f"Failed to download {art.filename}: {last_err}")
-
-    _place_into_comfy(Path(cached), dest)
-    return dest
+    raise RuntimeError(f"Hub download failed for {art.filename}: {last_err}")
 
 
-def select_artifacts(kind: str, include_optional: bool) -> list[Artifact]:
-    arts: list[Artifact] = []
-    if kind in ("klein", "all"):
-        arts.extend(KLEIN_REQUIRED)
-        if include_optional:
-            arts.extend(KLEIN_OPTIONAL)
-    if kind in ("qwen", "all"):
-        arts.extend(QWEN_REQUIRED)
-    return arts
+def _hf_token() -> str | None:
+    tok = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if tok:
+        return tok.strip()
+    try:
+        from huggingface_hub import get_token
+
+        t = get_token()
+        return t.strip() if t else None
+    except Exception:
+        pass
+    token_path = Path.home() / ".cache" / "huggingface" / "token"
+    if token_path.exists():
+        return token_path.read_text().strip() or None
+    return None
+
+
+def aria2_download_to_staging(
+    art: Artifact,
+    *,
+    staging_dir: Path,
+    stall_window_sec: int,
+    stall_min_bytes: int,
+) -> Path:
+    if shutil.which("aria2c") is None:
+        raise RuntimeError("aria2c not found; install with: apt-get install -y aria2")
+
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staging_file = staging_dir / art.filename
+    token = _hf_token()
+    cmd = [
+        "aria2c",
+        "-c",
+        "-x",
+        "8",
+        "-s",
+        "8",
+        "-k",
+        "1M",
+        "--file-allocation=none",
+        "--auto-file-renaming=false",
+        "--allow-overwrite=true",
+        "-d",
+        str(staging_dir),
+        "-o",
+        art.filename,
+        "--user-agent",
+        UA,
+    ]
+    if token:
+        cmd.extend(["--header", f"Authorization: Bearer {token}"])
+    cmd.append(art.url)
+
+    print(f"  aria2c: {art.url}")
+
+    # Run aria2 as subprocess with stall watch on staging file growth
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    last_bytes = staging_file.stat().st_size if staging_file.exists() else 0
+    # also count .aria2 control + related
+    last_progress = time.monotonic()
+    try:
+        while True:
+            ret = proc.poll()
+            cur = 0
+            for p in staging_dir.glob(art.filename + "*"):
+                if p.is_file():
+                    try:
+                        cur += p.stat().st_size
+                    except OSError:
+                        pass
+            if cur - last_bytes >= stall_min_bytes:
+                last_bytes = cur
+                last_progress = time.monotonic()
+                print(f"  progress: {cur:,} bytes (aria2)")
+            elif time.monotonic() - last_progress >= stall_window_sec:
+                print(
+                    f"  STALL: <{stall_min_bytes} bytes in {stall_window_sec}s; "
+                    "killing aria2c"
+                )
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                raise StallError(
+                    f"aria2 stalled (<{stall_min_bytes} B / {stall_window_sec}s)"
+                )
+            if ret is not None:
+                out = proc.stdout.read() if proc.stdout else ""
+                if ret != 0:
+                    raise RuntimeError(f"aria2c failed ({ret}): {out[-2000:]}")
+                break
+            time.sleep(5)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    if not is_complete(staging_file, art.size):
+        got = staging_file.stat().st_size if staging_file.exists() else 0
+        raise RuntimeError(
+            f"aria2 completed but size mismatch: got {got}, expected {art.size}"
+        )
+    return staging_file
+
+
+def promote_to_store(staging_file: Path, dest: Path) -> None:
+    """Copy a verified complete local file onto the store (e.g. Drive). No partials."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".promoting")
+    try:
+        if tmp.exists():
+            tmp.unlink()
+        shutil.copy2(staging_file, tmp)
+        if tmp.stat().st_size != staging_file.stat().st_size:
+            raise RuntimeError("promote size mismatch")
+        tmp.replace(dest)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+    print(f"  promoted → {dest}")
+
+
+def link_into_comfy(store_file: Path, comfy_file: Path) -> None:
+    comfy_file.parent.mkdir(parents=True, exist_ok=True)
+    if comfy_file.is_symlink() or comfy_file.exists():
+        try:
+            if comfy_file.resolve() == store_file.resolve() and is_complete(
+                comfy_file, store_file.stat().st_size
+            ):
+                print(f"  comfy link ok: {comfy_file}")
+                return
+        except OSError:
+            pass
+        if comfy_file.is_symlink() or comfy_file.exists():
+            comfy_file.unlink()
+    try:
+        os.symlink(store_file, comfy_file)
+        print(f"  symlinked → {comfy_file}")
+        return
+    except OSError:
+        pass
+    try:
+        os.link(store_file, comfy_file)
+        print(f"  hardlinked → {comfy_file}")
+        return
+    except OSError:
+        pass
+    shutil.copy2(store_file, comfy_file)
+    print(f"  copied → {comfy_file}")
+
+
+def ensure_artifact(
+    art: Artifact,
+    *,
+    store_dir: Path,
+    staging_dir: Path,
+    comfy: Path,
+    backend: str,
+    revision: str,
+    stall_window_sec: int,
+    stall_min_bytes: int,
+) -> Path:
+    store_file = store_path_for(store_dir, art)
+    comfy_file = comfy_path_for(comfy, art)
+
+    if is_complete(store_file, art.size):
+        print(f"  store complete ({art.size} bytes) — skip download")
+        link_into_comfy(store_file, comfy_file)
+        return store_file
+
+    if store_file.exists():
+        print(
+            f"  store incomplete/wrong size "
+            f"(got {store_file.stat().st_size if store_file.exists() else 0}, "
+            f"want {art.size}) — re-download via staging"
+        )
+        try:
+            store_file.unlink()
+        except OSError:
+            pass
+
+    # Ladder: Hub HTTP ×2 → aria2 ×2 (subset when --backend hub|aria2)
+    steps: list[tuple[str, Callable[[], Path]]] = []
+    hub_n = 2 if backend in ("auto", "hub") else 0
+    aria_n = 2 if backend in ("auto", "aria2") else 0
+    for _ in range(hub_n):
+        steps.append(
+            (
+                "hub",
+                lambda: hub_download_to_staging(
+                    art,
+                    staging_dir=staging_dir,
+                    revision=revision,
+                    stall_window_sec=stall_window_sec,
+                    stall_min_bytes=stall_min_bytes,
+                ),
+            )
+        )
+    for _ in range(aria_n):
+        steps.append(
+            (
+                "aria2",
+                lambda: aria2_download_to_staging(
+                    art,
+                    staging_dir=staging_dir,
+                    stall_window_sec=stall_window_sec,
+                    stall_min_bytes=stall_min_bytes,
+                ),
+            )
+        )
+
+    last_err: Exception | None = None
+    for i, (name, fn) in enumerate(steps, 1):
+        print(f"  attempt {i}/{len(steps)} backend={name}")
+        try:
+            staging_file = fn()
+            if not is_complete(staging_file, art.size):
+                raise RuntimeError("staging incomplete after backend returned")
+            promote_to_store(staging_file, store_file)
+            link_into_comfy(store_file, comfy_file)
+            return store_file
+        except Exception as exc:
+            last_err = exc
+            print(f"  attempt {i} failed: {exc}")
+            continue
+
+    raise RuntimeError(f"All download attempts failed for {art.filename}: {last_err}")
+
+
+def default_store_dir(comfy: Path) -> Path:
+    env = os.environ.get("HEADSWAP_MODEL_STORE")
+    if env:
+        return Path(env)
+    if DEFAULT_DRIVE_STORE.parent.exists() or Path("/content/drive/MyDrive").exists():
+        return DEFAULT_DRIVE_STORE
+    return comfy / "models"
+
+
+def default_staging_dir() -> Path:
+    env = os.environ.get("HEADSWAP_STAGING_DIR")
+    if env:
+        return Path(env)
+    if _on_colab():
+        return DEFAULT_STAGING
+    return Path("/tmp/headswap_hf_staging")
 
 
 def main() -> int:
-    _require_hub()
-
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--comfy", default=os.environ.get("COMFYUI_PATH", "/content/ComfyUI"))
     ap.add_argument("--set", choices=["klein", "qwen", "all"], default="klein")
@@ -357,34 +641,136 @@ def main() -> int:
         action="store_true",
         help="Validate URLs via HF API + resolve probe; do not download.",
     )
+    ap.add_argument("--revision", default="main")
     ap.add_argument(
-        "--revision",
-        default="main",
-        help="Hugging Face revision/branch/tag (default: main).",
+        "--store-dir",
+        default=None,
+        help="Persistent complete-model store (Drive). Partials never go here.",
+    )
+    ap.add_argument(
+        "--staging-dir",
+        default=None,
+        help="Local staging for downloads (default /content/_hf_dl_staging on Colab).",
+    )
+    ap.add_argument(
+        "--backend",
+        choices=["auto", "hub", "aria2"],
+        default="auto",
+        help="auto: Hub HTTP x2 then aria2 x2 (default).",
+    )
+    ap.add_argument(
+        "--manifest",
+        default=str(DEFAULT_MANIFEST),
+        help="Path to models.json manifest.",
+    )
+    ap.add_argument(
+        "--refresh-manifest",
+        action="store_true",
+        help="Update sizes in the manifest from the live HF API, then save.",
+    )
+    ap.add_argument(
+        "--stall-window-sec",
+        type=int,
+        default=int(os.environ.get("HEADSWAP_STALL_WINDOW_SEC", "300")),
+        help="Seconds without enough progress before killing a backend (default 300).",
+    )
+    ap.add_argument(
+        "--stall-min-bytes",
+        type=int,
+        default=int(os.environ.get("HEADSWAP_STALL_MIN_BYTES", str(1_048_576))),
+        help="Minimum bytes required per stall window (default 1 MiB).",
+    )
+    ap.add_argument(
+        "--disable-xet",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Force HF_HUB_DISABLE_XET (default: on when /content exists).",
     )
     args = ap.parse_args()
 
-    arts = select_artifacts(args.set, include_optional=args.include_optional)
-    print(f"Validating {len(arts)} artifact(s) for set={args.set} optional={args.include_optional}")
+    disable_xet = (
+        True
+        if args.disable_xet is True
+        else False
+        if args.disable_xet is False
+        else (
+            os.environ.get("HEADSWAP_DISABLE_XET", "").lower() in {"1", "true", "yes", "on"}
+            or _on_colab()
+            or os.environ.get("HF_HUB_DISABLE_XET") == "1"
+        )
+    )
+    # Default Colab: disable Xet. Non-Colab: disable unless explicitly enabled.
+    if args.disable_xet is None and not _on_colab():
+        if os.environ.get("HF_HUB_DISABLE_XET") is None and not os.environ.get(
+            "HEADSWAP_DISABLE_XET"
+        ):
+            disable_xet = True  # prefer reliable HTTP everywhere for large files
+    configure_hub_env(disable_xet=disable_xet)
+
+    manifest_path = Path(args.manifest)
+    manifest = load_manifest(manifest_path)
+    if args.refresh_manifest:
+        print(f"Refreshing sizes into {manifest_path}")
+        manifest = refresh_manifest_sizes(manifest)
+        save_manifest(manifest_path, manifest)
+        print("Manifest saved.")
+
+    arts = select_artifacts(manifest, args.set, include_optional=args.include_optional)
+    if not arts:
+        raise SystemExit(f"No artifacts selected for set={args.set}")
+
+    print(
+        f"Selected {len(arts)} artifact(s) set={args.set} optional={args.include_optional} "
+        f"backend={args.backend}"
+    )
     for art in arts:
         tag = "REQUIRED" if art.required else "OPTIONAL"
-        print(f"\n[{tag}] {art.filename}\n  {art.notes}")
+        print(f"\n[{tag}] {art.filename} ({art.size} bytes)")
         verify_artifact(art)
 
     if args.verify_only:
         print("\nAll selected URLs verified.")
         return 0
 
-    root = Path(args.comfy) / "models"
-    print(f"\nDownloading into {root} (via huggingface_hub cache)")
+    try:
+        import huggingface_hub  # noqa: F401
+    except ImportError as exc:
+        raise SystemExit(
+            "huggingface_hub is required. Install with:\n"
+            "  pip install -U huggingface_hub\n"
+            f"({exc})"
+        ) from exc
+
+    comfy = Path(args.comfy)
+    store_dir = Path(args.store_dir) if args.store_dir else default_store_dir(comfy)
+    staging_dir = Path(args.staging_dir) if args.staging_dir else default_staging_dir()
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    store_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\nStore (complete only): {store_dir}")
+    print(f"Staging (partials ok): {staging_dir}")
+    print(f"ComfyUI:               {comfy}")
+
     for art in arts:
         print(f"\n↓ {art.filename}")
-        download_artifact(art, root, revision=args.revision)
+        ensure_artifact(
+            art,
+            store_dir=store_dir,
+            staging_dir=staging_dir,
+            comfy=comfy,
+            backend=args.backend,
+            revision=args.revision,
+            stall_window_sec=args.stall_window_sec,
+            stall_min_bytes=args.stall_min_bytes,
+        )
+
     print("\nDone.")
     return 0
 
 
 if __name__ == "__main__":
+    # Required for spawn watchdog children on some platforms.
+    mp.freeze_support()
     try:
         raise SystemExit(main())
     except Exception as exc:

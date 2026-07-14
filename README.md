@@ -47,20 +47,35 @@ pytest -q
 
 ## Google Colab
 
+Large HF/Xet downloads often stall on Colab. This repo downloads over **classic HTTP** (`HF_HUB_DISABLE_XET=1`), writes **only to local staging**, verifies against [`scripts/models.json`](scripts/models.json), then promotes complete files to **Google Drive** and symlinks into ComfyUI. Partials never land on Drive. If Hub HTTP stalls (&lt;1 MiB / 5 min), the downloader kills that attempt and falls back to resumable `aria2c`.
+
 Minimal setup on a fresh Colab GPU runtime:
 
 ```python
+from google.colab import drive
+drive.mount("/content/drive")
+
 %cd /content
-!git clone https://github.com/malihashar/headswap_V2.git
+!git clone https://github.com/malihashar/headswap_V2.git || true
 %cd /content/headswap_V2
+!git pull --ff-only
+
+# Recommended for rate limits / gated assets
+from huggingface_hub import login
+login()  # or: import os; os.environ["HF_TOKEN"] = "hf_..."
+
 !bash scripts/setup_colab.sh
+!python scripts/run_compare.py --gpu --limit 12
 ```
 
-`scripts/setup_colab.sh` is idempotent: installs ComfyUI (if needed), Python deps, and the required Klein + Qwen model weights under `/content/ComfyUI`. When it finishes:
+`scripts/setup_colab.sh` is idempotent:
 
-```bash
-python scripts/run_compare.py --gpu --limit 12
-```
+1. Requires Drive mounted at `/content/drive/MyDrive`
+2. Installs ComfyUI + `requirements.txt` (do **not** install `hf_xet`)
+3. Installs `aria2` for the HTTP resume fallback
+4. Downloads missing Klein/Qwen weights into `/content/_hf_dl_staging`, verifies size, promotes to `/content/drive/MyDrive/headswap_V2/models/…`, symlinks into `/content/ComfyUI/models/…`
+
+On a later runtime, complete Drive files are skipped and only re-linked.
 
 ## GPU run (Colab / RunPod)
 

@@ -1,0 +1,102 @@
+{
+  "flux-2-klein-4b-fp8.safetensors": {
+    "size": 4070624520,
+    "path": "diffusion_models",
+    "repo_id": "black-forest-labs/FLUX.2-klein-4b-fp8",
+    "repo_path": "flux-2-klein-4b-fp8.safetensors",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors",
+    "download_repo_id": null,
+    "set": "klein",
+    "required": true
+  },
+  "qwen_3_4b.safetensors": {
+    "size": 8044982048,
+    "path": "text_encoders",
+    "repo_id": "Comfy-Org/flux2-klein-4B",
+    "repo_path": "split_files/text_encoders/qwen_3_4b.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/flux2-klein-4B/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",
+    "download_repo_id": "Comfy-Org/vae-text-encorder-for-flux-klein-4b",
+    "set": "klein",
+    "required": true
+  },
+  "flux2-vae.safetensors": {
+    "size": 336213556,
+    "path": "vae",
+    "repo_id": "Comfy-Org/flux2-dev",
+    "repo_path": "split_files/vae/flux2-vae.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
+    "download_repo_id": null,
+    "set": "klein",
+    "required": true
+  },
+  "bfs_head_v1.1_optional_flux-klein_4b.safetensors": {
+    "size": 1478513544,
+    "path": "loras",
+    "repo_id": "Alissonerdx/BFS-Best-Face-Swap",
+    "repo_path": "bfs_head_v1.1_optional_flux-klein_4b.safetensors",
+    "url": "https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap/resolve/main/bfs_head_v1.1_optional_flux-klein_4b.safetensors",
+    "download_repo_id": null,
+    "set": "klein",
+    "required": false
+  },
+  "flux-2-klein-4b.safetensors": {
+    "size": 7751105712,
+    "path": "diffusion_models",
+    "repo_id": "Comfy-Org/flux2-klein-4B",
+    "repo_path": "split_files/diffusion_models/flux-2-klein-4b.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/flux2-klein-4B/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors",
+    "download_repo_id": "Comfy-Org/vae-text-encorder-for-flux-klein-4b",
+    "set": "klein",
+    "required": false
+  },
+  "qwen_image_edit_2511_fp8mixed.safetensors": {
+    "size": 20533762817,
+    "path": "diffusion_models",
+    "repo_id": "Comfy-Org/Qwen-Image-Edit_ComfyUI",
+    "repo_path": "split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/main/split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors",
+    "download_repo_id": null,
+    "set": "qwen",
+    "required": true
+  },
+  "qwen_image_vae.safetensors": {
+    "size": 253806246,
+    "path": "vae",
+    "repo_id": "Comfy-Org/Qwen-Image_ComfyUI",
+    "repo_path": "split_files/vae/qwen_image_vae.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors",
+    "download_repo_id": null,
+    "set": "qwen",
+    "required": true
+  },
+  "qwen_2.5_vl_7b_fp8_scaled.safetensors": {
+    "size": 9384670680,
+    "path": "text_encoders",
+    "repo_id": "Comfy-Org/Qwen-Image_ComfyUI",
+    "repo_path": "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+    "download_repo_id": null,
+    "set": "qwen",
+    "required": true
+  },
+  "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors": {
+    "size": 849608296,
+    "path": "loras",
+    "repo_id": "lightx2v/Qwen-Image-Edit-2511-Lightning",
+    "repo_path": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+    "url": "https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+    "download_repo_id": null,
+    "set": "qwen",
+    "required": true
+  },
+  "bfs_head_v5_2511_merged_version_rank_16_fp16.safetensors": {
+    "size": 307464216,
+    "path": "loras",
+    "repo_id": "Alissonerdx/BFS-Best-Face-Swap",
+    "repo_path": "bfs_head_v5_2511_merged_version_rank_16_fp16.safetensors",
+    "url": "https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap/resolve/main/bfs_head_v5_2511_merged_version_rank_16_fp16.safetensors",
+    "download_repo_id": null,
+    "set": "qwen",
+    "required": true
+  }
+}
