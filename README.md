@@ -45,6 +45,23 @@ python3 scripts/run_compare.py          # mock all pipelines + write results/COM
 pytest -q
 ```
 
+## Google Colab
+
+Minimal setup on a fresh Colab GPU runtime:
+
+```python
+%cd /content
+!git clone https://github.com/malihashar/headswap_V2.git
+%cd /content/headswap_V2
+!bash scripts/setup_colab.sh
+```
+
+`scripts/setup_colab.sh` is idempotent: installs ComfyUI (if needed), Python deps, and the required Klein + Qwen model weights under `/content/ComfyUI`. When it finishes:
+
+```bash
+python scripts/run_compare.py --gpu --limit 12
+```
+
 ## GPU run (Colab / RunPod)
 
 ```bash
