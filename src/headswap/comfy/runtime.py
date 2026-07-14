@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -26,15 +28,49 @@ def comfyui_path() -> Path:
     return base / "ComfyUI"
 
 
+def _ensure_event_loop() -> asyncio.AbstractEventLoop:
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
+
+
+def _ensure_prompt_server(loop: asyncio.AbstractEventLoop) -> Any:
+    """
+    Instantiate PromptServer exactly as ComfyUI main.start_comfyui does.
+
+    Custom nodes and some built-in extras register routes on PromptServer.instance.
+    That attribute only exists after PromptServer(loop) runs — importing nodes without
+    constructing the server produces: PromptServer has no attribute 'instance'.
+    """
+    import server
+
+    instance = getattr(server.PromptServer, "instance", None)
+    if instance is not None:
+        return instance
+    return server.PromptServer(loop)
+
+
 def bootstrap_comfy(init_custom_nodes: bool = False) -> dict[str, Any]:
-    """Import ComfyUI node mappings into this process (Colab/RunPod style)."""
+    """
+    Import ComfyUI node mappings into this process (Colab/RunPod style).
+
+    Boot order matches ComfyUI's start_comfyui():
+      1. create asyncio loop
+      2. construct PromptServer(loop)  → sets PromptServer.instance
+      3. nodes.init_extra_nodes(...)
+    """
     path = comfyui_path()
     if not path.exists():
         raise FileNotFoundError(
             f"ComfyUI not found at {path}. Set COMFYUI_PATH or run scripts/setup_comfyui.sh"
         )
 
-    # Drop conflicting modules
+    # Drop conflicting modules from a previous import / previous chdir
     for k in list(sys.modules.keys()):
         if k == "utils" or k.startswith("utils.") or k == "comfy" or k.startswith("comfy."):
             del sys.modules[k]
@@ -45,19 +81,59 @@ def bootstrap_comfy(init_custom_nodes: bool = False) -> dict[str, Any]:
     sys.path.insert(0, str(path))
     os.chdir(path)
 
-    import asyncio
-    import nodes
+    loop = _ensure_event_loop()
+    _ensure_prompt_server(loop)
 
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    import nodes
 
     loop.run_until_complete(
         nodes.init_extra_nodes(init_custom_nodes=init_custom_nodes, init_api_nodes=False)
     )
     return nodes.NODE_CLASS_MAPPINGS
+
+
+def invoke_node(node_cls: type, **kwargs: Any) -> Any:
+    """
+    Call a ComfyUI node class the way execution.py does.
+
+    Current ComfyUI mixes two node schemas:
+
+    * **V1** (legacy): ``FUNCTION = "method_name"`` → instantiate, call instance method.
+      Returns a plain ``tuple`` (or dict with ``result``).
+    * **V3** (``io.ComfyNode``): ``FUNCTION`` is the classproperty ``"EXECUTE_NORMALIZED"``
+      → call ``cls.EXECUTE_NORMALIZED(**kwargs)`` (wraps ``@classmethod execute``).
+      Returns ``io.NodeOutput`` (``.args`` / ``.result``).
+
+    This repository previously assumed every mapping had a classmethod ``.execute()``
+    (true for V3, false for V1 nodes like ``ConditioningZeroOut`` whose FUNCTION is
+    ``zero_out``). Always go through this helper (or ``NodeRuntime.call``).
+    """
+    func_name = getattr(node_cls, "FUNCTION", None)
+    if func_name is None:
+        raise TypeError(
+            f"Node class {getattr(node_cls, '__name__', node_cls)!r} has no FUNCTION; "
+            "not a ComfyUI node mapping"
+        )
+
+    # V3: FUNCTION resolves to EXECUTE_NORMALIZED / _ASYNC (see comfy_api.latest._io)
+    if func_name == "EXECUTE_NORMALIZED":
+        if hasattr(node_cls, "VALIDATE_CLASS"):
+            node_cls.VALIDATE_CLASS()
+        return node_cls.EXECUTE_NORMALIZED(**kwargs)
+    if func_name == "EXECUTE_NORMALIZED_ASYNC":
+        if hasattr(node_cls, "VALIDATE_CLASS"):
+            node_cls.VALIDATE_CLASS()
+        coro = node_cls.EXECUTE_NORMALIZED_ASYNC(**kwargs)
+        loop = _ensure_event_loop()
+        return loop.run_until_complete(coro)
+
+    # V1: FUNCTION is the instance method name (encode, zero_out, load_unet, ...)
+    instance = node_cls()
+    method = getattr(instance, func_name)
+    if inspect.iscoroutinefunction(method):
+        loop = _ensure_event_loop()
+        return loop.run_until_complete(method(**kwargs))
+    return method(**kwargs)
 
 
 class NodeRuntime:
@@ -67,6 +143,12 @@ class NodeRuntime:
         self.models: dict[str, Any] = {}
 
     def get_node(self, name: str):
+        """
+        Cached instance of a node class.
+
+        Prefer ``call()`` for execution. ``get_node`` remains useful when you need a
+        stable instance (rare); V3 nodes are classmethod-based and do not need one.
+        """
         if name not in self._cache:
             if name not in self.mappings:
                 raise KeyError(f"ComfyUI node '{name}' not found. Update ComfyUI?")
@@ -76,16 +158,42 @@ class NodeRuntime:
     def has(self, name: str) -> bool:
         return name in self.mappings
 
+    def call(self, name: str, **kwargs: Any) -> Any:
+        """Invoke node ``name`` with kwargs matching its INPUT_TYPES / schema."""
+        if name not in self.mappings:
+            raise KeyError(f"ComfyUI node '{name}' not found. Update ComfyUI?")
+        return invoke_node(self.mappings[name], **kwargs)
 
-def get_value_at_index(obj, index: int):
+
+def get_value_at_index(obj: Any, index: int):
+    """
+    Unwrap a node return value to output slot ``index``.
+
+    Handles V1 tuples, V1 ``{"result": (...)}`` dicts, and V3 ``NodeOutput`` (``.args``).
+    """
+    if obj is None:
+        raise TypeError("node returned None")
+
+    # V3 io.NodeOutput (and anything with .args tuple)
+    args = getattr(obj, "args", None)
+    if isinstance(args, tuple) and len(args) > index:
+        return args[index]
+
+    result = getattr(obj, "result", None)
+    if isinstance(result, tuple) and len(result) > index:
+        return result[index]
+
+    if isinstance(obj, dict):
+        if "result" in obj:
+            return obj["result"][index]
+        return obj[index]
+
     try:
         return obj[index]
-    except KeyError:
-        return obj["result"][index]
-    except TypeError:
-        if hasattr(obj, "args"):
-            return obj.args[index]
-        raise
+    except TypeError as exc:
+        raise TypeError(
+            f"Cannot index node return of type {type(obj)!r}; expected tuple/NodeOutput"
+        ) from exc
 
 
 def pil_to_comfy_tensor(im, torch):
@@ -109,8 +217,6 @@ def resolve_model_file(models_dir: Path, preferred: str, fallbacks: list[str] | 
     for name in candidates:
         if (models_dir / name).exists():
             return name
-        # also search recursively one level of category folders already included
-    # fuzzy: any file containing stem
     stem = Path(preferred).stem.split(".")[0]
     for p in models_dir.rglob("*.safetensors"):
         if stem in p.name or preferred in p.name:

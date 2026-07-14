@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
 
 from PIL import Image
 
@@ -57,28 +56,31 @@ class KleinMaskCropPipeline(BasePipeline):
         if key in rt.models:
             return rt.models[key]
 
-        unet = rt.get_node("UNETLoader").load_unet(unet_name=unet_name, weight_dtype="default")
+        unet = rt.call("UNETLoader", unet_name=unet_name, weight_dtype="default")
         model = get_value_at_index(unet, 0)
 
         strength = float(self.cfg.get("bfs_lora_strength", 0.0) or 0.0)
         lora_name = self.cfg.get("bfs_lora_name")
         if strength > 0 and lora_name:
-            # Search common lora subdirs by filename
             loras = models / "loras"
             resolved = resolve_model_file(loras, lora_name, fallbacks=[lora_name])
             model = get_value_at_index(
-                rt.get_node("LoraLoaderModelOnly").load_lora_model_only(
-                    model=model, lora_name=resolved, strength_model=strength
+                rt.call(
+                    "LoraLoaderModelOnly",
+                    model=model,
+                    lora_name=resolved,
+                    strength_model=strength,
                 ),
                 0,
             )
 
-        clip = rt.get_node("CLIPLoader").load_clip(
+        clip = rt.call(
+            "CLIPLoader",
             clip_name=self.cfg.get("clip_name", "qwen_3_4b.safetensors"),
             type=self.cfg.get("clip_type", "flux2"),
             device="default",
         )
-        vae = rt.get_node("VAELoader").load_vae(vae_name=self.cfg.get("vae_name", "flux2-vae.safetensors"))
+        vae = rt.call("VAELoader", vae_name=self.cfg.get("vae_name", "flux2-vae.safetensors"))
 
         bundle = {"model": model, "clip": get_value_at_index(clip, 0), "vae": get_value_at_index(vae, 0)}
         rt.models[key] = bundle
@@ -120,21 +122,21 @@ class KleinMaskCropPipeline(BasePipeline):
             body_t = pil_to_comfy_tensor(crop_work, torch)
             face_t = pil_to_comfy_tensor(face_ref, torch)
 
-            # Encode refs → chain ReferenceLatent (official Klein multi-ref pattern)
-            body_lat = rt.get_node("VAEEncode").encode(pixels=body_t, vae=bundle["vae"])
-            face_lat = rt.get_node("VAEEncode").encode(pixels=face_t, vae=bundle["vae"])
+            body_lat = rt.call("VAEEncode", pixels=body_t, vae=bundle["vae"])
+            face_lat = rt.call("VAEEncode", pixels=face_t, vae=bundle["vae"])
 
-            pos = rt.get_node("CLIPTextEncode").encode(text=prompt, clip=bundle["clip"])
+            pos = rt.call("CLIPTextEncode", text=prompt, clip=bundle["clip"])
             conditioning = get_value_at_index(pos, 0)
 
-            # Prefer ReferenceLatent node when available
+            # Official Klein multi-ref: chain ReferenceLatent(body) → ReferenceLatent(face)
             if rt.has("ReferenceLatent"):
-                # Chain: conditioning <- body <- face (Picture 1 / Picture 2)
-                ref1 = rt.mappings["ReferenceLatent"].execute(
+                ref1 = rt.call(
+                    "ReferenceLatent",
                     conditioning=conditioning,
                     latent=get_value_at_index(body_lat, 0),
                 )
-                ref2 = rt.mappings["ReferenceLatent"].execute(
+                ref2 = rt.call(
+                    "ReferenceLatent",
                     conditioning=get_value_at_index(ref1, 0),
                     latent=get_value_at_index(face_lat, 0),
                 )
@@ -143,59 +145,70 @@ class KleinMaskCropPipeline(BasePipeline):
                 positive = conditioning
 
             if neg.strip() and rt.has("CLIPTextEncode"):
-                neg_c = rt.get_node("CLIPTextEncode").encode(text=neg, clip=bundle["clip"])
+                neg_c = rt.call("CLIPTextEncode", text=neg, clip=bundle["clip"])
                 negative = get_value_at_index(neg_c, 0)
             elif rt.has("ConditioningZeroOut"):
                 negative = get_value_at_index(
-                    rt.mappings["ConditioningZeroOut"].execute(conditioning=positive), 0
+                    rt.call("ConditioningZeroOut", conditioning=positive), 0
                 )
             else:
                 negative = positive
 
             w, h = crop_work.size
             if rt.has("EmptyFlux2LatentImage"):
-                empty = rt.get_node("EmptyFlux2LatentImage").execute(width=w, height=h, batch_size=1)
+                empty = rt.call("EmptyFlux2LatentImage", width=w, height=h, batch_size=1)
                 latent_image = get_value_at_index(empty, 0)
             else:
-                # Fallback: use encoded body crop as starting latent
                 latent_image = get_value_at_index(body_lat, 0)
 
             steps = int(self.cfg.get("steps", 4))
             if rt.has("Flux2Scheduler"):
-                sigmas = rt.mappings["Flux2Scheduler"].execute(steps=steps, width=w, height=h)
-                sigmas = get_value_at_index(sigmas, 0)
-            else:
-                sched = rt.mappings["BasicScheduler"].execute(
-                    model=bundle["model"],
-                    scheduler=self.cfg.get("scheduler", "simple"),
-                    steps=steps,
-                    denoise=float(self.cfg.get("denoise", 1.0)),
+                sigmas = get_value_at_index(
+                    rt.call("Flux2Scheduler", steps=steps, width=w, height=h), 0
                 )
-                sigmas = get_value_at_index(sched, 0)
+            else:
+                sigmas = get_value_at_index(
+                    rt.call(
+                        "BasicScheduler",
+                        model=bundle["model"],
+                        scheduler=self.cfg.get("scheduler", "simple"),
+                        steps=steps,
+                        denoise=float(self.cfg.get("denoise", 1.0)),
+                    ),
+                    0,
+                )
 
-            sampler = rt.get_node("KSamplerSelect").get_sampler(
-                sampler_name=self.cfg.get("sampler", "euler")
+            sampler = get_value_at_index(
+                rt.call("KSamplerSelect", sampler_name=self.cfg.get("sampler", "euler")), 0
             )
-            noise = rt.get_node("RandomNoise").get_noise(noise_seed=int(self.cfg.get("seed", 46)))
-            guider = rt.get_node("CFGGuider").get_guider(
-                model=bundle["model"],
-                positive=positive,
-                negative=negative,
-                cfg=float(self.cfg.get("cfg", 1.0)),
+            noise = get_value_at_index(
+                rt.call("RandomNoise", noise_seed=int(self.cfg.get("seed", 46))), 0
             )
-            samples = rt.mappings["SamplerCustomAdvanced"].execute(
-                noise=get_value_at_index(noise, 0),
-                guider=get_value_at_index(guider, 0),
-                sampler=get_value_at_index(sampler, 0),
+            guider = get_value_at_index(
+                rt.call(
+                    "CFGGuider",
+                    model=bundle["model"],
+                    positive=positive,
+                    negative=negative,
+                    cfg=float(self.cfg.get("cfg", 1.0)),
+                ),
+                0,
+            )
+            samples = rt.call(
+                "SamplerCustomAdvanced",
+                noise=noise,
+                guider=guider,
+                sampler=sampler,
                 sigmas=sigmas,
                 latent_image=latent_image,
             )
-            decoded = rt.get_node("VAEDecode").decode(
-                samples=get_value_at_index(samples, 0), vae=bundle["vae"]
+            decoded = rt.call(
+                "VAEDecode",
+                samples=get_value_at_index(samples, 0),
+                vae=bundle["vae"],
             )
             edited_crop = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
 
-        # Stitch edited crop (resized to original crop box) back into body
         stitched = soft_composite(body_full, edited_crop, mask, box)
         stitched = lab_histogram_match_face(stitched, body_full, mask, strength=0.3)
 

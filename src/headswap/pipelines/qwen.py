@@ -30,15 +30,19 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict):
     if key in rt.models:
         return rt.models[key]
 
-    vae = rt.get_node("VAELoader").load_vae(vae_name=cfg["vae_name"])
-    clip = rt.get_node("CLIPLoader").load_clip(
-        clip_name=cfg["clip_name"], type=cfg.get("clip_type", "qwen_image"), device="default"
+    vae = rt.call("VAELoader", vae_name=cfg["vae_name"])
+    clip = rt.call(
+        "CLIPLoader",
+        clip_name=cfg["clip_name"],
+        type=cfg.get("clip_type", "qwen_image"),
+        device="default",
     )
-    unet = rt.get_node("UNETLoader").load_unet(unet_name=cfg["unet_name"], weight_dtype="default")
+    unet = rt.call("UNETLoader", unet_name=cfg["unet_name"], weight_dtype="default")
     model = get_value_at_index(unet, 0)
 
     model = get_value_at_index(
-        rt.get_node("LoraLoaderModelOnly").load_lora_model_only(
+        rt.call(
+            "LoraLoaderModelOnly",
             model=model,
             lora_name=cfg["headswap_lora_name"],
             strength_model=float(cfg.get("headswap_lora_strength", 1.0)),
@@ -48,7 +52,8 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict):
     lt = float(cfg.get("lightning_lora_strength", 0) or 0)
     if lt > 0 and cfg.get("lightning_lora_name"):
         model = get_value_at_index(
-            rt.get_node("LoraLoaderModelOnly").load_lora_model_only(
+            rt.call(
+                "LoraLoaderModelOnly",
                 model=model,
                 lora_name=cfg["lightning_lora_name"],
                 strength_model=lt,
@@ -58,15 +63,19 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict):
 
     if rt.has("ModelSamplingAuraFlow"):
         model = get_value_at_index(
-            rt.get_node("ModelSamplingAuraFlow").patch_aura(
-                model=model, shift=float(cfg.get("auraflow_shift", 5))
+            rt.call(
+                "ModelSamplingAuraFlow",
+                model=model,
+                shift=float(cfg.get("auraflow_shift", 5)),
             ),
             0,
         )
-    if "CFGNorm" in rt.mappings:
+    if rt.has("CFGNorm"):
         model = get_value_at_index(
-            rt.mappings["CFGNorm"].execute(
-                model=model, strength=float(cfg.get("cfg_norm_strength", 1.0))
+            rt.call(
+                "CFGNorm",
+                model=model,
+                strength=float(cfg.get("cfg_norm_strength", 1.0)),
             ),
             0,
         )
@@ -84,18 +93,19 @@ def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
     import torch
 
     with torch.inference_mode():
-        body_latent = rt.get_node("VAEEncode").encode(vae=bundle["vae"], pixels=body_t)
-        encode_cls = rt.mappings.get("TextEncodeQwenImageEditPlus")
-        if encode_cls is None:
+        body_latent = rt.call("VAEEncode", vae=bundle["vae"], pixels=body_t)
+        if not rt.has("TextEncodeQwenImageEditPlus"):
             raise KeyError("TextEncodeQwenImageEditPlus node missing — update ComfyUI")
-        pos = encode_cls.execute(
+        pos = rt.call(
+            "TextEncodeQwenImageEditPlus",
             clip=bundle["clip"],
             prompt=prompt,
             vae=bundle["vae"],
             image1=body_t,
             image2=face_t,
         )
-        neg = encode_cls.execute(
+        neg = rt.call(
+            "TextEncodeQwenImageEditPlus",
             clip=bundle["clip"],
             prompt=str(cfg.get("negative_prompt", "") or ""),
             vae=bundle["vae"],
@@ -104,43 +114,62 @@ def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
         )
         positive = get_value_at_index(pos, 0)
         negative = get_value_at_index(neg, 0)
-        if "FluxKontextMultiReferenceLatentMethod" in rt.mappings:
+        if rt.has("FluxKontextMultiReferenceLatentMethod"):
             positive = get_value_at_index(
-                rt.mappings["FluxKontextMultiReferenceLatentMethod"].execute(
-                    conditioning=positive, reference_latents_method="index_timestep_zero"
+                rt.call(
+                    "FluxKontextMultiReferenceLatentMethod",
+                    conditioning=positive,
+                    reference_latents_method="index_timestep_zero",
                 ),
                 0,
             )
             negative = get_value_at_index(
-                rt.mappings["FluxKontextMultiReferenceLatentMethod"].execute(
-                    conditioning=negative, reference_latents_method="index_timestep_zero"
+                rt.call(
+                    "FluxKontextMultiReferenceLatentMethod",
+                    conditioning=negative,
+                    reference_latents_method="index_timestep_zero",
                 ),
                 0,
             )
 
-        noise = rt.get_node("RandomNoise").get_noise(noise_seed=int(cfg.get("seed", 46)))
-        guider = rt.get_node("CFGGuider").get_guider(
-            model=bundle["model"],
-            positive=positive,
-            negative=negative,
-            cfg=float(cfg.get("cfg", 1.1)),
+        noise = get_value_at_index(
+            rt.call("RandomNoise", noise_seed=int(cfg.get("seed", 46))), 0
         )
-        sampler = rt.get_node("KSamplerSelect").get_sampler(sampler_name=cfg.get("sampler", "euler"))
-        sigmas = rt.mappings["BasicScheduler"].execute(
-            model=bundle["model"],
-            scheduler=cfg.get("scheduler", "simple"),
-            steps=int(cfg.get("steps", 6)),
-            denoise=float(cfg.get("denoise", 1.0)),
+        guider = get_value_at_index(
+            rt.call(
+                "CFGGuider",
+                model=bundle["model"],
+                positive=positive,
+                negative=negative,
+                cfg=float(cfg.get("cfg", 1.1)),
+            ),
+            0,
         )
-        samples = rt.mappings["SamplerCustomAdvanced"].execute(
-            noise=get_value_at_index(noise, 0),
-            guider=get_value_at_index(guider, 0),
-            sampler=get_value_at_index(sampler, 0),
-            sigmas=get_value_at_index(sigmas, 0),
+        sampler = get_value_at_index(
+            rt.call("KSamplerSelect", sampler_name=cfg.get("sampler", "euler")), 0
+        )
+        sigmas = get_value_at_index(
+            rt.call(
+                "BasicScheduler",
+                model=bundle["model"],
+                scheduler=cfg.get("scheduler", "simple"),
+                steps=int(cfg.get("steps", 6)),
+                denoise=float(cfg.get("denoise", 1.0)),
+            ),
+            0,
+        )
+        samples = rt.call(
+            "SamplerCustomAdvanced",
+            noise=noise,
+            guider=guider,
+            sampler=sampler,
+            sigmas=sigmas,
             latent_image=get_value_at_index(body_latent, 0),
         )
-        decoded = rt.get_node("VAEDecode").decode(
-            samples=get_value_at_index(samples, 0), vae=bundle["vae"]
+        decoded = rt.call(
+            "VAEDecode",
+            samples=get_value_at_index(samples, 0),
+            vae=bundle["vae"],
         )
         return comfy_tensor_to_pil(get_value_at_index(decoded, 0))
 
