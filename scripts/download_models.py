@@ -512,25 +512,128 @@ def aria2_download_to_staging(
     return staging_file
 
 
-def promote_to_store(staging_file: Path, dest: Path) -> None:
-    """Copy a verified complete local file onto the store (e.g. Drive). No partials."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".promoting")
+def promoting_path(dest: Path) -> Path:
+    return dest.with_name(dest.name + ".promoting")
+
+
+def same_filesystem(src: Path, dst_parent: Path) -> bool:
+    """True when src and destination parent share a device (rename/move is free)."""
+    dst_parent.mkdir(parents=True, exist_ok=True)
+    return os.stat(src).st_dev == os.stat(dst_parent).st_dev
+
+
+def resume_or_clear_promoting(dest: Path, expected_size: int) -> bool:
+    """
+    Resume an interrupted promote on the store side.
+
+    - complete .promoting (size == expected) → rename to final dest
+    - incomplete .promoting (size < expected) → delete it
+    Returns True when dest is a complete final file afterward.
+    """
+    tmp = promoting_path(dest)
+    if not tmp.exists() and not tmp.is_symlink():
+        return is_complete(dest, expected_size)
+
     try:
-        if tmp.exists():
+        size = tmp.stat().st_size
+    except OSError as exc:
+        print(f"  resume: cannot stat {tmp}: {exc} — removing")
+        try:
             tmp.unlink()
-        print(f"  promote: copying {staging_file} → {tmp}")
-        shutil.copy2(staging_file, tmp)
-        if tmp.stat().st_size != staging_file.stat().st_size:
-            raise RuntimeError("promote size mismatch")
+        except OSError:
+            pass
+        return is_complete(dest, expected_size)
+
+    if size == expected_size:
+        print(f"  resume: complete .promoting ({size} bytes) → {dest.name}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() or dest.is_symlink():
+            try:
+                dest.unlink()
+            except OSError as exc:
+                print(f"  warn: could not replace existing dest {dest}: {exc}")
         os.replace(tmp, dest)
+        return wait_until_complete(dest, expected_size, attempts=5, delay_sec=0.5)
+
+    print(
+        f"  resume: incomplete .promoting ({size} bytes < {expected_size}) — deleting {tmp}"
+    )
+    try:
+        tmp.unlink()
+    except OSError as exc:
+        print(f"  warn: could not delete incomplete .promoting: {exc}")
+    return is_complete(dest, expected_size)
+
+
+def promote_to_store(staging_file: Path, dest: Path, expected_size: int) -> None:
+    """
+    Move a verified staging file into the persistent store.
+
+    Same filesystem (e.g. Kaggle /kaggle/working staging + models):
+      staging → .promoting → final  via os.replace (no extra disk)
+
+    Cross filesystem (e.g. Colab local → Google Drive):
+      shutil.copy2(staging → .promoting) then os.replace(.promoting → final)
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = promoting_path(dest)
+
+    # Interrupted prior promote: finish or clear before writing again.
+    if resume_or_clear_promoting(dest, expected_size):
+        print(f"  promote: dest already complete after .promoting resume → {dest}")
+        return
+
+    if not staging_file.exists():
+        raise RuntimeError(f"staging file missing for promote: {staging_file}")
+    if staging_file.stat().st_size != expected_size:
+        raise RuntimeError(
+            f"staging size mismatch before promote: "
+            f"got {staging_file.stat().st_size}, expected {expected_size}"
+        )
+
+    try:
+        if same_filesystem(staging_file, dest.parent):
+            print(
+                f"  promote: same filesystem (dev match) — "
+                f"rename {staging_file.name} → {tmp.name} → {dest.name}"
+            )
+            # Atomic on the same device; peeks at ~0 extra space.
+            os.replace(staging_file, tmp)
+            if tmp.stat().st_size != expected_size:
+                raise RuntimeError(
+                    f"promote size mismatch after rename: "
+                    f"got {tmp.stat().st_size}, expected {expected_size}"
+                )
+            os.replace(tmp, dest)
+        else:
+            print(
+                f"  promote: cross-filesystem — "
+                f"copy2 {staging_file} → {tmp} then rename to {dest.name}"
+            )
+            if tmp.exists():
+                tmp.unlink()
+            shutil.copy2(staging_file, tmp)
+            if tmp.stat().st_size != expected_size:
+                raise RuntimeError(
+                    f"promote size mismatch after copy2: "
+                    f"got {tmp.stat().st_size}, expected {expected_size}"
+                )
+            os.replace(tmp, dest)
     except Exception:
+        # Leave a complete .promoting for resume; drop incomplete ones.
         if tmp.exists():
             try:
-                tmp.unlink()
+                if tmp.stat().st_size == expected_size:
+                    print(f"  promote: left complete .promoting for resume: {tmp}")
+                else:
+                    print(f"  promote: removing incomplete .promoting after error: {tmp}")
+                    tmp.unlink()
             except OSError:
                 pass
         raise
+
+    if not wait_until_complete(dest, expected_size, attempts=10, delay_sec=0.5):
+        raise RuntimeError(f"promote finished but dest incomplete: {dest}")
     print(f"  promoted → {dest} ({dest.stat().st_size} bytes)")
 
 
@@ -750,6 +853,17 @@ def ensure_artifact(
     comfy_file = comfy_path_for(comfy, art)
     staging_dir = Path(staging_dir)
 
+    # Resume interrupted cross-FS promotes left as dest.safetensors.promoting
+    if resume_or_clear_promoting(store_file, art.size):
+        print(f"  store complete via .promoting resume ({art.size} bytes)")
+        return _finish_promoted_artifact(
+            art,
+            staging_file=staging_dir / art.filename,
+            staging_dir=staging_dir,
+            store_file=store_file,
+            comfy_file=comfy_file,
+        )
+
     if is_complete(store_file, art.size) or wait_until_complete(store_file, art.size, attempts=3):
         print(f"  store complete ({art.size} bytes) — skip download")
         return _finish_promoted_artifact(
@@ -804,9 +918,9 @@ def ensure_artifact(
     last_err: Exception | None = None
     for i, (name, fn) in enumerate(steps, 1):
         # Another attempt (or prior flaky promote) may already have completed the store.
-        if is_complete(store_file, art.size) or wait_until_complete(
-            store_file, art.size, attempts=3
-        ):
+        if resume_or_clear_promoting(store_file, art.size) or is_complete(
+            store_file, art.size
+        ) or wait_until_complete(store_file, art.size, attempts=3):
             print(f"  store already complete before attempt {i} — cleaning staging")
             return _finish_promoted_artifact(
                 art,
@@ -824,12 +938,12 @@ def ensure_artifact(
             staging_file = fn()
             if not is_complete(staging_file, art.size):
                 raise RuntimeError("staging incomplete after backend returned")
-            # promote uses shutil.copy2 — staging .safetensors remains until finally.
-            promote_to_store(staging_file, store_file)
+            # Same-FS: rename staging→.promoting→final (no 2× disk).
+            # Cross-FS: copy2 into .promoting then rename (Colab→Drive).
+            promote_to_store(staging_file, store_file, expected_size=art.size)
             if not wait_until_complete(store_file, art.size, attempts=15, delay_sec=1.0):
                 raise RuntimeError(
-                    f"store incomplete after promote: {store_file} "
-                    f"(staging was {staging_file.stat().st_size} bytes)"
+                    f"store incomplete after promote: {store_file}"
                 )
             promoted_ok = True
             try:
@@ -840,16 +954,17 @@ def ensure_artifact(
         except Exception as exc:
             last_err = exc
             print(f"  attempt {i} failed: {exc}")
-            if is_complete(store_file, art.size) or wait_until_complete(
-                store_file, art.size, attempts=5, delay_sec=1.0
-            ):
+            if resume_or_clear_promoting(store_file, art.size) or is_complete(
+                store_file, art.size
+            ) or wait_until_complete(store_file, art.size, attempts=5, delay_sec=1.0):
                 promoted_ok = True
             else:
                 continue
         finally:
-            # Runs after successful shutil.copy2 promote even if link_into_comfy fails.
+            # Runs after successful promote even if link_into_comfy fails.
+            # Same-FS rename may already have removed staging_file; cleanup is idempotent.
             if promoted_ok:
-                print("  finally: delete staging .safetensors after copy2 promote")
+                print("  finally: delete leftover staging after promote")
                 cleanup_staging_for_artifact(
                     art,
                     staging_dir,
@@ -869,8 +984,11 @@ def default_store_dir(comfy: Path) -> Path:
     env = os.environ.get("HEADSWAP_MODEL_STORE")
     if env:
         return Path(env)
-    if DEFAULT_DRIVE_STORE.parent.exists() or Path("/content/drive/MyDrive").exists():
+    if Path("/content/drive/MyDrive").exists():
         return DEFAULT_DRIVE_STORE
+    # Kaggle: keep store on the same volume as staging (/kaggle/working).
+    if Path("/kaggle/working").exists():
+        return Path("/kaggle/working/models")
     return comfy / "models"
 
 
@@ -880,6 +998,8 @@ def default_staging_dir() -> Path:
         return Path(env)
     if _on_colab():
         return DEFAULT_STAGING
+    if Path("/kaggle/working").exists():
+        return Path("/kaggle/working/_hf_dl_staging")
     return Path("/tmp/headswap_hf_staging")
 
 
