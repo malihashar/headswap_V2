@@ -352,41 +352,129 @@ def _hub_worker(
         )
     dest = Path(staging_file)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Prefer hardlink/rename into the flat staging name so we do not double disk
-    # usage (hub cache blob + full staging copy) on Kaggle's tight /kaggle/working.
+    # Prefer rename/hardlink of the *resolved* blob into the flat staging name so we
+    # do not double disk usage on Kaggle's tight /kaggle/working.
     place_file_without_doubling(cached_path, dest, expected_size=expected_size)
+
+
+def _same_inode(a: Path, b: Path) -> bool:
+    try:
+        sa, sb = a.stat(), b.stat()
+        return sa.st_ino == sb.st_ino and sa.st_dev == sb.st_dev
+    except OSError:
+        return False
+
+
+def _verify_placed_dest(dest: Path, expected_size: int) -> None:
+    """Destination must exist and match size before place_file_without_doubling returns."""
+    if not dest.exists():
+        # Distinguish broken symlink (path present as symlink) from missing path.
+        if dest.is_symlink():
+            raise FileNotFoundError(
+                f"place destination is a broken symlink (relative HF snapshot link?): {dest}"
+            )
+        raise FileNotFoundError(f"place destination missing after placement: {dest}")
+    got = dest.stat().st_size
+    if got != expected_size:
+        raise SystemExit(
+            f"Staging place size mismatch: got {got}, expected {expected_size} at {dest}"
+        )
 
 
 def place_file_without_doubling(src: Path, dest: Path, *, expected_size: int) -> None:
     """
     Put src at dest without a full extra copy when possible.
 
-    Order: hardlink → same-device rename → copy2 (last resort / cross-device).
+    Hugging Face cache paths are usually *relative symlinks* into blobs/. Hardlinking
+    or renaming that symlink into another directory keeps the same relative target and
+    produces a broken link at dest — dest.stat() then raises FileNotFoundError.
+    Always resolve to the real blob before placing.
+
+    Fallback order:
+      1. os.replace / shutil.move (same device, zero extra space)
+      2. hardlink of the resolved blob (zero extra space; keeps hub cache name)
+      3. shutil.copy2 only when cross-device (EXDEV) or link unsupported
     """
-    if dest.exists() or dest.is_symlink():
-        if dest.resolve() == src.resolve() and dest.stat().st_size == expected_size:
-            return
-        dest.unlink()
+    src = Path(src)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if not src.exists():
+        raise FileNotFoundError(f"place source missing: {src}")
+
+    # Resolve snapshot symlink → real blob before any link/rename/copy.
     try:
-        os.link(src, dest)
-        print(f"  place: hardlinked {src} → {dest}")
-    except OSError:
-        try:
-            # Same device only; raises EXDEV across filesystems.
-            os.replace(src, dest)
-            print(f"  place: renamed {src} → {dest}")
-        except OSError as exc:
-            if getattr(exc, "errno", None) != errno.EXDEV:
-                # rename failed for another reason; fall back to copy
-                print(f"  place: rename failed ({exc}); copy2 fallback")
-            else:
-                print(f"  place: cross-device EXDEV; copy2 fallback")
-            shutil.copy2(src, dest)
-            print(f"  place: copied {src} → {dest}")
-    if dest.stat().st_size != expected_size:
+        src_real = src.resolve(strict=True)
+    except OSError as exc:
+        raise FileNotFoundError(f"place source could not be resolved: {src}") from exc
+
+    src_size = src_real.stat().st_size
+    if src_size != expected_size:
         raise SystemExit(
-            f"Staging place size mismatch: got {dest.stat().st_size}, expected {expected_size}"
+            f"place source size mismatch: got {src_size}, expected {expected_size} at {src_real}"
         )
+
+    # Already correctly placed (regular file with expected size).
+    if dest.exists() and not dest.is_symlink() and dest.stat().st_size == expected_size:
+        print(f"  place: already present {dest} ({expected_size} bytes)")
+        _verify_placed_dest(dest, expected_size)
+        return
+
+    # Remove a preexisting staging name. Never unlink src_real itself.
+    if dest.exists() or dest.is_symlink():
+        if _same_inode(dest, src_real):
+            # Shared inode + wrong size is unexpected; do not unlink src_real via dest.
+            raise RuntimeError(
+                f"place dest shares inode with source but is not usable: {dest}"
+            )
+        print(f"  place: removing preexisting {dest}")
+        dest.unlink()
+
+    placed_how: str | None = None
+    last_exc: BaseException | None = None
+
+    # 1) Same-device rename/move of the real blob.
+    try:
+        os.replace(src_real, dest)
+        placed_how = "renamed"
+        print(f"  place: renamed {src_real} → {dest}")
+    except OSError as replace_exc:
+        last_exc = replace_exc
+        if getattr(replace_exc, "errno", None) != errno.EXDEV:
+            try:
+                shutil.move(str(src_real), str(dest))
+                placed_how = "moved"
+                print(f"  place: moved {src_real} → {dest}")
+            except OSError as move_exc:
+                last_exc = move_exc
+                print(f"  place: rename/move failed ({move_exc}); trying hardlink")
+
+    # 2) Hardlink the *resolved blob* (not the snapshot symlink).
+    if placed_how is None:
+        try:
+            try:
+                os.link(src_real, dest, follow_symlinks=True)
+            except TypeError:
+                os.link(src_real, dest)
+            placed_how = "hardlinked"
+            print(f"  place: hardlinked {src_real} → {dest}")
+        except OSError as link_exc:
+            last_exc = link_exc
+            # 3) Copy only when rename and hardlink cannot work.
+            print(f"  place: hardlink failed ({link_exc}); copy2 fallback")
+            try:
+                shutil.copy2(src_real, dest)
+            except OSError as copy_exc:
+                raise RuntimeError(
+                    f"place failed for {src_real} → {dest}; "
+                    f"last errors rename/move/link={last_exc}, copy={copy_exc}"
+                ) from copy_exc
+            placed_how = "copied"
+            print(f"  place: copied {src_real} → {dest}")
+
+    # Do not rename/remove dest after placement. Verify existence first, then size.
+    _verify_placed_dest(dest, expected_size)
+    print(f"  place: verified {dest} via {placed_how} ({expected_size} bytes)")
 
 
 def hub_download_to_staging(
