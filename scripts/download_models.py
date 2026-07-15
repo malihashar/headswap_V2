@@ -19,6 +19,7 @@ A stall watchdog kills any backend that transfers <1 MiB in --stall-window-sec
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import multiprocessing as mp
 import os
@@ -351,10 +352,41 @@ def _hub_worker(
         )
     dest = Path(staging_file)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Copy into flat staging name (still local disk only).
-    shutil.copy2(cached_path, dest)
+    # Prefer hardlink/rename into the flat staging name so we do not double disk
+    # usage (hub cache blob + full staging copy) on Kaggle's tight /kaggle/working.
+    place_file_without_doubling(cached_path, dest, expected_size=expected_size)
+
+
+def place_file_without_doubling(src: Path, dest: Path, *, expected_size: int) -> None:
+    """
+    Put src at dest without a full extra copy when possible.
+
+    Order: hardlink → same-device rename → copy2 (last resort / cross-device).
+    """
+    if dest.exists() or dest.is_symlink():
+        if dest.resolve() == src.resolve() and dest.stat().st_size == expected_size:
+            return
+        dest.unlink()
+    try:
+        os.link(src, dest)
+        print(f"  place: hardlinked {src} → {dest}")
+    except OSError:
+        try:
+            # Same device only; raises EXDEV across filesystems.
+            os.replace(src, dest)
+            print(f"  place: renamed {src} → {dest}")
+        except OSError as exc:
+            if getattr(exc, "errno", None) != errno.EXDEV:
+                # rename failed for another reason; fall back to copy
+                print(f"  place: rename failed ({exc}); copy2 fallback")
+            else:
+                print(f"  place: cross-device EXDEV; copy2 fallback")
+            shutil.copy2(src, dest)
+            print(f"  place: copied {src} → {dest}")
     if dest.stat().st_size != expected_size:
-        raise SystemExit("Staging copy size mismatch")
+        raise SystemExit(
+            f"Staging place size mismatch: got {dest.stat().st_size}, expected {expected_size}"
+        )
 
 
 def hub_download_to_staging(
@@ -519,7 +551,29 @@ def promoting_path(dest: Path) -> Path:
 def same_filesystem(src: Path, dst_parent: Path) -> bool:
     """True when src and destination parent share a device (rename/move is free)."""
     dst_parent.mkdir(parents=True, exist_ok=True)
-    return os.stat(src).st_dev == os.stat(dst_parent).st_dev
+    try:
+        src_dev = os.stat(src).st_dev
+        dst_dev = os.stat(dst_parent).st_dev
+    except OSError as exc:
+        print(f"  same_filesystem: stat failed ({exc}); assuming different devices")
+        return False
+    same = src_dev == dst_dev
+    print(f"  same_filesystem: src_dev={src_dev} dst_dev={dst_dev} → {same}")
+    # Kaggle: both under /kaggle/working almost always share a volume even when
+    # bind-mount quirks confuse callers — still trust st_dev when it matches.
+    if not same:
+        try:
+            sr = str(src.resolve())
+            dr = str(dst_parent.resolve())
+            if sr.startswith("/kaggle/working/") and dr.startswith("/kaggle/working/"):
+                print(
+                    "  same_filesystem: both under /kaggle/working — "
+                    "forcing same-FS rename path"
+                )
+                return True
+        except OSError:
+            pass
+    return same
 
 
 def resume_or_clear_promoting(dest: Path, expected_size: int) -> bool:
@@ -567,13 +621,11 @@ def resume_or_clear_promoting(dest: Path, expected_size: int) -> bool:
 
 def promote_to_store(staging_file: Path, dest: Path, expected_size: int) -> None:
     """
-    Move a verified staging file into the persistent store.
+    Move a verified staging file into the persistent store without doubling disk
+    when staging and store share a volume (Kaggle /kaggle/working).
 
-    Same filesystem (e.g. Kaggle /kaggle/working staging + models):
-      staging → .promoting → final  via os.replace (no extra disk)
-
-    Cross filesystem (e.g. Colab local → Google Drive):
-      shutil.copy2(staging → .promoting) then os.replace(.promoting → final)
+    Always try rename first (os.replace / shutil.move). Only fall back to
+    shutil.copy2 when the OS reports EXDEV (cross-device), e.g. Colab → Drive.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = promoting_path(dest)
@@ -591,36 +643,68 @@ def promote_to_store(staging_file: Path, dest: Path, expected_size: int) -> None
             f"got {staging_file.stat().st_size}, expected {expected_size}"
         )
 
+    # Log device ids for debugging; do not trust them alone — try rename first.
+    same_filesystem(staging_file, dest.parent)
+
     try:
-        if same_filesystem(staging_file, dest.parent):
-            print(
-                f"  promote: same filesystem (dev match) — "
-                f"rename {staging_file.name} → {tmp.name} → {dest.name}"
-            )
-            # Atomic on the same device; peeks at ~0 extra space.
+        print(f"  promote: trying ZERO-COPY rename {staging_file} → {tmp}")
+        try:
             os.replace(staging_file, tmp)
-            if tmp.stat().st_size != expected_size:
-                raise RuntimeError(
-                    f"promote size mismatch after rename: "
-                    f"got {tmp.stat().st_size}, expected {expected_size}"
-                )
-            os.replace(tmp, dest)
-        else:
-            print(
-                f"  promote: cross-filesystem — "
-                f"copy2 {staging_file} → {tmp} then rename to {dest.name}"
+        except OSError as exc:
+            if getattr(exc, "errno", None) == errno.EXDEV:
+                raise  # handled below as cross-device
+            print(f"  promote: os.replace failed ({exc}); trying shutil.move")
+            shutil.move(str(staging_file), str(tmp))
+
+        if tmp.stat().st_size != expected_size:
+            raise RuntimeError(
+                f"promote size mismatch after rename: "
+                f"got {tmp.stat().st_size}, expected {expected_size}"
             )
+        print(f"  promote: rename {tmp} → {dest}")
+        os.replace(tmp, dest)
+    except OSError as exc:
+        if getattr(exc, "errno", None) != errno.EXDEV:
+            # Leave complete .promoting for resume; drop incomplete.
             if tmp.exists():
-                tmp.unlink()
+                try:
+                    if tmp.stat().st_size == expected_size:
+                        print(f"  promote: left complete .promoting for resume: {tmp}")
+                    else:
+                        print(f"  promote: removing incomplete .promoting: {tmp}")
+                        tmp.unlink()
+                except OSError:
+                    pass
+            raise
+
+        print(
+            f"  promote: CROSS-DEVICE (EXDEV) — copy2 "
+            f"{staging_file} → {tmp} then rename to {dest.name}"
+        )
+        if tmp.exists():
+            tmp.unlink()
+        try:
             shutil.copy2(staging_file, tmp)
-            if tmp.stat().st_size != expected_size:
+        except OSError as copy_exc:
+            if getattr(copy_exc, "errno", None) == errno.ENOSPC:
                 raise RuntimeError(
-                    f"promote size mismatch after copy2: "
-                    f"got {tmp.stat().st_size}, expected {expected_size}"
-                )
-            os.replace(tmp, dest)
+                    "No space left while copy2-promoting across devices. "
+                    "On Kaggle keep staging and store under /kaggle/working "
+                    "so promote can rename instead of copy. "
+                    f"staging={staging_file} dest={dest}"
+                ) from copy_exc
+            raise
+        if tmp.stat().st_size != expected_size:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"promote size mismatch after copy2: "
+                f"got {tmp.stat().st_size}, expected {expected_size}"
+            )
+        os.replace(tmp, dest)
     except Exception:
-        # Leave a complete .promoting for resume; drop incomplete ones.
         if tmp.exists():
             try:
                 if tmp.stat().st_size == expected_size:
@@ -793,6 +877,12 @@ def link_into_comfy(store_file: Path, comfy_file: Path) -> None:
         return
     except OSError:
         pass
+    # Never copy2 multi-GB weights on the same volume (Kaggle ENOSPC).
+    if same_filesystem(store_file, comfy_file.parent):
+        raise RuntimeError(
+            f"Could not symlink/hardlink {store_file} → {comfy_file} on the same "
+            "filesystem; refusing copy2 to avoid doubling disk usage."
+        )
     shutil.copy2(store_file, comfy_file)
     print(f"  copied → {comfy_file}")
 
@@ -806,9 +896,9 @@ def _finish_promoted_artifact(
     comfy_file: Path,
 ) -> Path:
     """
-    After a successful promote (shutil.copy2 into the store):
-      try:    create Comfy symlink/link/copy from the store file
-      finally: always delete staging .safetensors + _hub_cache
+    After a successful promote into the store:
+      try:    create Comfy symlink/link from the store file
+      finally: always delete leftover staging .safetensors + _hub_cache
 
     Cleanup runs even if symlink creation or other post-promote steps fail.
     """
