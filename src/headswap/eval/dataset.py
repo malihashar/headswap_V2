@@ -127,6 +127,101 @@ def generate_synthetic_eval_set(
     return manifest_path
 
 
+def custom_root(project_root: Path | None = None) -> Path:
+    if project_root is None:
+        from headswap.config import project_root as pr
+
+        project_root = pr()
+    return Path(project_root) / "data" / "custom"
+
+
+def prepare_custom_eval_set(
+    custom_dir: Path | None = None,
+    root: Path | None = None,
+    *,
+    body_name: str = "body.png",
+    face_name: str = "face.png",
+    pair_id: str = "custom_001",
+) -> Path:
+    """
+    Build a 1-pair eval set from real photos in data/custom/.
+
+    Expected layout:
+      data/custom/body.png  — destination / body image
+      data/custom/face.png  — source face / head image
+
+    Copies into the standard eval layout (data/eval/bodies|faces + pairs.json)
+    so run_eval / run_compare keep working unchanged.
+    """
+    from headswap.config import project_root as pr
+
+    custom_dir = Path(custom_dir) if custom_dir else custom_root()
+    root = root or eval_root()
+    body_src = custom_dir / body_name
+    face_src = custom_dir / face_name
+    if not body_src.is_file():
+        raise FileNotFoundError(
+            f"Missing body image: {body_src}\n"
+            f"Place the destination photo at data/custom/{body_name}"
+        )
+    if not face_src.is_file():
+        raise FileNotFoundError(
+            f"Missing face image: {face_src}\n"
+            f"Place the source face photo at data/custom/{face_name}"
+        )
+
+    bodies = root / "bodies"
+    faces = root / "faces"
+    bodies.mkdir(parents=True, exist_ok=True)
+    faces.mkdir(parents=True, exist_ok=True)
+
+    # Normalize to RGB PNG so downstream code always gets a consistent format.
+    body_dst = bodies / f"{pair_id}.png"
+    face_dst = faces / f"{pair_id}.png"
+    Image.open(body_src).convert("RGB").save(body_dst)
+    Image.open(face_src).convert("RGB").save(face_dst)
+
+    pairs = [
+        {
+            "id": pair_id,
+            "body": str(body_dst.relative_to(root)),
+            "face": str(face_dst.relative_to(root)),
+            "difficulty": "real",
+            "tags": ["custom", "real_photo"],
+        }
+    ]
+    try:
+        custom_rel = str(custom_dir.relative_to(pr()))
+    except ValueError:
+        custom_rel = str(custom_dir)
+    manifest = {
+        "version": 1,
+        "description": (
+            f"Custom 1-pair eval set from {custom_rel} "
+            f"({body_name} → body, {face_name} → face)."
+        ),
+        "n_pairs": 1,
+        "source_custom_dir": str(custom_dir),
+        "pairs": pairs,
+    }
+    manifest_path = root / "pairs.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    (root / "README.md").write_text(
+        "# Eval set (custom)\n\n"
+        f"Single real pair prepared from `{custom_dir}/`.\n\n"
+        f"- body: `{body_name}` → `bodies/{pair_id}.png`\n"
+        f"- face: `{face_name}` → `faces/{pair_id}.png`\n\n"
+        "Regenerate with:\n"
+        "```bash\n"
+        "python scripts/prepare_eval_set.py --custom\n"
+        "```\n"
+    )
+    print(f"Prepared 1 custom pair → {manifest_path}")
+    print(f"  body: {body_src} → {body_dst}")
+    print(f"  face: {face_src} → {face_dst}")
+    return manifest_path
+
+
 def load_pairs(root: Path | None = None) -> list[dict[str, Any]]:
     root = root or eval_root()
     manifest = root / "pairs.json"
@@ -148,13 +243,41 @@ def load_pairs(root: Path | None = None) -> list[dict[str, Any]]:
 def main_prepare():
     import argparse
 
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--n", type=int, default=24)
-    ap.add_argument("--out", type=str, default=None)
+    ap = argparse.ArgumentParser(
+        description="Prepare head-swap eval pairs (synthetic or custom real photos)."
+    )
+    ap.add_argument("--n", type=int, default=24, help="Synthetic pair count (ignored with --custom).")
+    ap.add_argument("--out", type=str, default=None, help="Eval root (default: data/eval).")
+    ap.add_argument(
+        "--custom",
+        nargs="?",
+        const="data/custom",
+        default=None,
+        help=(
+            "Build a 1-pair eval set from real photos. "
+            "Optional path to the custom dir (default: data/custom). "
+            "Expects body.png + face.png inside."
+        ),
+    )
     args = ap.parse_args()
     root = Path(args.out) if args.out else None
-    path = generate_synthetic_eval_set(root, n_pairs=args.n)
+    if args.custom is not None:
+        path = prepare_custom_eval_set(
+            custom_dir=_resolve_project_path(Path(args.custom)),
+            root=root,
+        )
+    else:
+        path = generate_synthetic_eval_set(root, n_pairs=args.n)
     print(f"Wrote {path}")
+
+
+def _resolve_project_path(rel: Path) -> Path:
+    from headswap.config import project_root as pr
+
+    p = Path(rel)
+    if p.is_absolute():
+        return p
+    return pr() / p
 
 
 if __name__ == "__main__":

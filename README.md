@@ -45,6 +45,26 @@ python3 scripts/run_compare.py          # mock all pipelines + write results/COM
 pytest -q
 ```
 
+### Custom real photos (1 pair)
+
+Place your images at:
+
+```text
+data/custom/body.png   # destination / body
+data/custom/face.png   # source face / head
+```
+
+Then:
+
+```bash
+python3 scripts/prepare_eval_set.py --custom
+python3 scripts/run_compare.py --gpu --limit 1
+# or a single pipeline:
+python3 -m headswap.cli --config configs/klein4b.yaml --limit 1
+```
+
+Outputs land under `results/<pipeline>/images/custom_001/` (`result.png`, debug crops/masks, plus `metrics.json`).
+
 ## Google Colab
 
 Large HF/Xet downloads often stall on Colab. This repo downloads over **classic HTTP** (`HF_HUB_DISABLE_XET=1`), writes **only to local staging**, verifies against [`scripts/models.json`](scripts/models.json), then promotes complete files to **Google Drive** and symlinks into ComfyUI. Partials never land on Drive. If Hub HTTP stalls (&lt;1 MiB / 5 min), the downloader kills that attempt and falls back to resumable `aria2c`.
