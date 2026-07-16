@@ -45,6 +45,14 @@ class StallError(RuntimeError):
     """Raised when a download backend transfers too few bytes in the stall window."""
 
 
+class NoSpaceError(RuntimeError):
+    """Raised when a download fails with errno.ENOSPC (no space left on device)."""
+
+
+# Extra free space required beyond the artifact size before starting a download.
+DEFAULT_FREE_SPACE_MARGIN_BYTES = 2 * 1024**3  # 2 GiB
+
+
 @dataclass(frozen=True)
 class Artifact:
     filename: str
@@ -273,6 +281,173 @@ def _bytes_under(root: Path, patterns: list[str] | None = None) -> int:
     return total
 
 
+def format_bytes(n: int) -> str:
+    """Human-readable byte size for logs."""
+    n = int(n)
+    for unit, div in (("GiB", 1024**3), ("MiB", 1024**2), ("KiB", 1024)):
+        if abs(n) >= div:
+            return f"{n / div:.2f} {unit}"
+    return f"{n} B"
+
+
+def print_disk_usage(path: Path) -> Any:
+    """Log shutil.disk_usage for path (or its nearest existing parent). Returns usage."""
+    probe = Path(path)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    usage = shutil.disk_usage(probe if probe.exists() else Path("."))
+    print(
+        f"  disk: path={path} free={format_bytes(usage.free)} "
+        f"used={format_bytes(usage.used)} total={format_bytes(usage.total)}"
+    )
+    return usage
+
+
+def require_free_space(
+    path: Path,
+    needed_bytes: int,
+    *,
+    safety_margin_bytes: int = DEFAULT_FREE_SPACE_MARGIN_BYTES,
+) -> None:
+    """
+    Abort before download if free space < needed_bytes + safety_margin.
+
+    Raises NoSpaceError with a clear message instead of starting a doomed download.
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    usage = print_disk_usage(path)
+    required = int(needed_bytes) + int(safety_margin_bytes)
+    if usage.free < required:
+        raise NoSpaceError(
+            f"Not enough free space to download safely under {path}: "
+            f"free={format_bytes(usage.free)}, "
+            f"need file={format_bytes(needed_bytes)} + "
+            f"margin={format_bytes(safety_margin_bytes)} "
+            f"(total {format_bytes(required)}). "
+            f"Free disk space and retry."
+        )
+
+
+def _is_enospc(exc: BaseException | None) -> bool:
+    """True if exc (or its cause chain) is an ENOSPC / no-space failure."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, NoSpaceError):
+            return True
+        if isinstance(cur, OSError) and getattr(cur, "errno", None) == errno.ENOSPC:
+            return True
+        if getattr(cur, "errno", None) == errno.ENOSPC:
+            return True
+        msg = str(cur).lower()
+        if "no space left" in msg or "errno 28" in msg or "[errno 28]" in msg:
+            return True
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return False
+
+
+def hub_repo_cache_dir(
+    hub_cache: Path, repo_id: str, *, repo_type: str = "model"
+) -> Path:
+    """HF hub on-disk folder for a repo: models--org--name under cache_dir."""
+    return Path(hub_cache) / f"{repo_type}s--{repo_id.replace('/', '--')}"
+
+
+def _artifact_repo_ids(art: Artifact) -> list[str]:
+    ids: list[str] = []
+    for rid in (art.download_repo_id, art.repo_id):
+        if rid and rid not in ids:
+            ids.append(rid)
+    return ids
+
+
+def cleanup_failed_model_hub_cache(
+    art: Artifact,
+    *,
+    hub_cache: Path,
+    staging_dir: Path | None = None,
+) -> int:
+    """
+    Recursively remove only this model's HF cache and staging partials.
+
+    Deletes:
+      - hub_cache/models--{repo} for each of the artifact's repo ids
+        (including blobs/*.incomplete and lock files under that tree)
+      - staging_dir/{filename}* flat partials (if staging_dir given)
+
+    Does NOT touch the persistent store (promoted models) or other repos'
+    cache directories under the same hub_cache.
+    Returns best-effort bytes freed.
+    """
+    hub_cache = Path(hub_cache)
+    freed = 0
+    for repo_id in _artifact_repo_ids(art):
+        repo_dir = hub_repo_cache_dir(hub_cache, repo_id)
+        if not repo_dir.exists() and not repo_dir.is_symlink():
+            continue
+        # Prefer explicit incomplete cleanup logging before the tree wipe.
+        try:
+            for incomplete in repo_dir.rglob("*.incomplete"):
+                try:
+                    sz = incomplete.stat().st_size if incomplete.exists() else 0
+                except OSError:
+                    sz = 0
+                print(
+                    f"  enospc-cleanup: delete incomplete {incomplete} "
+                    f"({format_bytes(sz)})"
+                )
+                try:
+                    incomplete.unlink()
+                    freed += sz
+                except OSError as exc:
+                    print(f"  enospc-cleanup: warn unlink {incomplete}: {exc}")
+        except OSError as exc:
+            print(f"  enospc-cleanup: warn scanning incompletes under {repo_dir}: {exc}")
+
+        print(f"  enospc-cleanup: remove model cache dir {repo_dir}")
+        try:
+            # Size before delete (best-effort).
+            before = 0
+            for p in repo_dir.rglob("*"):
+                try:
+                    if p.is_file() or p.is_symlink():
+                        before += p.stat().st_size if p.exists() else 0
+                except OSError:
+                    continue
+        except OSError:
+            before = 0
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        if repo_dir.exists():
+            print(f"  enospc-cleanup: ERROR still present: {repo_dir}")
+        else:
+            freed += before
+            print(f"  enospc-cleanup: OK removed {repo_dir} (~{format_bytes(before)})")
+
+    if staging_dir is not None:
+        staging_dir = Path(staging_dir)
+        for p in sorted(staging_dir.glob(f"{art.filename}*")):
+            if p.is_dir() and not p.is_symlink():
+                continue
+            try:
+                sz = p.stat().st_size if p.exists() else 0
+            except OSError:
+                sz = 0
+            print(f"  enospc-cleanup: delete staging partial {p} ({format_bytes(sz)})")
+            try:
+                p.unlink()
+                freed += sz
+            except OSError as exc:
+                print(f"  enospc-cleanup: warn unlink {p}: {exc}")
+
+    print(
+        f"  enospc-cleanup: done for {art.filename} "
+        f"(~{format_bytes(freed)} freed from this model's cache/partials)"
+    )
+    return freed
+
+
 def run_with_stall_watch(
     target: Callable[..., None],
     *,
@@ -312,6 +487,10 @@ def run_with_stall_watch(
                 raise StallError(
                     f"Download stalled (<{stall_min_bytes} B / {stall_window_sec}s)"
                 )
+        if proc.exitcode == errno.ENOSPC:
+            raise NoSpaceError(
+                "Download worker hit OSError ENOSPC (no space left on device)"
+            )
         if proc.exitcode not in (0, None):
             raise RuntimeError(f"Download worker exited with code {proc.exitcode}")
     finally:
@@ -340,21 +519,62 @@ def _hub_worker(
         "repo_type": "model",
         "cache_dir": hub_cache,
     }
-    try:
-        cached = hf_hub_download(**kwargs, resume_download=True)
-    except TypeError:
-        cached = hf_hub_download(**kwargs)
-    cached_path = Path(cached)
-    if cached_path.stat().st_size != expected_size:
-        raise SystemExit(
-            f"Hub download size mismatch: got {cached_path.stat().st_size}, "
-            f"expected {expected_size}"
+
+    def _handle_enospc(exc: BaseException) -> None:
+        # Drop this repo's partial cache so the next attempt does not immediately
+        # fail on the same leftover .incomplete blob.
+        fake = Artifact(
+            filename=Path(staging_file).name,
+            size=expected_size,
+            path="",
+            repo_id=repo_id,
+            repo_path=repo_path,
+            url="",
+            required=True,
+            set_name="",
         )
-    dest = Path(staging_file)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    # Prefer rename/hardlink of the *resolved* blob into the flat staging name so we
-    # do not double disk usage on Kaggle's tight /kaggle/working.
-    place_file_without_doubling(cached_path, dest, expected_size=expected_size)
+        print(f"  hub worker: ENOSPC — cleaning failed model cache for {repo_id}")
+        cleanup_failed_model_hub_cache(
+            fake,
+            hub_cache=Path(hub_cache),
+            staging_dir=Path(staging_file).parent,
+        )
+        print(f"  hub worker: ENOSPC detail: {exc}", file=sys.stderr)
+        raise SystemExit(errno.ENOSPC) from exc
+
+    try:
+        try:
+            cached = hf_hub_download(**kwargs, resume_download=True)
+        except TypeError:
+            cached = hf_hub_download(**kwargs)
+    except BaseException as exc:
+        if _is_enospc(exc):
+            _handle_enospc(exc)
+        raise
+
+    # HF returns snapshots/<rev>/<file> → ../../blobs/<hash> (relative symlink).
+    # Resolve to the blob before size check / place — never operate on the symlink.
+    try:
+        cached_path = Path(cached).resolve(strict=True)
+    except OSError as exc:
+        if _is_enospc(exc):
+            _handle_enospc(exc)
+        raise SystemExit(f"Hub download path could not be resolved: {cached}") from exc
+    try:
+        if cached_path.stat().st_size != expected_size:
+            raise SystemExit(
+                f"Hub download size mismatch: got {cached_path.stat().st_size}, "
+                f"expected {expected_size}"
+            )
+        dest = Path(staging_file)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Prefer rename/hardlink of the *resolved* blob into the flat staging name so we
+        # do not double disk usage on Kaggle's tight /kaggle/working.
+        place_file_without_doubling(cached_path, dest, expected_size=expected_size)
+    except BaseException as exc:
+        if _is_enospc(exc):
+            _handle_enospc(exc)
+        raise
 
 
 def _same_inode(a: Path, b: Path) -> bool:
@@ -365,20 +585,31 @@ def _same_inode(a: Path, b: Path) -> bool:
         return False
 
 
-def _verify_placed_dest(dest: Path, expected_size: int) -> None:
-    """Destination must exist and match size before place_file_without_doubling returns."""
-    if not dest.exists():
-        # Distinguish broken symlink (path present as symlink) from missing path.
-        if dest.is_symlink():
-            raise FileNotFoundError(
-                f"place destination is a broken symlink (relative HF snapshot link?): {dest}"
-            )
-        raise FileNotFoundError(f"place destination missing after placement: {dest}")
-    got = dest.stat().st_size
-    if got != expected_size:
-        raise SystemExit(
-            f"Staging place size mismatch: got {got}, expected {expected_size} at {dest}"
+def _verify_placed_dest(dest: Path, expected_size: int | None = None) -> None:
+    """
+    Verify destination before any caller treats it as ready.
+
+    Order matters: never call dest.stat() until the path is confirmed to exist as a
+    non-symlink file. A broken relative symlink from hardlinking an HF snapshot link
+    makes dest.exists() False while dest.is_symlink() True — and dest.stat() raises
+    FileNotFoundError.
+    """
+    # is_symlink() is true even when the target is missing — check before exists/stat.
+    if dest.is_symlink():
+        raise FileNotFoundError(
+            f"place destination is a symlink (must be a resolved blob file)"
+            f"{'' if dest.exists() else ' [BROKEN]'}: {dest}"
         )
+    if not dest.exists():
+        raise FileNotFoundError(f"place destination missing after placement: {dest}")
+    if not dest.is_file():
+        raise RuntimeError(f"place destination is not a regular file: {dest}")
+    if expected_size is not None:
+        got = dest.stat().st_size
+        if got != expected_size:
+            raise SystemExit(
+                f"Staging place size mismatch: got {got}, expected {expected_size} at {dest}"
+            )
 
 
 def place_file_without_doubling(src: Path, dest: Path, *, expected_size: int) -> None:
@@ -399,31 +630,32 @@ def place_file_without_doubling(src: Path, dest: Path, *, expected_size: int) ->
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    if not src.exists():
+    if not src.exists() and not src.is_symlink():
         raise FileNotFoundError(f"place source missing: {src}")
 
     # Resolve snapshot symlink → real blob before any link/rename/copy.
     try:
-        src_real = src.resolve(strict=True)
+        real_src = src.resolve(strict=True)
     except OSError as exc:
         raise FileNotFoundError(f"place source could not be resolved: {src}") from exc
 
-    src_size = src_real.stat().st_size
+    src_size = real_src.stat().st_size
     if src_size != expected_size:
         raise SystemExit(
-            f"place source size mismatch: got {src_size}, expected {expected_size} at {src_real}"
+            f"place source size mismatch: got {src_size}, expected {expected_size} at {real_src}"
         )
 
     # Already correctly placed (regular file with expected size).
-    if dest.exists() and not dest.is_symlink() and dest.stat().st_size == expected_size:
-        print(f"  place: already present {dest} ({expected_size} bytes)")
-        _verify_placed_dest(dest, expected_size)
-        return
+    if not dest.is_symlink() and dest.exists() and dest.is_file():
+        if dest.stat().st_size == expected_size:
+            print(f"  place: already present {dest} ({expected_size} bytes)")
+            _verify_placed_dest(dest, expected_size)
+            return
 
-    # Remove a preexisting staging name. Never unlink src_real itself.
+    # Remove a preexisting staging name. Never unlink real_src itself.
     if dest.exists() or dest.is_symlink():
-        if _same_inode(dest, src_real):
-            # Shared inode + wrong size is unexpected; do not unlink src_real via dest.
+        if _same_inode(dest, real_src):
+            # Shared inode + wrong size is unexpected; do not unlink real_src via dest.
             raise RuntimeError(
                 f"place dest shares inode with source but is not usable: {dest}"
             )
@@ -433,18 +665,18 @@ def place_file_without_doubling(src: Path, dest: Path, *, expected_size: int) ->
     placed_how: str | None = None
     last_exc: BaseException | None = None
 
-    # 1) Same-device rename/move of the real blob.
+    # 1) Same-device rename/move of the real blob — never the unresolved snapshot symlink.
     try:
-        os.replace(src_real, dest)
+        os.replace(real_src, dest)
         placed_how = "renamed"
-        print(f"  place: renamed {src_real} → {dest}")
+        print(f"  place: renamed {real_src} → {dest}")
     except OSError as replace_exc:
         last_exc = replace_exc
         if getattr(replace_exc, "errno", None) != errno.EXDEV:
             try:
-                shutil.move(str(src_real), str(dest))
+                shutil.move(str(real_src), str(dest))
                 placed_how = "moved"
-                print(f"  place: moved {src_real} → {dest}")
+                print(f"  place: moved {real_src} → {dest}")
             except OSError as move_exc:
                 last_exc = move_exc
                 print(f"  place: rename/move failed ({move_exc}); trying hardlink")
@@ -452,27 +684,28 @@ def place_file_without_doubling(src: Path, dest: Path, *, expected_size: int) ->
     # 2) Hardlink the *resolved blob* (not the snapshot symlink).
     if placed_how is None:
         try:
+            # real_src is already the blob; do not pass the snapshot symlink to os.link.
             try:
-                os.link(src_real, dest, follow_symlinks=True)
+                os.link(real_src, dest, follow_symlinks=True)
             except TypeError:
-                os.link(src_real, dest)
+                os.link(real_src, dest)
             placed_how = "hardlinked"
-            print(f"  place: hardlinked {src_real} → {dest}")
+            print(f"  place: hardlinked {real_src} → {dest}")
         except OSError as link_exc:
             last_exc = link_exc
-            # 3) Copy only when rename and hardlink cannot work.
+            # 3) Copy only when rename and hardlink cannot work (typically EXDEV).
             print(f"  place: hardlink failed ({link_exc}); copy2 fallback")
             try:
-                shutil.copy2(src_real, dest)
+                shutil.copy2(real_src, dest)
             except OSError as copy_exc:
                 raise RuntimeError(
-                    f"place failed for {src_real} → {dest}; "
+                    f"place failed for {real_src} → {dest}; "
                     f"last errors rename/move/link={last_exc}, copy={copy_exc}"
                 ) from copy_exc
             placed_how = "copied"
-            print(f"  place: copied {src_real} → {dest}")
+            print(f"  place: copied {real_src} → {dest}")
 
-    # Do not rename/remove dest after placement. Verify existence first, then size.
+    # Never rename/remove dest here. Verify before any caller may call dest.stat().
     _verify_placed_dest(dest, expected_size)
     print(f"  place: verified {dest} via {placed_how} ({expected_size} bytes)")
 
@@ -484,11 +717,17 @@ def hub_download_to_staging(
     revision: str,
     stall_window_sec: int,
     stall_min_bytes: int,
+    safety_margin_bytes: int = DEFAULT_FREE_SPACE_MARGIN_BYTES,
 ) -> Path:
     staging_file = staging_dir / art.filename
     hub_cache = staging_dir / "_hub_cache"
     hub_cache.mkdir(parents=True, exist_ok=True)
     staging_dir.mkdir(parents=True, exist_ok=True)
+
+    # Fail fast before touching the network if the volume cannot hold this file.
+    require_free_space(
+        staging_dir, art.size, safety_margin_bytes=safety_margin_bytes
+    )
 
     repo_candidates = [art.download_repo_id or art.repo_id]
     if art.download_repo_id and art.repo_id not in repo_candidates:
@@ -497,7 +736,12 @@ def hub_download_to_staging(
     last_err: Exception | None = None
     for repo_id in repo_candidates:
         print(f"  hub: {repo_id} :: {art.repo_path}")
+        print_disk_usage(staging_dir)
         try:
+            # Re-check immediately before each attempt (prior partials may linger).
+            require_free_space(
+                staging_dir, art.size, safety_margin_bytes=safety_margin_bytes
+            )
             run_with_stall_watch(
                 _hub_worker,
                 args=(
@@ -516,9 +760,33 @@ def hub_download_to_staging(
             if is_complete(staging_file, art.size):
                 return staging_file
             last_err = RuntimeError("staging file incomplete after hub download")
+        except NoSpaceError:
+            # Always drop this model's incomplete cache before any further retry.
+            cleanup_failed_model_hub_cache(
+                art, hub_cache=hub_cache, staging_dir=staging_dir
+            )
+            print_disk_usage(staging_dir)
+            # If still short after cleanup, abort immediately (do not burn retries).
+            require_free_space(
+                staging_dir, art.size, safety_margin_bytes=safety_margin_bytes
+            )
+            last_err = NoSpaceError(
+                f"ENOSPC during hub download of {art.filename}; "
+                f"partial cache cleaned, retrying if space allows"
+            )
+            print(f"  hub attempt failed (ENOSPC, cache cleaned): {last_err}")
+            continue
         except Exception as exc:
             last_err = exc
             print(f"  hub attempt failed: {exc}")
+            if _is_enospc(exc):
+                cleanup_failed_model_hub_cache(
+                    art, hub_cache=hub_cache, staging_dir=staging_dir
+                )
+                print_disk_usage(staging_dir)
+                require_free_space(
+                    staging_dir, art.size, safety_margin_bytes=safety_margin_bytes
+                )
             continue
     raise RuntimeError(f"Hub download failed for {art.filename}: {last_err}")
 
@@ -723,8 +991,17 @@ def promote_to_store(staging_file: Path, dest: Path, expected_size: int) -> None
         print(f"  promote: dest already complete after .promoting resume → {dest}")
         return
 
+    # Staging must be a real file (place_file_without_doubling resolves HF symlinks).
+    if staging_file.is_symlink():
+        raise RuntimeError(
+            f"staging file must not be a symlink before promote: {staging_file}"
+        )
     if not staging_file.exists():
         raise RuntimeError(f"staging file missing for promote: {staging_file}")
+    try:
+        staging_file = staging_file.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"staging file could not be resolved: {staging_file}") from exc
     if staging_file.stat().st_size != expected_size:
         raise RuntimeError(
             f"staging size mismatch before promote: "
@@ -942,9 +1219,14 @@ def cleanup_staging_for_artifact(
 
 def link_into_comfy(store_file: Path, comfy_file: Path) -> None:
     comfy_file.parent.mkdir(parents=True, exist_ok=True)
+    # Store is always a promoted regular file; resolve defensively before link/copy.
+    try:
+        store_file = store_file.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"store file could not be resolved: {store_file}") from exc
     if comfy_file.is_symlink() or comfy_file.exists():
         try:
-            if comfy_file.resolve() == store_file.resolve() and is_complete(
+            if comfy_file.resolve() == store_file and is_complete(
                 comfy_file, store_file.stat().st_size
             ):
                 print(f"  comfy link ok: {comfy_file}")
@@ -1026,10 +1308,12 @@ def ensure_artifact(
     revision: str,
     stall_window_sec: int,
     stall_min_bytes: int,
+    safety_margin_bytes: int = DEFAULT_FREE_SPACE_MARGIN_BYTES,
 ) -> Path:
     store_file = store_path_for(store_dir, art)
     comfy_file = comfy_path_for(comfy, art)
     staging_dir = Path(staging_dir)
+    hub_cache = staging_dir / "_hub_cache"
 
     # Resume interrupted cross-FS promotes left as dest.safetensors.promoting
     if resume_or_clear_promoting(store_file, art.size):
@@ -1077,6 +1361,7 @@ def ensure_artifact(
                     revision=revision,
                     stall_window_sec=stall_window_sec,
                     stall_min_bytes=stall_min_bytes,
+                    safety_margin_bytes=safety_margin_bytes,
                 ),
             )
         )
@@ -1109,6 +1394,31 @@ def ensure_artifact(
             )
 
         print(f"  attempt {i}/{len(steps)} backend={name}")
+        print_disk_usage(staging_dir)
+        try:
+            require_free_space(
+                staging_dir, art.size, safety_margin_bytes=safety_margin_bytes
+            )
+        except NoSpaceError as exc:
+            # Drop this model's leftover hub partials once, then re-check.
+            cleanup_failed_model_hub_cache(
+                art, hub_cache=hub_cache, staging_dir=staging_dir
+            )
+            print_disk_usage(staging_dir)
+            try:
+                require_free_space(
+                    staging_dir, art.size, safety_margin_bytes=safety_margin_bytes
+                )
+            except NoSpaceError as still_short:
+                # Abort immediately if still insufficient after cleanup.
+                raise NoSpaceError(
+                    f"Aborting {art.filename}: {still_short}"
+                ) from still_short
+            print(
+                f"  warn: free space was low ({exc}); "
+                f"cleaned this model's cache and continuing"
+            )
+
         staging_file: Path | None = None
         promoted_ok = False
         link_err: Exception | None = None
@@ -1129,9 +1439,39 @@ def ensure_artifact(
             except Exception as exc:
                 link_err = exc
                 print(f"  warn: symlink/link after promote failed: {exc}")
+        except NoSpaceError as exc:
+            last_err = exc
+            print(f"  attempt {i} failed (ENOSPC): {exc}")
+            cleanup_failed_model_hub_cache(
+                art, hub_cache=hub_cache, staging_dir=staging_dir
+            )
+            print_disk_usage(staging_dir)
+            # After freeing this model's partials, abort if still short of margin.
+            try:
+                require_free_space(
+                    staging_dir, art.size, safety_margin_bytes=safety_margin_bytes
+                )
+            except NoSpaceError as still_short:
+                raise NoSpaceError(
+                    f"Aborting {art.filename} after ENOSPC cleanup: {still_short}"
+                ) from still_short
+            continue
         except Exception as exc:
             last_err = exc
             print(f"  attempt {i} failed: {exc}")
+            if _is_enospc(exc):
+                cleanup_failed_model_hub_cache(
+                    art, hub_cache=hub_cache, staging_dir=staging_dir
+                )
+                print_disk_usage(staging_dir)
+                try:
+                    require_free_space(
+                        staging_dir, art.size, safety_margin_bytes=safety_margin_bytes
+                    )
+                except NoSpaceError as still_short:
+                    raise NoSpaceError(
+                        f"Aborting {art.filename} after ENOSPC cleanup: {still_short}"
+                    ) from still_short
             if resume_or_clear_promoting(store_file, art.size) or is_complete(
                 store_file, art.size
             ) or wait_until_complete(store_file, art.size, attempts=5, delay_sec=1.0):
@@ -1235,6 +1575,15 @@ def main() -> int:
         help="Minimum bytes required per stall window (default 1 MiB).",
     )
     ap.add_argument(
+        "--free-space-margin-gb",
+        type=float,
+        default=float(os.environ.get("HEADSWAP_FREE_SPACE_MARGIN_GB", "2")),
+        help=(
+            "Abort before download if free space < model size + this many GiB "
+            "(default 2). Set HEADSWAP_FREE_SPACE_MARGIN_GB to override."
+        ),
+    )
+    ap.add_argument(
         "--disable-xet",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -1304,6 +1653,11 @@ def main() -> int:
     print(f"\nStore (complete only): {store_dir}")
     print(f"Staging (partials ok): {staging_dir}")
     print(f"ComfyUI:               {comfy}")
+    safety_margin_bytes = int(args.free_space_margin_gb * (1024**3))
+    print(
+        f"Free-space margin:     {format_bytes(safety_margin_bytes)} "
+        f"(abort if free < model size + margin)"
+    )
 
     for art in arts:
         print(f"\n↓ {art.filename}")
@@ -1316,6 +1670,7 @@ def main() -> int:
             revision=args.revision,
             stall_window_sec=args.stall_window_sec,
             stall_min_bytes=args.stall_min_bytes,
+            safety_margin_bytes=safety_margin_bytes,
         )
 
     # Final sweep: drop any leftover staging copies of store-complete models
