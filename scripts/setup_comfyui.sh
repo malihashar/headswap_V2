@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Setup ComfyUI + custom nodes for headswap_V2 (Colab/RunPod/Linux).
+# Setup ComfyUI + custom nodes for headswap_V2 (Colab/Kaggle/RunPod/Linux).
 set -euo pipefail
 
 BASE="${HEADSWAP_BASE:-/content}"
 if [[ -d /workspace ]]; then BASE=/workspace; fi
+# Kaggle: keep ComfyUI on the persistent /kaggle/working volume; model weights
+# live under /tmp (see scripts/download_models.py / scripts/setup_kaggle.sh).
+if [[ -d /kaggle/working ]]; then BASE=/kaggle/working; fi
 COMFY="${COMFYUI_PATH:-$BASE/ComfyUI}"
 
 echo "Using COMFYUI_PATH=$COMFY"

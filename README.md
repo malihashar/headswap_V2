@@ -20,7 +20,7 @@ The current production full-frame Qwen+Lightning path (`qwen_baseline`) stays as
 | `configs/qwen_improved.yaml` | Qwen + official BFS prompt + mask crop-stitch |
 | `src/headswap/` | Pipelines, preprocess, metrics, eval harness |
 | `workflows/` | Upstream ComfyUI Klein + BFS Klein graphs (reference) |
-| `scripts/` | Setup, model download, eval, compare |
+| `scripts/` | Setup (Colab/Kaggle/ComfyUI), model download, eval, compare |
 | `notebooks/colab_compare.ipynb` | GPU Colab runner |
 | `results/COMPARISON.md` | Auto-written after `run_compare.py` |
 
@@ -76,6 +76,38 @@ login()  # or: import os; os.environ["HF_TOKEN"] = "hf_..."
 4. Downloads missing Klein/Qwen weights into `/content/_hf_dl_staging`, verifies size, promotes to `/content/drive/MyDrive/headswap_V2/models/…`, symlinks into `/content/ComfyUI/models/…`
 
 On a later runtime, complete Drive files are skipped and only re-linked.
+
+## Kaggle
+
+Kaggle splits storage into two filesystems:
+
+| Path | Role | Capacity |
+| --- | --- | --- |
+| `/kaggle/working` | 20GB loop device | ComfyUI + notebook outputs only |
+| `/tmp` (overlay root) | ~1T free | **model store + HF staging** |
+
+`scripts/setup_kaggle.sh` and `scripts/download_models.py` auto-detect Kaggle and default to:
+
+- `COMFYUI_PATH=/kaggle/working/ComfyUI`
+- `HEADSWAP_MODEL_STORE=/tmp/models`
+- `HEADSWAP_STAGING_DIR=/tmp/_hf_dl_staging`
+
+Complete weights are promoted under `/tmp/models/…` and **symlinked** into ComfyUI's `models/` tree, so ComfyUI loads them without copying multi-GB files onto the 20GB loop.
+
+```python
+%cd /kaggle/working
+!git clone https://github.com/malihashar/headswap_V2.git || true
+%cd /kaggle/working/headswap_V2
+!git pull --ff-only
+
+from huggingface_hub import login
+login()  # or: import os; os.environ["HF_TOKEN"] = "hf_..."
+
+!bash scripts/setup_kaggle.sh
+!python scripts/run_compare.py --gpu --limit 12
+```
+
+On start the downloader prints `store_dir`, `staging_dir`, and `df -h /tmp` / `df -h /kaggle/working` so you can confirm downloads are not hitting the 20GB loop.
 
 ## GPU run (Colab / RunPod)
 

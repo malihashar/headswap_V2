@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Download model weights for headswap_V2 (Colab-robust).
+Download model weights for headswap_V2 (Colab / Kaggle / RunPod-robust).
 
 Architecture:
-  1. Never write partial files to Google Drive.
-  2. Download into local staging (/content/_hf_dl_staging).
+  1. Never write partial files to Google Drive (Colab) or /kaggle/working.
+  2. Download into local staging:
+       Colab:  /content/_hf_dl_staging
+       Kaggle: /tmp/_hf_dl_staging   (overlay FS — NOT the 20GB /kaggle/working loop)
+       other:  /tmp/headswap_hf_staging
   3. Verify size against scripts/models.json (or refreshed HF API sizes).
-  4. Promote the complete file into --store-dir (Drive).
+  4. Promote the complete file into --store-dir:
+       Colab:  Drive …/headswap_V2/models
+       Kaggle: /tmp/models
   5. Delete staging copy + hub-cache leftovers for that file (staging keeps in-progress only).
-  6. Symlink into {COMFYUI_PATH}/models/<subdir>/.
+  6. Symlink into {COMFYUI_PATH}/models/<subdir>/ (ComfyUI may live on another FS).
 
 Backend ladder (auto):
   Hub HTTP (HF_HUB_DISABLE_XET=1) x2 → aria2 resume x2 → fail
@@ -39,6 +44,10 @@ UA = "headswap-v2-downloader/2.0 (colab-staging)"
 DEFAULT_MANIFEST = Path(__file__).resolve().parent / "models.json"
 DEFAULT_DRIVE_STORE = Path("/content/drive/MyDrive/headswap_V2/models")
 DEFAULT_STAGING = Path("/content/_hf_dl_staging")
+# Kaggle: /kaggle/working is a ~20GB loop device; model weights must live on the
+# overlay root (/tmp) which has ~1T free. ComfyUI itself can stay under /kaggle/working.
+KAGGLE_STORE = Path("/tmp/models")
+KAGGLE_STAGING = Path("/tmp/_hf_dl_staging")
 
 
 class StallError(RuntimeError):
@@ -68,6 +77,11 @@ class Artifact:
 
 def _on_colab() -> bool:
     return Path("/content").exists()
+
+
+def _on_kaggle() -> bool:
+    """True on Kaggle notebooks (/kaggle/working exists as the persistent loop volume)."""
+    return Path("/kaggle/working").exists() or bool(os.environ.get("KAGGLE_KERNEL_RUN_TYPE"))
 
 
 def configure_hub_env(*, disable_xet: bool) -> None:
@@ -569,7 +583,7 @@ def _hub_worker(
         dest = Path(staging_file)
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Prefer rename/hardlink of the *resolved* blob into the flat staging name so we
-        # do not double disk usage on Kaggle's tight /kaggle/working.
+        # do not double disk usage (critical when staging and hub cache share a volume).
         place_file_without_doubling(cached_path, dest, expected_size=expected_size)
     except BaseException as exc:
         if _is_enospc(exc):
@@ -915,18 +929,22 @@ def same_filesystem(src: Path, dst_parent: Path) -> bool:
         return False
     same = src_dev == dst_dev
     print(f"  same_filesystem: src_dev={src_dev} dst_dev={dst_dev} → {same}")
-    # Kaggle: both under /kaggle/working almost always share a volume even when
-    # bind-mount quirks confuse callers — still trust st_dev when it matches.
+    # Overlay / bind-mount quirks: if both paths share a known single-volume prefix,
+    # force the zero-copy rename path even when st_dev briefly disagrees.
     if not same:
         try:
             sr = str(src.resolve())
             dr = str(dst_parent.resolve())
-            if sr.startswith("/kaggle/working/") and dr.startswith("/kaggle/working/"):
-                print(
-                    "  same_filesystem: both under /kaggle/working — "
-                    "forcing same-FS rename path"
-                )
-                return True
+            for prefix, label in (
+                ("/tmp/", "/tmp"),
+                ("/kaggle/working/", "/kaggle/working"),
+            ):
+                if sr.startswith(prefix) and dr.startswith(prefix):
+                    print(
+                        f"  same_filesystem: both under {label} — "
+                        "forcing same-FS rename path"
+                    )
+                    return True
         except OSError:
             pass
     return same
@@ -978,7 +996,7 @@ def resume_or_clear_promoting(dest: Path, expected_size: int) -> bool:
 def promote_to_store(staging_file: Path, dest: Path, expected_size: int) -> None:
     """
     Move a verified staging file into the persistent store without doubling disk
-    when staging and store share a volume (Kaggle /kaggle/working).
+    when staging and store share a volume (e.g. Kaggle /tmp → /tmp).
 
     Always try rename first (os.replace / shutil.move). Only fall back to
     shutil.copy2 when the OS reports EXDEV (cross-device), e.g. Colab → Drive.
@@ -1054,9 +1072,10 @@ def promote_to_store(staging_file: Path, dest: Path, expected_size: int) -> None
             if getattr(copy_exc, "errno", None) == errno.ENOSPC:
                 raise RuntimeError(
                     "No space left while copy2-promoting across devices. "
-                    "On Kaggle keep staging and store under /kaggle/working "
-                    "so promote can rename instead of copy. "
-                    f"staging={staging_file} dest={dest}"
+                    "On Kaggle keep staging and store under /tmp "
+                    "(defaults: /tmp/_hf_dl_staging and /tmp/models) so promote "
+                    "can rename instead of copy — never use /kaggle/working for "
+                    f"multi-GB weights. staging={staging_file} dest={dest}"
                 ) from copy_exc
             raise
         if tmp.stat().st_size != expected_size:
@@ -1247,7 +1266,7 @@ def link_into_comfy(store_file: Path, comfy_file: Path) -> None:
         return
     except OSError:
         pass
-    # Never copy2 multi-GB weights on the same volume (Kaggle ENOSPC).
+    # Never copy2 multi-GB weights on the same volume (ENOSPC risk).
     if same_filesystem(store_file, comfy_file.parent):
         raise RuntimeError(
             f"Could not symlink/hardlink {store_file} → {comfy_file} on the same "
@@ -1504,9 +1523,9 @@ def default_store_dir(comfy: Path) -> Path:
         return Path(env)
     if Path("/content/drive/MyDrive").exists():
         return DEFAULT_DRIVE_STORE
-    # Kaggle: keep store on the same volume as staging (/kaggle/working).
-    if Path("/kaggle/working").exists():
-        return Path("/kaggle/working/models")
+    # Kaggle: store on the overlay FS (/tmp), NOT the 20GB /kaggle/working loop.
+    if _on_kaggle():
+        return KAGGLE_STORE
     return comfy / "models"
 
 
@@ -1514,16 +1533,45 @@ def default_staging_dir() -> Path:
     env = os.environ.get("HEADSWAP_STAGING_DIR")
     if env:
         return Path(env)
-    if _on_colab():
+    if _on_colab() and not _on_kaggle():
         return DEFAULT_STAGING
-    if Path("/kaggle/working").exists():
-        return Path("/kaggle/working/_hf_dl_staging")
+    # Kaggle: stage on the overlay FS (/tmp), NOT the 20GB /kaggle/working loop.
+    if _on_kaggle():
+        return KAGGLE_STAGING
     return Path("/tmp/headswap_hf_staging")
+
+
+def print_path_validation(store_dir: Path, staging_dir: Path, comfy: Path) -> None:
+    """Print store/staging/Comfy paths and df -h for the relevant filesystems."""
+    print(f"\nStore (complete only): {store_dir}")
+    print(f"Staging (partials ok): {staging_dir}")
+    print(f"ComfyUI:               {comfy}")
+    if _on_kaggle():
+        print(
+            "Kaggle layout: models+staging under /tmp (overlay); "
+            "ComfyUI under /kaggle/working (20GB loop)."
+        )
+        for probe in ("/tmp", "/kaggle/working"):
+            try:
+                out = subprocess.check_output(
+                    ["df", "-h", probe], text=True, stderr=subprocess.STDOUT
+                )
+                print(out.rstrip())
+            except (OSError, subprocess.CalledProcessError) as exc:
+                print(f"  df -h {probe} failed: {exc}")
+            print_disk_usage(Path(probe))
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--comfy", default=os.environ.get("COMFYUI_PATH", "/content/ComfyUI"))
+    ap.add_argument(
+        "--comfy",
+        default=None,
+        help=(
+            "ComfyUI root. Defaults: $COMFYUI_PATH, else /kaggle/working/ComfyUI on "
+            "Kaggle, else /content/ComfyUI."
+        ),
+    )
     ap.add_argument("--set", choices=["klein", "qwen", "all"], default="klein")
     ap.add_argument(
         "--include-optional",
@@ -1539,12 +1587,18 @@ def main() -> int:
     ap.add_argument(
         "--store-dir",
         default=None,
-        help="Persistent complete-model store (Drive). Partials never go here.",
+        help=(
+            "Persistent complete-model store. Defaults: Drive on Colab, "
+            "/tmp/models on Kaggle, {comfy}/models elsewhere. Partials never go here."
+        ),
     )
     ap.add_argument(
         "--staging-dir",
         default=None,
-        help="Local staging for downloads (default /content/_hf_dl_staging on Colab).",
+        help=(
+            "Local staging for downloads. Defaults: /content/_hf_dl_staging on Colab, "
+            "/tmp/_hf_dl_staging on Kaggle, /tmp/headswap_hf_staging elsewhere."
+        ),
     )
     ap.add_argument(
         "--backend",
@@ -1644,20 +1698,38 @@ def main() -> int:
             f"({exc})"
         ) from exc
 
-    comfy = Path(args.comfy)
+    comfy = Path(args.comfy) if args.comfy else None
+    if comfy is None:
+        env_comfy = os.environ.get("COMFYUI_PATH")
+        if env_comfy:
+            comfy = Path(env_comfy)
+        elif _on_kaggle():
+            comfy = Path("/kaggle/working/ComfyUI")
+        else:
+            comfy = Path("/content/ComfyUI")
     store_dir = Path(args.store_dir) if args.store_dir else default_store_dir(comfy)
     staging_dir = Path(args.staging_dir) if args.staging_dir else default_staging_dir()
     staging_dir.mkdir(parents=True, exist_ok=True)
     store_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nStore (complete only): {store_dir}")
-    print(f"Staging (partials ok): {staging_dir}")
-    print(f"ComfyUI:               {comfy}")
+    print_path_validation(store_dir, staging_dir, comfy)
+    if _on_kaggle() and (
+        str(store_dir).startswith("/kaggle/working")
+        or str(staging_dir).startswith("/kaggle/working")
+    ):
+        print(
+            "WARNING: store_dir or staging_dir is under /kaggle/working "
+            "(~20GB loop). Prefer /tmp/models and /tmp/_hf_dl_staging to avoid ENOSPC.",
+            file=sys.stderr,
+        )
     safety_margin_bytes = int(args.free_space_margin_gb * (1024**3))
     print(
         f"Free-space margin:     {format_bytes(safety_margin_bytes)} "
         f"(abort if free < model size + margin)"
     )
+    # Confirm free-space checks hit the overlay FS on Kaggle (not the 20GB loop).
+    print_disk_usage(staging_dir)
+    print_disk_usage(store_dir)
 
     for art in arts:
         print(f"\n↓ {art.filename}")
