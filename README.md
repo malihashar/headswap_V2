@@ -106,13 +106,30 @@ Kaggle splits storage into two filesystems:
 | `/kaggle/working` | 20GB loop device | ComfyUI + notebook outputs only |
 | `/tmp` (overlay root) | ~1T free | **model store + HF staging** |
 
-`scripts/setup_kaggle.sh` and `scripts/download_models.py` auto-detect Kaggle and default to:
+### One-command bootstrap
+
+In a notebook with GPU + Internet enabled:
+
+```python
+%cd /kaggle/working/headswap_V2
+!bash scripts/bootstrap_kaggle.sh
+```
+
+On a completely fresh runtime (repo not cloned yet), either clone once then run the line above, or:
+
+```python
+!curl -fsSL https://raw.githubusercontent.com/malihashar/headswap_V2/main/scripts/bootstrap_kaggle.sh | bash
+```
+
+[`scripts/bootstrap_kaggle.sh`](scripts/bootstrap_kaggle.sh) is idempotent: pull/clone → ComfyUI + deps → `/tmp` models (symlink-only if already complete) → if `data/custom/body.png` + `face.png` exist, prepare the 1-pair set and `run_compare.py --gpu --limit 1`.
+
+Defaults:
 
 - `COMFYUI_PATH=/kaggle/working/ComfyUI`
 - `HEADSWAP_MODEL_STORE=/tmp/models`
 - `HEADSWAP_STAGING_DIR=/tmp/_hf_dl_staging`
 
-Complete weights are promoted under `/tmp/models/…` and **symlinked** into ComfyUI's `models/` tree, so ComfyUI loads them without copying multi-GB files onto the 20GB loop.
+Manual step-by-step (optional):
 
 ```python
 %cd /kaggle/working
