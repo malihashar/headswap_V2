@@ -54,13 +54,20 @@ data/custom/body.png   # destination / body
 data/custom/face.png   # source face / head
 ```
 
-Then:
+Then benchmark **one** pipeline (image + timings + `metrics.json`, then exit):
 
 ```bash
 python3 scripts/prepare_eval_set.py --custom
+python3 scripts/run_pipeline.py --config configs/qwen_baseline.yaml --limit 1
+# equivalents:
+#   headswap-run --config configs/qwen_baseline.yaml --limit 1
+#   python3 -m headswap.cli --config configs/qwen_baseline.yaml --limit 1
+```
+
+For a full three-way eval (unchanged):
+
+```bash
 python3 scripts/run_compare.py --gpu --limit 1
-# or a single pipeline:
-python3 -m headswap.cli --config configs/klein4b.yaml --limit 1
 ```
 
 Outputs land under `results/<pipeline>/images/custom_001/` (`result.png`, debug crops/masks, plus `metrics.json`).

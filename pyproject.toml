@@ -31,9 +31,9 @@ dev = [
 
 [project.scripts]
 headswap-prepare-eval = "headswap.eval.dataset:main_prepare"
-headswap-run = "headswap.cli:main_run"
-headswap-evaluate = "headswap.cli:main_evaluate"
-headswap-compare = "headswap.cli:main_compare"
+headswap-run = "headswap.cli:entry_run"
+headswap-evaluate = "headswap.cli:entry_run"
+headswap-compare = "headswap.cli:entry_compare"
 
 [tool.setuptools.packages.find]
 where = ["src"]
