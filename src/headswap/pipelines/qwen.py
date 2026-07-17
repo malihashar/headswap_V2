@@ -19,6 +19,12 @@ from headswap.preprocess import (
     resize_max_keep_ar,
     soft_composite,
 )
+from headswap.profiling.gpu_stages import (
+    GpuStageProfiler,
+    count_sigmas,
+    describe_latent,
+    reset_vram_peak,
+)
 
 
 @contextmanager
@@ -32,6 +38,21 @@ def _stage(timings: dict[str, float] | None, name: str) -> Iterator[None]:
         yield
     finally:
         timings[name] = timings.get(name, 0.0) + (time.perf_counter() - t0)
+
+
+@contextmanager
+def _track(
+    profiler: GpuStageProfiler | None,
+    timings: dict[str, float] | None,
+    name: str,
+    **notes,
+) -> Iterator[None]:
+    if profiler is not None:
+        with profiler.stage(name, **notes):
+            yield
+    else:
+        with _stage(timings, name):
+            yield
 
 
 def _print_timing_breakdown(
@@ -70,7 +91,12 @@ def _print_timing_breakdown(
         print(f"  {'other':<28} {other:7.2f}s  ({pct:5.1f}%)")
 
 
-def _load_qwen_stack(rt: NodeRuntime, cfg: dict, timings: dict[str, float] | None = None):
+def _load_qwen_stack(
+    rt: NodeRuntime,
+    cfg: dict,
+    timings: dict[str, float] | None = None,
+    profiler: GpuStageProfiler | None = None,
+):
     import torch
 
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -79,11 +105,20 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict, timings: dict[str, float] | Non
         f"::lt{cfg.get('lightning_lora_strength')}::sh{cfg.get('auraflow_shift')}::st{cfg.get('steps')}"
     )
     if key in rt.models:
-        if timings is not None:
+        if profiler is not None:
+            profiler.note("model_cache_hit", True)
+            with profiler.stage("model_loading", cache_hit=True):
+                pass
+            with profiler.stage("lora_loading", cache_hit=True):
+                pass
+        elif timings is not None:
             timings["model_loading"] = timings.get("model_loading", 0.0)
             timings["lora_loading"] = timings.get("lora_loading", 0.0)
             timings["_model_cache_hit"] = 1.0
         return rt.models[key]
+
+    if profiler is not None:
+        profiler.note("model_cache_hit", False)
 
     checkpoint = cfg["unet_name"]
     load_meta: dict = {
@@ -95,7 +130,7 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict, timings: dict[str, float] | Non
         "fallbacks": [],
     }
 
-    with _stage(timings, "model_loading"):
+    with _track(profiler, timings, "model_loading"):
         vae = rt.call("VAELoader", vae_name=cfg["vae_name"])
         clip = rt.call(
             "CLIPLoader",
@@ -106,7 +141,7 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict, timings: dict[str, float] | Non
         unet = rt.call("UNETLoader", unet_name=checkpoint, weight_dtype="default")
         model = get_value_at_index(unet, 0)
 
-    with _stage(timings, "lora_loading"):
+    with _track(profiler, timings, "lora_loading"):
         hs_name = cfg["headswap_lora_name"]
         hs_strength = float(cfg.get("headswap_lora_strength", 1.0))
         model = get_value_at_index(
@@ -181,6 +216,7 @@ def _sample_qwen(
     cfg,
     prompt: str,
     timings: dict[str, float] | None = None,
+    profiler: GpuStageProfiler | None = None,
 ):
     import torch
 
@@ -188,11 +224,21 @@ def _sample_qwen(
     flux_kontext_applied = False
     flux_kontext_image_scale_applied = False
     use_kontext_scale = bool(cfg.get("flux_kontext_image_scale", False))
+    if profiler is not None:
+        profiler.note("flux_kontext_image_scale_enabled", use_kontext_scale)
+        profiler.note(
+            "bundle_object_ids",
+            {
+                "model": id(bundle["model"]),
+                "clip": id(bundle["clip"]),
+                "vae": id(bundle["vae"]),
+            },
+        )
 
     with torch.inference_mode():
         image1 = body_t
         input_h, input_w = int(body_t.shape[1]), int(body_t.shape[2])
-        with _stage(timings, "flux_kontext_image_scale"):
+        with _track(profiler, timings, "flux_kontext_image_scale"):
             if use_kontext_scale and rt.has("FluxKontextImageScale"):
                 scaled = rt.call("FluxKontextImageScale", image=body_t)
                 image1 = get_value_at_index(scaled, 0)
@@ -200,12 +246,26 @@ def _sample_qwen(
             elif use_kontext_scale:
                 fallbacks.append("flux_kontext_image_scale_missing")
         encode_h, encode_w = int(image1.shape[1]), int(image1.shape[2])
+        if profiler is not None:
+            profiler.note("input_body_size", [input_w, input_h])
+            profiler.note("encode_body_size", [encode_w, encode_h])
+            profiler.note(
+                "encode_megapixels", round((encode_w * encode_h) / 1_000_000, 3)
+            )
+            profiler.note(
+                "face_ref_size",
+                [int(face_t.shape[2]), int(face_t.shape[1])],
+            )
 
-        with _stage(timings, "vae_encode"):
+        with _track(profiler, timings, "vae_encode"):
             body_latent = rt.call("VAEEncode", vae=bundle["vae"], pixels=image1)
+        body_latent_t = get_value_at_index(body_latent, 0)
+        if profiler is not None:
+            profiler.note("latent_shape", describe_latent(body_latent_t))
+
         if not rt.has("TextEncodeQwenImageEditPlus"):
             raise KeyError("TextEncodeQwenImageEditPlus node missing — update ComfyUI")
-        with _stage(timings, "text_encoding"):
+        with _track(profiler, timings, "text_encoding"):
             pos = rt.call(
                 "TextEncodeQwenImageEditPlus",
                 clip=bundle["clip"],
@@ -224,8 +284,6 @@ def _sample_qwen(
             )
             positive = get_value_at_index(pos, 0)
             negative = get_value_at_index(neg, 0)
-            # Official Qwen 2511 blueprint includes Edit Model Reference Method
-            # (FluxKontextMultiReferenceLatentMethod) with index_timestep_zero.
             if rt.has("FluxKontextMultiReferenceLatentMethod"):
                 positive = get_value_at_index(
                     rt.call(
@@ -245,42 +303,92 @@ def _sample_qwen(
                 )
                 flux_kontext_applied = True
 
-        with _stage(timings, "diffusion_sampling"):
-            noise = get_value_at_index(
-                rt.call("RandomNoise", noise_seed=int(cfg.get("seed", 46))), 0
-            )
-            guider = get_value_at_index(
-                rt.call(
-                    "CFGGuider",
-                    model=bundle["model"],
-                    positive=positive,
-                    negative=negative,
-                    cfg=float(cfg.get("cfg", 1.1)),
-                ),
-                0,
-            )
-            sampler = get_value_at_index(
-                rt.call("KSamplerSelect", sampler_name=cfg.get("sampler", "euler")), 0
-            )
-            sigmas = get_value_at_index(
-                rt.call(
-                    "BasicScheduler",
-                    model=bundle["model"],
-                    scheduler=cfg.get("scheduler", "simple"),
-                    steps=int(cfg.get("steps", 6)),
-                    denoise=float(cfg.get("denoise", 1.0)),
-                ),
-                0,
-            )
-            samples = rt.call(
-                "SamplerCustomAdvanced",
-                noise=noise,
-                guider=guider,
-                sampler=sampler,
-                sigmas=sigmas,
-                latent_image=get_value_at_index(body_latent, 0),
-            )
-        with _stage(timings, "vae_decode"):
+        if profiler is not None:
+            with profiler.stage("scheduler_creation"):
+                noise = get_value_at_index(
+                    rt.call("RandomNoise", noise_seed=int(cfg.get("seed", 46))), 0
+                )
+                guider = get_value_at_index(
+                    rt.call(
+                        "CFGGuider",
+                        model=bundle["model"],
+                        positive=positive,
+                        negative=negative,
+                        cfg=float(cfg.get("cfg", 1.1)),
+                    ),
+                    0,
+                )
+                sampler = get_value_at_index(
+                    rt.call("KSamplerSelect", sampler_name=cfg.get("sampler", "euler")),
+                    0,
+                )
+                sigmas = get_value_at_index(
+                    rt.call(
+                        "BasicScheduler",
+                        model=bundle["model"],
+                        scheduler=cfg.get("scheduler", "simple"),
+                        steps=int(cfg.get("steps", 6)),
+                        denoise=float(cfg.get("denoise", 1.0)),
+                    ),
+                    0,
+                )
+                n_steps = count_sigmas(sigmas) or int(cfg.get("steps", 6))
+                profiler.note("sampling_steps", n_steps)
+                profiler.note("sampler_name", cfg.get("sampler", "euler"))
+                profiler.note("scheduler_name", cfg.get("scheduler", "simple"))
+            hook_ok = profiler.install_sampling_step_hook()
+            profiler.note("sampling_step_hook", hook_ok)
+            try:
+                with profiler.stage("sampling_total"):
+                    samples = rt.call(
+                        "SamplerCustomAdvanced",
+                        noise=noise,
+                        guider=guider,
+                        sampler=sampler,
+                        sigmas=sigmas,
+                        latent_image=body_latent_t,
+                    )
+            finally:
+                profiler.restore_sampling_hook()
+        else:
+            with _stage(timings, "diffusion_sampling"):
+                noise = get_value_at_index(
+                    rt.call("RandomNoise", noise_seed=int(cfg.get("seed", 46))), 0
+                )
+                guider = get_value_at_index(
+                    rt.call(
+                        "CFGGuider",
+                        model=bundle["model"],
+                        positive=positive,
+                        negative=negative,
+                        cfg=float(cfg.get("cfg", 1.1)),
+                    ),
+                    0,
+                )
+                sampler = get_value_at_index(
+                    rt.call("KSamplerSelect", sampler_name=cfg.get("sampler", "euler")),
+                    0,
+                )
+                sigmas = get_value_at_index(
+                    rt.call(
+                        "BasicScheduler",
+                        model=bundle["model"],
+                        scheduler=cfg.get("scheduler", "simple"),
+                        steps=int(cfg.get("steps", 6)),
+                        denoise=float(cfg.get("denoise", 1.0)),
+                    ),
+                    0,
+                )
+                samples = rt.call(
+                    "SamplerCustomAdvanced",
+                    noise=noise,
+                    guider=guider,
+                    sampler=sampler,
+                    sigmas=sigmas,
+                    latent_image=body_latent_t,
+                )
+
+        with _track(profiler, timings, "vae_decode"):
             decoded = rt.call(
                 "VAEDecode",
                 samples=get_value_at_index(samples, 0),
@@ -314,17 +422,14 @@ class QwenBaselinePipeline(BasePipeline):
         import torch
 
         t0 = time.perf_counter()
-        timings: dict[str, float] = {}
-        timing_notes: dict[str, str] = {}
+        profiler = GpuStageProfiler()
+        reset_vram_peak()
         rt = self._ensure_runtime()
-        bundle = _load_qwen_stack(rt, self.cfg, timings=timings)
-        if timings.pop("_model_cache_hit", 0.0):
-            timing_notes["model_loading"] = "cache hit"
-            timing_notes["lora_loading"] = "cache hit"
+        bundle = _load_qwen_stack(rt, self.cfg, profiler=profiler)
         div_by = int(self.cfg.get("div_by", 8))
         max_dim = int(self.cfg.get("max_dim", 576))
 
-        with _stage(timings, "preprocessing"):
+        with profiler.stage("preprocessing"):
             body_pil = resize_max_keep_ar(body.convert("RGB"), max_dim, div_by)
             face_crop = crop_face_reference(
                 face,
@@ -342,6 +447,7 @@ class QwenBaselinePipeline(BasePipeline):
                 face_for_model = face_crop.resize(body_pil.size, Image.Resampling.LANCZOS)
             body_t = pil_to_comfy_tensor(body_pil, torch)
             face_t = pil_to_comfy_tensor(face_for_model, torch)
+            profiler.note("preprocess_body_size", list(body_pil.size))
 
         prompt = str(self.cfg.get("prompt", "")).strip()
         out, sample_meta = _sample_qwen(
@@ -351,16 +457,16 @@ class QwenBaselinePipeline(BasePipeline):
             face_t,
             self.cfg,
             prompt,
-            timings=timings,
+            profiler=profiler,
         )
-        # Baseline has no stitch / color match; keep an explicit zero stage for the breakdown.
-        timings.setdefault("postprocessing", 0.0)
+        with profiler.stage("postprocessing"):
+            pass
 
         load_meta = dict(bundle.get("load_meta") or {})
         fallbacks = list(load_meta.get("fallbacks") or []) + list(
             sample_meta.get("fallbacks") or []
         )
-        with _stage(timings, "image_saving"):
+        with profiler.stage("image_saving"):
             dbg = {
                 k: v
                 for k, v in {
@@ -392,7 +498,8 @@ class QwenBaselinePipeline(BasePipeline):
             "encode_body_size": sample_meta.get("encode_body_size"),
             "encode_megapixels": sample_meta.get("encode_megapixels"),
             "fallbacks": fallbacks,
-            "timing_s": {k: round(v, 4) for k, v in timings.items()},
+            "timing_s": {k: round(v, 4) for k, v in profiler.timings_dict().items()},
+            "profile": profiler.to_dict(),
         }
         latency_s = time.perf_counter() - t0
         print(
@@ -404,9 +511,7 @@ class QwenBaselinePipeline(BasePipeline):
             f"encode_mp={meta.get('encode_megapixels')} "
             f"fallbacks={fallbacks or 'none'}"
         )
-        _print_timing_breakdown(
-            "qwen_baseline", timings, latency_s, notes=timing_notes
-        )
+        profiler.print_report(total_s=latency_s, label="qwen_baseline")
         return PipelineResult(
             image=out,
             latency_s=latency_s,
