@@ -187,18 +187,19 @@ def _sample_qwen(
     fallbacks: list[str] = []
     flux_kontext_applied = False
     flux_kontext_image_scale_applied = False
+    use_kontext_scale = bool(cfg.get("flux_kontext_image_scale", False))
 
     with torch.inference_mode():
-        # Official Qwen Image Edit 2511: FluxKontextImageScale on image1 before
-        # TextEncodeQwenImageEditPlus and VAEEncode.
         image1 = body_t
+        input_h, input_w = int(body_t.shape[1]), int(body_t.shape[2])
         with _stage(timings, "flux_kontext_image_scale"):
-            if rt.has("FluxKontextImageScale"):
+            if use_kontext_scale and rt.has("FluxKontextImageScale"):
                 scaled = rt.call("FluxKontextImageScale", image=body_t)
                 image1 = get_value_at_index(scaled, 0)
                 flux_kontext_image_scale_applied = True
-            else:
+            elif use_kontext_scale:
                 fallbacks.append("flux_kontext_image_scale_missing")
+        encode_h, encode_w = int(image1.shape[1]), int(image1.shape[2])
 
         with _stage(timings, "vae_encode"):
             body_latent = rt.call("VAEEncode", vae=bundle["vae"], pixels=image1)
@@ -290,13 +291,17 @@ def _sample_qwen(
             "reference_latent_used": False,
             "flux_kontext_applied": flux_kontext_applied,
             "flux_kontext_image_scale_applied": flux_kontext_image_scale_applied,
+            "flux_kontext_image_scale_enabled": use_kontext_scale,
+            "input_body_size": [input_w, input_h],
+            "encode_body_size": [encode_w, encode_h],
+            "encode_megapixels": round((encode_w * encode_h) / 1_000_000, 3),
             "fallbacks": fallbacks,
         }
         return image, sample_meta
 
 
 class QwenBaselinePipeline(BasePipeline):
-    """Faithful port of the current Magic Hour Colab Cell 5."""
+    """Faithful port of Magic Hour Colab Cell 5 (~28 s warm GPU path)."""
 
     name = "qwen_baseline"
 
@@ -380,6 +385,12 @@ class QwenBaselinePipeline(BasePipeline):
             "flux_kontext_image_scale_applied": bool(
                 sample_meta.get("flux_kontext_image_scale_applied")
             ),
+            "flux_kontext_image_scale_enabled": bool(
+                sample_meta.get("flux_kontext_image_scale_enabled")
+            ),
+            "input_body_size": sample_meta.get("input_body_size"),
+            "encode_body_size": sample_meta.get("encode_body_size"),
+            "encode_megapixels": sample_meta.get("encode_megapixels"),
             "fallbacks": fallbacks,
             "timing_s": {k: round(v, 4) for k, v in timings.items()},
         }
@@ -389,6 +400,8 @@ class QwenBaselinePipeline(BasePipeline):
             f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
             f"flux_kontext={meta['flux_kontext_applied']} "
             f"image_scale={meta['flux_kontext_image_scale_applied']} "
+            f"scale_enabled={meta['flux_kontext_image_scale_enabled']} "
+            f"encode_mp={meta.get('encode_megapixels')} "
             f"fallbacks={fallbacks or 'none'}"
         )
         _print_timing_breakdown(
@@ -486,6 +499,12 @@ class QwenImprovedPipeline(BasePipeline):
             "flux_kontext_image_scale_applied": bool(
                 sample_meta.get("flux_kontext_image_scale_applied")
             ),
+            "flux_kontext_image_scale_enabled": bool(
+                sample_meta.get("flux_kontext_image_scale_enabled")
+            ),
+            "input_body_size": sample_meta.get("input_body_size"),
+            "encode_body_size": sample_meta.get("encode_body_size"),
+            "encode_megapixels": sample_meta.get("encode_megapixels"),
             "fallbacks": fallbacks,
         }
         print(
@@ -493,6 +512,8 @@ class QwenImprovedPipeline(BasePipeline):
             f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
             f"flux_kontext={meta['flux_kontext_applied']} "
             f"image_scale={meta['flux_kontext_image_scale_applied']} "
+            f"scale_enabled={meta['flux_kontext_image_scale_enabled']} "
+            f"encode_mp={meta.get('encode_megapixels')} "
             f"fallbacks={fallbacks or 'none'}"
         )
         return PipelineResult(

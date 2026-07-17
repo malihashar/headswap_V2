@@ -22,6 +22,11 @@ denoise: 1.0
 max_dim: 576
 div_by: 8
 
+# Colab Cell 5 does not run FluxKontextImageScale (keeps ~456×576 encode size).
+# Enabling this snaps to Kontext preferred resolutions (~880×1184 for portrait),
+# ~4× more latent pixels and ~3–10× slower diffusion with no Colab quality gain.
+flux_kontext_image_scale: false
+
 prompt: >-
   Replace the entire head in image 1 with the head from image 2.
   Match image 2 identity strongly.

@@ -21,6 +21,9 @@ scheduler: simple
 seed: 46
 denoise: 1.0
 
+# Official Qwen 2511 blueprint path (not used on Colab-speed baseline).
+flux_kontext_image_scale: true
+
 max_body_dim: 1024
 crop_long_side: 768
 mask_expand_px: 18
