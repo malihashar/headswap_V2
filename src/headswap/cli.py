@@ -44,6 +44,15 @@ def _print_run_summary(report: dict[str, Any], results_dir: Path) -> None:
 
 def main_run(argv: list[str] | None = None) -> int:
     """Run one pipeline from a YAML config; write images + metrics.json; exit."""
+    # Path proof FIRST — if PATH_PROOF_V1 never appears, this package is not running.
+    try:
+        from headswap.profiling.path_proof import PATH_PROOF_TOKEN, dump_identity, enter
+
+        enter("0", f"cli.main_run token={PATH_PROOF_TOKEN}")
+        dump_identity("cli.main_run")
+    except Exception as exc:  # noqa: BLE001 — must never block the run
+        print(f"[path_proof] FAILED to import/run at cli: {exc}", flush=True)
+
     ap = argparse.ArgumentParser(
         description=(
             "Run a single head-swap pipeline from its config. "

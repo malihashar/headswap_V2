@@ -108,6 +108,23 @@ def invoke_node(node_cls: type, **kwargs: Any) -> Any:
     (true for V3, false for V1 nodes like ``ConditioningZeroOut`` whose FUNCTION is
     ``zero_out``). Always go through this helper (or ``NodeRuntime.call``).
     """
+    # Path proof: only noise on VAEDecode (the node that OOMs).
+    if getattr(node_cls, "__name__", None) == "VAEDecode" or (
+        getattr(node_cls, "FUNCTION", None) == "decode"
+        and "VAEDecode" in getattr(node_cls, "__qualname__", "")
+    ):
+        try:
+            from headswap.profiling.path_proof import enter
+
+            enter(
+                "E",
+                f"invoke_node cls={getattr(node_cls, '__name__', node_cls)} "
+                f"FUNCTION={getattr(node_cls, 'FUNCTION', None)} "
+                f"module={getattr(node_cls, '__module__', None)}",
+            )
+        except Exception:
+            pass
+
     func_name = getattr(node_cls, "FUNCTION", None)
     if func_name is None:
         raise TypeError(
@@ -162,6 +179,18 @@ class NodeRuntime:
         """Invoke node ``name`` with kwargs matching its INPUT_TYPES / schema."""
         if name not in self.mappings:
             raise KeyError(f"ComfyUI node '{name}' not found. Update ComfyUI?")
+        if name == "VAEDecode":
+            try:
+                from headswap.profiling.path_proof import dump_vaedecode_impl, enter
+
+                enter(
+                    "D",
+                    f"NodeRuntime.call(VAEDecode) mapping={self.mappings[name]!r} "
+                    f"id={id(self.mappings[name])}",
+                )
+                dump_vaedecode_impl(self)
+            except Exception:
+                pass
         return invoke_node(self.mappings[name], **kwargs)
 
 
