@@ -8,6 +8,7 @@ from typing import Iterator
 from PIL import Image
 
 from headswap.comfy.runtime import NodeRuntime, comfy_tensor_to_pil, get_value_at_index, pil_to_comfy_tensor
+from headswap.comfy.full_load import force_sampling_full_load
 from headswap.pipelines.base import BasePipeline, PipelineResult, build_prompt
 from headswap.pipelines.errors import PipelineRunError
 from headswap.preprocess import (
@@ -311,6 +312,7 @@ def _sample_qwen(
                 )
                 flux_kontext_applied = True
 
+        full_load_info = None
         if profiler is not None:
             with profiler.stage("scheduler_creation"):
                 noise = get_value_at_index(
@@ -346,19 +348,20 @@ def _sample_qwen(
                 profiler.note("scheduler_name", cfg.get("scheduler", "simple"))
             hook_ok = profiler.install_sampling_step_hook()
             profiler.note("sampling_step_hook", hook_ok)
-            # Verification only: capture full vs partial UNet residency (no perf changes).
             try:
-                with vram_load_probe() as load_probe:
-                    with profiler.stage("sampling_total"):
-                        samples = rt.call(
-                            "SamplerCustomAdvanced",
-                            noise=noise,
-                            guider=guider,
-                            sampler=sampler,
-                            sigmas=sigmas,
-                            latent_image=body_latent_t,
-                        )
-                profiler.note("vram_load_probe", load_probe.report.to_dict())
+                with force_sampling_full_load() as full_load_info:
+                    profiler.note("force_sampling_full_load", full_load_info)
+                    with vram_load_probe() as load_probe:
+                        with profiler.stage("sampling_total"):
+                            samples = rt.call(
+                                "SamplerCustomAdvanced",
+                                noise=noise,
+                                guider=guider,
+                                sampler=sampler,
+                                sigmas=sigmas,
+                                latent_image=body_latent_t,
+                            )
+                    profiler.note("vram_load_probe", load_probe.report.to_dict())
             finally:
                 profiler.restore_sampling_hook()
         else:
@@ -390,14 +393,15 @@ def _sample_qwen(
                     ),
                     0,
                 )
-                samples = rt.call(
-                    "SamplerCustomAdvanced",
-                    noise=noise,
-                    guider=guider,
-                    sampler=sampler,
-                    sigmas=sigmas,
-                    latent_image=body_latent_t,
-                )
+                with force_sampling_full_load() as full_load_info:
+                    samples = rt.call(
+                        "SamplerCustomAdvanced",
+                        noise=noise,
+                        guider=guider,
+                        sampler=sampler,
+                        sigmas=sigmas,
+                        latent_image=body_latent_t,
+                    )
 
         with _track(profiler, timings, "vae_decode"):
             decoded = rt.call(
@@ -415,6 +419,7 @@ def _sample_qwen(
             "encode_body_size": [encode_w, encode_h],
             "encode_megapixels": round((encode_w * encode_h) / 1_000_000, 3),
             "fallbacks": fallbacks,
+            "force_sampling_full_load": full_load_info,
         }
         if profiler is not None and "vram_load_probe" in profiler.extras:
             sample_meta["vram_load_probe"] = profiler.extras["vram_load_probe"]
@@ -535,6 +540,8 @@ class QwenBaselinePipeline(BasePipeline):
             }
             if sample_meta.get("vram_load_probe") is not None:
                 meta["vram_load_probe"] = sample_meta["vram_load_probe"]
+            if sample_meta.get("force_sampling_full_load") is not None:
+                meta["force_sampling_full_load"] = sample_meta["force_sampling_full_load"]
             if run_error is not None:
                 meta["run_error"] = str(run_error)
                 meta["run_error_type"] = type(run_error).__name__
@@ -670,6 +677,7 @@ class QwenImprovedPipeline(BasePipeline):
             "encode_body_size": sample_meta.get("encode_body_size"),
             "encode_megapixels": sample_meta.get("encode_megapixels"),
             "fallbacks": fallbacks,
+            "force_sampling_full_load": sample_meta.get("force_sampling_full_load"),
         }
         print(
             f"[qwen_improved] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "

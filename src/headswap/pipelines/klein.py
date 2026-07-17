@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from headswap.comfy.full_load import force_sampling_full_load
 from headswap.comfy.runtime import (
     NodeRuntime,
     comfy_tensor_to_pil,
@@ -319,14 +320,16 @@ class KleinMaskCropPipeline(BasePipeline):
                 ),
                 0,
             )
-            samples = rt.call(
-                "SamplerCustomAdvanced",
-                noise=noise,
-                guider=guider,
-                sampler=sampler,
-                sigmas=sigmas,
-                latent_image=latent_image,
-            )
+            samples = None
+            with force_sampling_full_load():
+                samples = rt.call(
+                    "SamplerCustomAdvanced",
+                    noise=noise,
+                    guider=guider,
+                    sampler=sampler,
+                    sigmas=sigmas,
+                    latent_image=latent_image,
+                )
             decoded = rt.call(
                 "VAEDecode",
                 samples=get_value_at_index(samples, 0),
