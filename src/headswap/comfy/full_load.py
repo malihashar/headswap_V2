@@ -18,32 +18,91 @@ Colab Cell 5 (~2.8 s/step) runs with the UNet fully resident. Forcing
 (model_load uses the full-weight path) without changing weights, dtype,
 sampler, or graph — quality is unchanged; only residency changes.
 
-We also free currently-loaded models (CLIP/VAE) before sampling so the UNet
-has room to fully reside on a 16GB card.
+Lifecycle (matches ComfyUI's intended load/unload rhythm)
+---------------------------------------------------------
+1. Before sample: free currently-loaded models (CLIP/VAE) so the UNet fits.
+2. During sample: force full UNet residency.
+3. After sample: unload all GPU models (UNet) via unload_all_models /
+   free_memory so VAE decode has VRAM. Without this step, a fully-resident
+   UNet can leave only ~tens of MiB free and VAEDecode OOMs on a 16GB card.
 """
 from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Any, Iterator
+
+
+def _free_mb(mm: Any, device: Any) -> float | None:
+    try:
+        return round(mm.get_free_memory(device) / (1024**2), 1)
+    except Exception:
+        return None
+
+
+def offload_gpu_models(*, reason: str) -> dict:
+    """
+    Offload every currently GPU-resident model via ComfyUI model_management.
+
+    Uses ``unload_all_models()`` when available (calls ``free_memory(1e30, …)``
+    per device), otherwise ``free_memory(1e30, get_torch_device())``. Then
+    ``soft_empty_cache()`` so CUDA returns freed blocks to the allocator.
+    """
+    info: dict = {
+        "ok": False,
+        "reason": reason,
+        "free_vram_mb_before": None,
+        "free_vram_mb_after": None,
+        "error": None,
+    }
+    try:
+        import comfy.model_management as mm
+    except Exception as exc:
+        info["error"] = f"import_failed:{exc}"
+        print(f"[full_load] offload skip ({reason}) — ComfyUI not available: {exc}")
+        return info
+
+    try:
+        device = mm.get_torch_device()
+        info["free_vram_mb_before"] = _free_mb(mm, device)
+        if hasattr(mm, "unload_all_models"):
+            mm.unload_all_models()
+            info["api"] = "unload_all_models"
+        else:
+            mm.free_memory(1e30, device)
+            info["api"] = "free_memory"
+        if hasattr(mm, "soft_empty_cache"):
+            mm.soft_empty_cache()
+        info["free_vram_mb_after"] = _free_mb(mm, device)
+        info["ok"] = True
+        print(
+            f"[full_load] offloaded GPU models ({reason}, api={info['api']}) "
+            f"free_vram_mb {info['free_vram_mb_before']} → {info['free_vram_mb_after']}"
+        )
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+    except Exception as exc:
+        info["error"] = str(exc)
+        print(f"[full_load] offload warning ({reason}): {exc}")
+    return info
 
 
 @contextmanager
 def force_sampling_full_load() -> Iterator[dict]:
     """
-    Context manager: unload idle GPU models, then force full UNet load for sample.
-
-    Patches ``comfy.sampler_helpers.prepare_sampling`` to pass
-    ``force_full_load=True``. Restores the original on exit.
+    Context manager: free idle GPU models, force full UNet load for sample,
+    then unload the sampling model so VAE decode can load.
     """
     info: dict = {
         "enabled": False,
         "freed_before_sample": False,
+        "freed_after_sample": False,
         "force_full_load": False,
         "error": None,
     }
     try:
-        import comfy.model_management as mm
         import comfy.sampler_helpers as sh
     except Exception as exc:
         info["error"] = f"import_failed:{exc}"
@@ -51,35 +110,11 @@ def force_sampling_full_load() -> Iterator[dict]:
         yield info
         return
 
-    # Offload whatever is currently on GPU (typically CLIP/VAE after text encode)
-    # so free_vram can hold the full UNet. Does not delete ModelPatcher objects.
-    try:
-        device = mm.get_torch_device()
-        free_before = None
-        try:
-            free_before = round(mm.get_free_memory(device) / (1024**2), 1)
-        except Exception:
-            pass
-        mm.free_memory(1e30, device)
-        free_after = None
-        try:
-            free_after = round(mm.get_free_memory(device) / (1024**2), 1)
-        except Exception:
-            pass
-        info["freed_before_sample"] = True
-        info["free_vram_mb_before_free"] = free_before
-        info["free_vram_mb_after_free"] = free_after
-        print(
-            f"[full_load] freed GPU residents before sample "
-            f"(free_vram_mb {free_before} → {free_after})"
-        )
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-    except Exception as exc:
-        info["error"] = f"free_memory_failed:{exc}"
-        print(f"[full_load] free_memory warning: {exc}")
+    before = offload_gpu_models(reason="before_sample")
+    info["freed_before_sample"] = bool(before.get("ok"))
+    info["offload_before"] = before
+    if before.get("error") and not info.get("error"):
+        info["error"] = f"before_sample:{before['error']}"
 
     orig = sh.prepare_sampling
 
@@ -118,3 +153,9 @@ def force_sampling_full_load() -> Iterator[dict]:
             sys.stdout.flush()
         except Exception:
             pass
+        # Critical: fully-resident UNet must leave GPU before VAEDecode.
+        after = offload_gpu_models(reason="after_sample")
+        info["freed_after_sample"] = bool(after.get("ok"))
+        info["offload_after"] = after
+        if after.get("error") and not info.get("error"):
+            info["error"] = f"after_sample:{after['error']}"

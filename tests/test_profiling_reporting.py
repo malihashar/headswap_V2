@@ -20,22 +20,55 @@ if "torch" not in sys.modules:
 from headswap.config import load_config
 from headswap.eval.runner import run_eval
 from headswap.pipelines.errors import PipelineRunError
-from headswap.pipelines.qwen import QwenBaselinePipeline
+from headswap.pipelines.qwen import QwenBaselinePipeline, QwenImprovedPipeline
 from headswap.profiling.gpu_stages import GpuStageProfiler
 from headswap.profiling.reporting import emit_profile_report
 
 
-def _fake_qwen_patches(sample_side_effect):
-    fake_rt = object()
-    fake_bundle = {
+def _fake_bundle():
+    return {
         "model": object(),
         "clip": object(),
         "vae": object(),
-        "load_meta": {"checkpoint": "test.safetensors", "loras_loaded": [], "lora_strengths": {}, "fallbacks": []},
+        "load_meta": {
+            "checkpoint": "test.safetensors",
+            "loras_loaded": [],
+            "lora_strengths": {},
+            "fallbacks": [],
+        },
     }
+
+
+def _fake_qwen_patches(sample_side_effect):
+    fake_rt = object()
     return (
         patch.object(QwenBaselinePipeline, "_ensure_runtime", return_value=fake_rt),
-        patch("headswap.pipelines.qwen._load_qwen_stack", return_value=fake_bundle),
+        patch("headswap.pipelines.qwen._load_qwen_stack", return_value=_fake_bundle()),
+        patch("headswap.pipelines.qwen._sample_qwen", side_effect=sample_side_effect),
+    )
+
+
+def _fake_improved_patches(sample_side_effect, load_side_effect=None):
+    fake_rt = object()
+    face = Image.new("RGB", (64, 64), color=(120, 80, 60))
+    mask = Image.new("L", (64, 64), 255)
+
+    def default_load(_rt, _cfg, timings=None, profiler=None):
+        if profiler is not None:
+            with profiler.stage("model_loading", cache_hit=False):
+                pass
+            with profiler.stage("lora_loading", cache_hit=False):
+                pass
+        return _fake_bundle()
+
+    return (
+        patch.object(QwenImprovedPipeline, "_ensure_runtime", return_value=fake_rt),
+        patch(
+            "headswap.pipelines.qwen._load_qwen_stack",
+            side_effect=load_side_effect or default_load,
+        ),
+        patch("headswap.pipelines.qwen.crop_face_reference", return_value=face),
+        patch("headswap.pipelines.qwen.head_hair_mask_from_face", return_value=mask),
         patch("headswap.pipelines.qwen._sample_qwen", side_effect=sample_side_effect),
     )
 
@@ -115,3 +148,94 @@ def test_run_eval_persists_profile_when_pipeline_fails(tmp_path, capsys):
     assert row["meta"]["timing_s"]
     assert (tmp_path / "results" / "metrics.json").is_file()
     assert "[qwen_baseline profile]" in capsys.readouterr().out
+
+
+def test_qwen_improved_emits_profile_on_sample_failure(capsys):
+    cfg = load_config(ROOT / "configs" / "qwen_improved.yaml")
+    pipe = QwenImprovedPipeline(cfg)
+    body = face = Image.new("RGB", (64, 64), color=(128, 64, 32))
+
+    patches = _fake_improved_patches(RuntimeError("boom"))
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with pytest.raises(PipelineRunError, match="boom"):
+            pipe.run(body, face)
+
+    out = capsys.readouterr().out
+    assert "[qwen_improved profile]" in out
+    for stage in (
+        "model_loading",
+        "lora_loading",
+        "preprocessing",
+        "postprocessing",
+        "image_saving",
+    ):
+        # sample fails before postprocessing/image_saving; earlier stages must appear
+        if stage in ("postprocessing", "image_saving"):
+            continue
+        assert stage in out
+
+    # Failure path still persists timing_s / profile on the error
+    patches = _fake_improved_patches(RuntimeError("boom"))
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with pytest.raises(PipelineRunError) as ei:
+            pipe.run(body, face)
+    meta = ei.value.meta
+    assert "profile" in meta
+    assert "timing_s" in meta
+    assert "preprocessing" in meta["timing_s"]
+    assert "model_loading" in meta["timing_s"]
+
+
+def test_qwen_improved_emits_full_stage_profile_on_success(capsys):
+    cfg = load_config(ROOT / "configs" / "qwen_improved.yaml")
+    pipe = QwenImprovedPipeline(cfg)
+    body = face = Image.new("RGB", (64, 64), color=(128, 64, 32))
+    edited = Image.new("RGB", (64, 64), color=(90, 90, 90))
+
+    def fake_sample(*_a, **kwargs):
+        profiler = kwargs.get("profiler")
+        assert profiler is not None
+        for name in (
+            "flux_kontext_image_scale",
+            "vae_encode",
+            "text_encoding",
+            "scheduler_creation",
+            "sampling_total",
+            "vae_decode",
+        ):
+            with profiler.stage(name):
+                pass
+        return edited, {
+            "fallbacks": [],
+            "flux_kontext_applied": True,
+            "flux_kontext_image_scale_applied": True,
+            "flux_kontext_image_scale_enabled": True,
+            "input_body_size": [64, 64],
+            "encode_body_size": [64, 64],
+            "encode_megapixels": 0.004,
+        }
+
+    patches = _fake_improved_patches(fake_sample)
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        result = pipe.run(body, face)
+
+    out = capsys.readouterr().out
+    assert "[qwen_improved profile]" in out
+    for stage in (
+        "model_loading",
+        "lora_loading",
+        "preprocessing",
+        "flux_kontext_image_scale",
+        "vae_encode",
+        "text_encoding",
+        "scheduler_creation",
+        "sampling_total",
+        "vae_decode",
+        "postprocessing",
+        "image_saving",
+    ):
+        assert stage in out, f"missing stage {stage} in:\n{out}"
+
+    assert "timing_s" in result.meta
+    assert "profile" in result.meta
+    assert result.meta["timing_s"]["sampling_total"] >= 0.0

@@ -597,100 +597,172 @@ class QwenImprovedPipeline(BasePipeline):
         return self.runtime
 
     def run(self, body: Image.Image, face: Image.Image, out_dir: Path | None = None) -> PipelineResult:
-        import torch
-
         t0 = time.perf_counter()
-        rt = self._ensure_runtime()
-        bundle = _load_qwen_stack(rt, self.cfg)
-        div_by = int(self.cfg.get("div_by", 8))
+        profiler = GpuStageProfiler()
+        reset_vram_peak()
+        run_error: BaseException | None = None
+        out: Image.Image | None = None
+        sample_meta: dict = {}
+        body_full: Image.Image | None = None
+        face_crop: Image.Image | None = None
+        face_ref: Image.Image | None = None
+        crop_work: Image.Image | None = None
+        mask = None
+        box = None
+        edited: Image.Image | None = None
+        dbg: dict[str, str] = {}
+        load_meta: dict = {}
+        fallbacks: list[str] = []
+        prompt = ""
 
-        body_full = resize_max_keep_ar(
-            body.convert("RGB"), int(self.cfg.get("max_body_dim", 1024)), div_by
-        )
-        face_crop = crop_face_reference(
-            face,
-            self.cache_dir,
-            top=float(self.cfg.get("face_top_pad", 0.65)),
-            bot=float(self.cfg.get("face_bot_pad", 0.25)),
-            side=float(self.cfg.get("face_side_pad", 0.35)),
-            include_shoulders=bool(self.cfg.get("include_shoulders", True)),
-        )
-        mask = head_hair_mask_from_face(
-            body_full,
-            self.cache_dir,
-            expand_px=int(self.cfg.get("mask_expand_px", 18)),
-            blur_px=int(self.cfg.get("mask_blur_px", 12)),
-        )
-        crop_img, _, box = crop_with_mask(body_full, mask, pad=12, div_by=div_by)
-        crop_work = resize_long_side(crop_img, int(self.cfg.get("crop_long_side", 768)), div_by)
-        if self.cfg.get("blur_pad_face", False):
-            face_ref = pad_to_ar_blur(face_crop, crop_work.width / crop_work.height).resize(
-                crop_work.size, Image.Resampling.LANCZOS
+        try:
+            import torch
+
+            t_bootstrap = time.perf_counter()
+            rt = self._ensure_runtime()
+            profiler.note("bootstrap_s", round(time.perf_counter() - t_bootstrap, 4))
+            bundle = _load_qwen_stack(rt, self.cfg, profiler=profiler)
+            div_by = int(self.cfg.get("div_by", 8))
+
+            with profiler.stage("preprocessing"):
+                body_full = resize_max_keep_ar(
+                    body.convert("RGB"), int(self.cfg.get("max_body_dim", 1024)), div_by
+                )
+                face_crop = crop_face_reference(
+                    face,
+                    self.cache_dir,
+                    top=float(self.cfg.get("face_top_pad", 0.65)),
+                    bot=float(self.cfg.get("face_bot_pad", 0.25)),
+                    side=float(self.cfg.get("face_side_pad", 0.35)),
+                    include_shoulders=bool(self.cfg.get("include_shoulders", True)),
+                )
+                mask = head_hair_mask_from_face(
+                    body_full,
+                    self.cache_dir,
+                    expand_px=int(self.cfg.get("mask_expand_px", 18)),
+                    blur_px=int(self.cfg.get("mask_blur_px", 12)),
+                )
+                crop_img, _, box = crop_with_mask(body_full, mask, pad=12, div_by=div_by)
+                crop_work = resize_long_side(
+                    crop_img, int(self.cfg.get("crop_long_side", 768)), div_by
+                )
+                if self.cfg.get("blur_pad_face", False):
+                    face_ref = pad_to_ar_blur(
+                        face_crop, crop_work.width / crop_work.height
+                    ).resize(crop_work.size, Image.Resampling.LANCZOS)
+                else:
+                    face_ref = face_crop.resize(crop_work.size, Image.Resampling.LANCZOS)
+                prompt = build_prompt(self.cfg, body_full, face_crop, self.cache_dir)
+                crop_t = pil_to_comfy_tensor(crop_work, torch)
+                face_t = pil_to_comfy_tensor(face_ref, torch)
+                profiler.note("preprocess_body_size", list(body_full.size))
+                profiler.note("preprocess_crop_size", list(crop_work.size))
+
+            edited, sample_meta = _sample_qwen(
+                rt,
+                bundle,
+                crop_t,
+                face_t,
+                self.cfg,
+                prompt,
+                profiler=profiler,
             )
-        else:
-            face_ref = face_crop.resize(crop_work.size, Image.Resampling.LANCZOS)
+            with profiler.stage("postprocessing"):
+                out = soft_composite(body_full, edited, mask, box)
+                out = lab_histogram_match_face(out, body_full, mask, strength=0.3)
 
-        prompt = build_prompt(self.cfg, body_full, face_crop, self.cache_dir)
-        edited, sample_meta = _sample_qwen(
-            rt,
-            bundle,
-            pil_to_comfy_tensor(crop_work, torch),
-            pil_to_comfy_tensor(face_ref, torch),
-            self.cfg,
-            prompt,
-        )
-        stitched = soft_composite(body_full, edited, mask, box)
-        stitched = lab_histogram_match_face(stitched, body_full, mask, strength=0.3)
-        load_meta = dict(bundle.get("load_meta") or {})
-        fallbacks = list(load_meta.get("fallbacks") or []) + list(
-            sample_meta.get("fallbacks") or []
-        )
-        dbg = {
-            k: v
-            for k, v in {
-                "debug_body": self._save_debug(out_dir, "debug_body.png", body_full),
-                "debug_face_crop": self._save_debug(out_dir, "debug_face_crop.png", face_crop),
-                "debug_mask": self._save_debug(out_dir, "debug_mask.png", mask),
-                "debug_crop": self._save_debug(out_dir, "debug_crop.png", crop_work),
-                "debug_edited_crop": self._save_debug(out_dir, "debug_edited_crop.png", edited),
-            }.items()
-            if v
-        }
-        meta = {
-            "pipeline": self.name,
-            "checkpoint": load_meta.get("checkpoint"),
-            "loras_loaded": list(load_meta.get("loras_loaded") or []),
-            "lora_strengths": dict(load_meta.get("lora_strengths") or {}),
-            "prompt": prompt,
-            "crop_size": list(crop_work.size),
-            "body_size": list(body_full.size),
-            "face_ref_size": list(face_ref.size),
-            "reference_latent_used": bool(sample_meta.get("reference_latent_used")),
-            "flux_kontext_applied": bool(sample_meta.get("flux_kontext_applied")),
-            "flux_kontext_image_scale_applied": bool(
-                sample_meta.get("flux_kontext_image_scale_applied")
-            ),
-            "flux_kontext_image_scale_enabled": bool(
-                sample_meta.get("flux_kontext_image_scale_enabled")
-            ),
-            "input_body_size": sample_meta.get("input_body_size"),
-            "encode_body_size": sample_meta.get("encode_body_size"),
-            "encode_megapixels": sample_meta.get("encode_megapixels"),
-            "fallbacks": fallbacks,
-            "force_sampling_full_load": sample_meta.get("force_sampling_full_load"),
-        }
-        print(
-            f"[qwen_improved] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
-            f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
-            f"flux_kontext={meta['flux_kontext_applied']} "
-            f"image_scale={meta['flux_kontext_image_scale_applied']} "
-            f"scale_enabled={meta['flux_kontext_image_scale_enabled']} "
-            f"encode_mp={meta.get('encode_megapixels')} "
-            f"fallbacks={fallbacks or 'none'}"
-        )
+            load_meta = dict(bundle.get("load_meta") or {})
+            fallbacks = list(load_meta.get("fallbacks") or []) + list(
+                sample_meta.get("fallbacks") or []
+            )
+            with profiler.stage("image_saving"):
+                dbg = {
+                    k: v
+                    for k, v in {
+                        "debug_body": self._save_debug(out_dir, "debug_body.png", body_full),
+                        "debug_face_crop": self._save_debug(
+                            out_dir, "debug_face_crop.png", face_crop
+                        ),
+                        "debug_mask": self._save_debug(out_dir, "debug_mask.png", mask),
+                        "debug_crop": self._save_debug(out_dir, "debug_crop.png", crop_work),
+                        "debug_edited_crop": self._save_debug(
+                            out_dir, "debug_edited_crop.png", edited
+                        ),
+                    }.items()
+                    if v
+                }
+        except BaseException as exc:
+            run_error = exc
+        finally:
+            latency_s = time.perf_counter() - t0
+            meta = {
+                "pipeline": self.name,
+                "checkpoint": load_meta.get("checkpoint"),
+                "loras_loaded": list(load_meta.get("loras_loaded") or []),
+                "lora_strengths": dict(load_meta.get("lora_strengths") or {}),
+                "prompt": prompt,
+                "crop_size": list(crop_work.size) if crop_work is not None else None,
+                "body_size": list(body_full.size) if body_full is not None else None,
+                "face_ref_size": list(face_ref.size) if face_ref is not None else None,
+                "reference_latent_used": bool(sample_meta.get("reference_latent_used")),
+                "flux_kontext_applied": bool(sample_meta.get("flux_kontext_applied")),
+                "flux_kontext_image_scale_applied": bool(
+                    sample_meta.get("flux_kontext_image_scale_applied")
+                ),
+                "flux_kontext_image_scale_enabled": bool(
+                    sample_meta.get("flux_kontext_image_scale_enabled")
+                ),
+                "input_body_size": sample_meta.get("input_body_size"),
+                "encode_body_size": sample_meta.get("encode_body_size"),
+                "encode_megapixels": sample_meta.get("encode_megapixels"),
+                "fallbacks": fallbacks,
+                "timing_s": profile_timing_meta(profiler),
+                "profile": profiler.to_dict(),
+                "latency_s": round(latency_s, 4),
+            }
+            if sample_meta.get("vram_load_probe") is not None:
+                meta["vram_load_probe"] = sample_meta["vram_load_probe"]
+            if sample_meta.get("force_sampling_full_load") is not None:
+                meta["force_sampling_full_load"] = sample_meta["force_sampling_full_load"]
+            if run_error is not None:
+                meta["run_error"] = str(run_error)
+                meta["run_error_type"] = type(run_error).__name__
+
+            print(
+                f"[qwen_improved] checkpoint={meta.get('checkpoint')} loras={meta.get('loras_loaded')} "
+                f"strengths={meta.get('lora_strengths')} crop={meta.get('crop_size')} "
+                f"flux_kontext={meta.get('flux_kontext_applied')} "
+                f"image_scale={meta.get('flux_kontext_image_scale_applied')} "
+                f"scale_enabled={meta.get('flux_kontext_image_scale_enabled')} "
+                f"encode_mp={meta.get('encode_megapixels')} "
+                f"fallbacks={fallbacks or 'none'}"
+            )
+            emit_profile_report(
+                profiler,
+                total_s=latency_s,
+                label="qwen_improved",
+                error=str(run_error) if run_error is not None else None,
+            )
+
+        if run_error is not None:
+            raise PipelineRunError(
+                str(run_error),
+                meta=meta,
+                latency_s=latency_s,
+                image=out,
+                debug_paths=dbg,
+            ) from run_error
+        if out is None:
+            raise PipelineRunError(
+                "pipeline finished without output image",
+                meta=meta,
+                latency_s=latency_s,
+                debug_paths=dbg,
+            )
+
         return PipelineResult(
-            image=stitched,
-            latency_s=time.perf_counter() - t0,
+            image=out,
+            latency_s=latency_s,
             meta=meta,
             debug_paths=dbg,
         )
