@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,40 @@ from headswap.config import load_config, project_root, resolve_out_dir
 from headswap.eval.dataset import load_pairs
 from headswap.metrics.scoring import PairMetrics, score_pair
 from headswap.pipelines import create_pipeline
+from headswap.pipelines.base import PipelineResult
+from headswap.pipelines.errors import PipelineRunError
 from headswap.preprocess import head_hair_mask_from_face
+from headswap.profiling.reporting import emit_run_finished, flush_stdio
+
+
+def _write_metrics_report(report_path: Path, report: dict[str, Any]) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, default=str))
+
+
+def _error_row(
+    *,
+    pair: dict[str, Any],
+    pipeline: str,
+    message: str,
+    meta: dict[str, Any] | None = None,
+    latency_s: float | None = None,
+) -> dict[str, Any]:
+    return {
+        "pair_id": pair["id"],
+        "pipeline": pipeline,
+        "latency_s": latency_s,
+        "identity_cosine": None,
+        "body_preserve_psnr": None,
+        "seam_edge_delta": None,
+        "face_detected": False,
+        "success": False,
+        "fail_reasons": [f"run_error:{message[:200]}"],
+        "difficulty": pair.get("difficulty"),
+        "tags": pair.get("tags"),
+        "result_path": None,
+        "meta": {**(meta or {}), "run_error": message},
+    }
 
 
 def run_eval(
@@ -27,6 +61,8 @@ def run_eval(
     results_dir = resolve_out_dir(cfg, out_dir)
     images_dir = results_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
+    report_path = results_dir / "metrics.json"
+    pipeline_name = str(cfg.get("name", pipe.name))
 
     pairs = load_pairs()
     if pair_ids:
@@ -36,55 +72,140 @@ def run_eval(
         pairs = pairs[:limit]
 
     rows: list[dict[str, Any]] = []
+    report_base = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "config": str(Path(config_path).resolve()),
+        "pipeline": pipeline_name,
+        "force_mock": force_mock or bool(cfg.get("force_mock")),
+    }
+
     for p in pairs:
         body = Image.open(p["body_path"]).convert("RGB")
         face = Image.open(p["face_path"]).convert("RGB")
         pair_out = images_dir / p["id"]
         pair_out.mkdir(parents=True, exist_ok=True)
-        result = pipe.run(body, face, out_dir=pair_out)
-        out_path = pair_out / "result.png"
-        result.image.save(out_path)
 
-        mask = head_hair_mask_from_face(body, pipe.cache_dir)
-        # Align mask to result size
-        mask_r = mask.resize(result.image.size, Image.Resampling.NEAREST)
-        body_r = body.resize(result.image.size, Image.Resampling.LANCZOS)
-        metrics = score_pair(
-            pair_id=p["id"],
-            pipeline=cfg.get("name", pipe.name),
-            body=body_r,
-            face=face,
-            result=result.image,
-            latency_s=result.latency_s,
-            head_mask=mask_r,
-            cache_dir=pipe.cache_dir,
-        )
-        row = {
-            **metrics.to_dict(),
-            "difficulty": p.get("difficulty"),
-            "tags": p.get("tags"),
-            "result_path": str(out_path),
-            "meta": result.meta,
-        }
-        rows.append(row)
-        print(
-            f"[{row['pipeline']}] {p['id']} success={row['success']} "
-            f"id={row['identity_cosine']} lat={row['latency_s']:.2f}s reasons={row['fail_reasons']}"
-        )
+        result: PipelineResult | None = None
+        pair_error: str | None = None
 
-    summary = summarize(rows)
-    report = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "config": str(Path(config_path).resolve()),
-        "pipeline": cfg.get("name", pipe.name),
-        "force_mock": force_mock or bool(cfg.get("force_mock")),
-        "n_pairs": len(rows),
-        "summary": summary,
-        "pairs": rows,
-    }
-    report_path = results_dir / "metrics.json"
-    report_path.write_text(json.dumps(report, indent=2))
+        try:
+            try:
+                result = pipe.run(body, face, out_dir=pair_out)
+            except PipelineRunError as exc:
+                pair_error = str(exc)
+                result = exc.to_partial_result()
+                if result is None:
+                    emit_run_finished(
+                        pipeline=pipeline_name,
+                        pair_id=p["id"],
+                        result_meta=exc.meta,
+                        latency_s=exc.latency_s,
+                        had_error=True,
+                    )
+                    rows.append(
+                        _error_row(
+                            pair=p,
+                            pipeline=pipeline_name,
+                            message=pair_error,
+                            meta=exc.meta,
+                            latency_s=exc.latency_s,
+                        )
+                    )
+                    _write_metrics_report(
+                        report_path,
+                        {**report_base, "n_pairs": len(rows), "summary": summarize(rows), "pairs": rows},
+                    )
+                    flush_stdio()
+                    print(
+                        f"[{pipeline_name}] {p['id']} FAILED lat={exc.latency_s:.2f}s "
+                        f"(profile saved to metrics.json)"
+                    )
+                    continue
+                result.meta.setdefault("run_error", pair_error)
+
+            emit_run_finished(
+                pipeline=pipeline_name,
+                pair_id=p["id"],
+                result_meta=result.meta,
+                latency_s=result.latency_s,
+                had_error=pair_error is not None,
+            )
+
+            out_path: str | None = None
+            metrics: PairMetrics | None = None
+            post_error: str | None = None
+            try:
+                out_file = pair_out / "result.png"
+                result.image.save(out_file)
+                out_path = str(out_file)
+
+                mask = head_hair_mask_from_face(body, pipe.cache_dir)
+                mask_r = mask.resize(result.image.size, Image.Resampling.NEAREST)
+                body_r = body.resize(result.image.size, Image.Resampling.LANCZOS)
+                metrics = score_pair(
+                    pair_id=p["id"],
+                    pipeline=pipeline_name,
+                    body=body_r,
+                    face=face,
+                    result=result.image,
+                    latency_s=result.latency_s,
+                    head_mask=mask_r,
+                    cache_dir=pipe.cache_dir,
+                )
+            except Exception as post_exc:
+                post_error = str(post_exc)
+                traceback.print_exc()
+
+            if metrics is not None:
+                row = {
+                    **metrics.to_dict(),
+                    "difficulty": p.get("difficulty"),
+                    "tags": p.get("tags"),
+                    "result_path": out_path,
+                    "meta": result.meta,
+                }
+            else:
+                row = _error_row(
+                    pair=p,
+                    pipeline=pipeline_name,
+                    message=post_error or pair_error or "post_pipeline_failed",
+                    meta=result.meta,
+                    latency_s=result.latency_s,
+                )
+                row["result_path"] = out_path
+
+            if post_error:
+                row["meta"] = {**row.get("meta", {}), "post_run_error": post_error}
+
+            rows.append(row)
+            lat_val = row.get("latency_s")
+            lat_txt = f"{float(lat_val):.2f}s" if lat_val is not None else "n/a"
+            print(
+                f"[{row['pipeline']}] {p['id']} success={row['success']} "
+                f"id={row.get('identity_cosine')} lat={lat_txt} "
+                f"reasons={row.get('fail_reasons')}"
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            rows.append(
+                _error_row(
+                    pair=p,
+                    pipeline=pipeline_name,
+                    message=str(exc),
+                    latency_s=None,
+                )
+            )
+            print(f"[{pipeline_name}] {p['id']} FAILED before metrics: {exc}")
+
+        _write_metrics_report(
+            report_path,
+            {**report_base, "n_pairs": len(rows), "summary": summarize(rows), "pairs": rows},
+        )
+        flush_stdio()
+
+    report = {**report_base, "n_pairs": len(rows), "summary": summarize(rows), "pairs": rows}
     print(f"Wrote {report_path}")
+    flush_stdio()
     return report
 
 
@@ -92,7 +213,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {"success_rate": 0.0, "latency_p50": None, "latency_p95": None}
     succ = sum(1 for r in rows if r["success"])
-    lats = sorted(r["latency_s"] for r in rows)
+    lats = sorted(r["latency_s"] for r in rows if r.get("latency_s") is not None)
 
     def pct(vals, p):
         if not vals:
@@ -112,7 +233,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "n_success": succ,
         "latency_p50": pct(lats, 50),
         "latency_p95": pct(lats, 95),
-        "latency_mean": sum(lats) / len(lats),
+        "latency_mean": (sum(lats) / len(lats)) if lats else None,
         "identity_mean": (sum(id_vals) / len(id_vals)) if id_vals else None,
         "body_psnr_mean": (sum(body_vals) / len(body_vals)) if body_vals else None,
         "by_difficulty": {

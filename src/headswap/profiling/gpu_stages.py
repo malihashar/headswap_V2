@@ -353,3 +353,9 @@ class GpuStageProfiler:
             top = max(self.stages, key=lambda s: s.seconds)
             print(f"  largest stage: {top.name} ({top.seconds:.2f}s, {100*top.seconds/total_s:.1f}%)")
         print("=" * 72)
+        import sys
+
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass

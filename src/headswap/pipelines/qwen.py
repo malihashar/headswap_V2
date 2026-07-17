@@ -9,6 +9,7 @@ from PIL import Image
 
 from headswap.comfy.runtime import NodeRuntime, comfy_tensor_to_pil, get_value_at_index, pil_to_comfy_tensor
 from headswap.pipelines.base import BasePipeline, PipelineResult, build_prompt
+from headswap.pipelines.errors import PipelineRunError
 from headswap.preprocess import (
     crop_face_reference,
     crop_with_mask,
@@ -25,6 +26,7 @@ from headswap.profiling.gpu_stages import (
     describe_latent,
     reset_vram_peak,
 )
+from headswap.profiling.reporting import emit_profile_report, profile_timing_meta
 
 
 @contextmanager
@@ -419,99 +421,143 @@ class QwenBaselinePipeline(BasePipeline):
         return self.runtime
 
     def run(self, body: Image.Image, face: Image.Image, out_dir: Path | None = None) -> PipelineResult:
-        import torch
-
         t0 = time.perf_counter()
         profiler = GpuStageProfiler()
         reset_vram_peak()
-        rt = self._ensure_runtime()
-        bundle = _load_qwen_stack(rt, self.cfg, profiler=profiler)
-        div_by = int(self.cfg.get("div_by", 8))
-        max_dim = int(self.cfg.get("max_dim", 576))
-
-        with profiler.stage("preprocessing"):
-            body_pil = resize_max_keep_ar(body.convert("RGB"), max_dim, div_by)
-            face_crop = crop_face_reference(
-                face,
-                self.cache_dir,
-                top=float(self.cfg.get("face_top_pad", 0.65)),
-                bot=float(self.cfg.get("face_bot_pad", 0.15)),
-                side=float(self.cfg.get("face_side_pad", 0.35)),
-                include_shoulders=False,
-            )
-            if self.cfg.get("blur_pad_face", True):
-                face_for_model = pad_to_ar_blur(
-                    face_crop, body_pil.width / body_pil.height
-                ).resize(body_pil.size, Image.Resampling.LANCZOS)
-            else:
-                face_for_model = face_crop.resize(body_pil.size, Image.Resampling.LANCZOS)
-            body_t = pil_to_comfy_tensor(body_pil, torch)
-            face_t = pil_to_comfy_tensor(face_for_model, torch)
-            profiler.note("preprocess_body_size", list(body_pil.size))
-
+        run_error: BaseException | None = None
+        out: Image.Image | None = None
+        sample_meta: dict = {}
+        body_pil: Image.Image | None = None
+        face_crop: Image.Image | None = None
+        face_for_model: Image.Image | None = None
+        dbg: dict[str, str] = {}
+        load_meta: dict = {}
+        fallbacks: list[str] = []
         prompt = str(self.cfg.get("prompt", "")).strip()
-        out, sample_meta = _sample_qwen(
-            rt,
-            bundle,
-            body_t,
-            face_t,
-            self.cfg,
-            prompt,
-            profiler=profiler,
-        )
-        with profiler.stage("postprocessing"):
-            pass
 
-        load_meta = dict(bundle.get("load_meta") or {})
-        fallbacks = list(load_meta.get("fallbacks") or []) + list(
-            sample_meta.get("fallbacks") or []
-        )
-        with profiler.stage("image_saving"):
-            dbg = {
-                k: v
-                for k, v in {
-                    "debug_body": self._save_debug(out_dir, "debug_body.png", body_pil),
-                    "debug_face_crop": self._save_debug(out_dir, "debug_face_crop.png", face_crop),
-                    "debug_face_for_model": self._save_debug(
-                        out_dir, "debug_face_for_model.png", face_for_model
-                    ),
-                }.items()
-                if v
+        try:
+            import torch
+
+            t_bootstrap = time.perf_counter()
+            rt = self._ensure_runtime()
+            profiler.note("bootstrap_s", round(time.perf_counter() - t_bootstrap, 4))
+            bundle = _load_qwen_stack(rt, self.cfg, profiler=profiler)
+            div_by = int(self.cfg.get("div_by", 8))
+            max_dim = int(self.cfg.get("max_dim", 576))
+
+            with profiler.stage("preprocessing"):
+                body_pil = resize_max_keep_ar(body.convert("RGB"), max_dim, div_by)
+                face_crop = crop_face_reference(
+                    face,
+                    self.cache_dir,
+                    top=float(self.cfg.get("face_top_pad", 0.65)),
+                    bot=float(self.cfg.get("face_bot_pad", 0.15)),
+                    side=float(self.cfg.get("face_side_pad", 0.35)),
+                    include_shoulders=False,
+                )
+                if self.cfg.get("blur_pad_face", True):
+                    face_for_model = pad_to_ar_blur(
+                        face_crop, body_pil.width / body_pil.height
+                    ).resize(body_pil.size, Image.Resampling.LANCZOS)
+                else:
+                    face_for_model = face_crop.resize(body_pil.size, Image.Resampling.LANCZOS)
+                body_t = pil_to_comfy_tensor(body_pil, torch)
+                face_t = pil_to_comfy_tensor(face_for_model, torch)
+                profiler.note("preprocess_body_size", list(body_pil.size))
+
+            out, sample_meta = _sample_qwen(
+                rt,
+                bundle,
+                body_t,
+                face_t,
+                self.cfg,
+                prompt,
+                profiler=profiler,
+            )
+            with profiler.stage("postprocessing"):
+                pass
+
+            load_meta = dict(bundle.get("load_meta") or {})
+            fallbacks = list(load_meta.get("fallbacks") or []) + list(
+                sample_meta.get("fallbacks") or []
+            )
+            with profiler.stage("image_saving"):
+                dbg = {
+                    k: v
+                    for k, v in {
+                        "debug_body": self._save_debug(out_dir, "debug_body.png", body_pil),
+                        "debug_face_crop": self._save_debug(out_dir, "debug_face_crop.png", face_crop),
+                        "debug_face_for_model": self._save_debug(
+                            out_dir, "debug_face_for_model.png", face_for_model
+                        ),
+                    }.items()
+                    if v
+                }
+        except BaseException as exc:
+            run_error = exc
+        finally:
+            latency_s = time.perf_counter() - t0
+            crop_size = list(body_pil.size) if body_pil is not None else None
+            meta = {
+                "pipeline": self.name,
+                "checkpoint": load_meta.get("checkpoint"),
+                "loras_loaded": list(load_meta.get("loras_loaded") or []),
+                "lora_strengths": dict(load_meta.get("lora_strengths") or {}),
+                "prompt": prompt,
+                "crop_size": crop_size,
+                "body_size": crop_size,
+                "reference_latent_used": bool(sample_meta.get("reference_latent_used")),
+                "flux_kontext_applied": bool(sample_meta.get("flux_kontext_applied")),
+                "flux_kontext_image_scale_applied": bool(
+                    sample_meta.get("flux_kontext_image_scale_applied")
+                ),
+                "flux_kontext_image_scale_enabled": bool(
+                    sample_meta.get("flux_kontext_image_scale_enabled")
+                ),
+                "input_body_size": sample_meta.get("input_body_size"),
+                "encode_body_size": sample_meta.get("encode_body_size"),
+                "encode_megapixels": sample_meta.get("encode_megapixels"),
+                "fallbacks": fallbacks,
+                "timing_s": profile_timing_meta(profiler),
+                "profile": profiler.to_dict(),
+                "latency_s": round(latency_s, 4),
             }
-        meta = {
-            "pipeline": self.name,
-            "checkpoint": load_meta.get("checkpoint"),
-            "loras_loaded": list(load_meta.get("loras_loaded") or []),
-            "lora_strengths": dict(load_meta.get("lora_strengths") or {}),
-            "prompt": prompt,
-            "crop_size": list(body_pil.size),
-            "body_size": list(body_pil.size),
-            "reference_latent_used": bool(sample_meta.get("reference_latent_used")),
-            "flux_kontext_applied": bool(sample_meta.get("flux_kontext_applied")),
-            "flux_kontext_image_scale_applied": bool(
-                sample_meta.get("flux_kontext_image_scale_applied")
-            ),
-            "flux_kontext_image_scale_enabled": bool(
-                sample_meta.get("flux_kontext_image_scale_enabled")
-            ),
-            "input_body_size": sample_meta.get("input_body_size"),
-            "encode_body_size": sample_meta.get("encode_body_size"),
-            "encode_megapixels": sample_meta.get("encode_megapixels"),
-            "fallbacks": fallbacks,
-            "timing_s": {k: round(v, 4) for k, v in profiler.timings_dict().items()},
-            "profile": profiler.to_dict(),
-        }
-        latency_s = time.perf_counter() - t0
-        print(
-            f"[qwen_baseline] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
-            f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
-            f"flux_kontext={meta['flux_kontext_applied']} "
-            f"image_scale={meta['flux_kontext_image_scale_applied']} "
-            f"scale_enabled={meta['flux_kontext_image_scale_enabled']} "
-            f"encode_mp={meta.get('encode_megapixels')} "
-            f"fallbacks={fallbacks or 'none'}"
-        )
-        profiler.print_report(total_s=latency_s, label="qwen_baseline")
+            if run_error is not None:
+                meta["run_error"] = str(run_error)
+                meta["run_error_type"] = type(run_error).__name__
+
+            print(
+                f"[qwen_baseline] checkpoint={meta.get('checkpoint')} loras={meta.get('loras_loaded')} "
+                f"strengths={meta.get('lora_strengths')} crop={meta.get('crop_size')} "
+                f"flux_kontext={meta.get('flux_kontext_applied')} "
+                f"image_scale={meta.get('flux_kontext_image_scale_applied')} "
+                f"scale_enabled={meta.get('flux_kontext_image_scale_enabled')} "
+                f"encode_mp={meta.get('encode_megapixels')} "
+                f"fallbacks={fallbacks or 'none'}"
+            )
+            emit_profile_report(
+                profiler,
+                total_s=latency_s,
+                label="qwen_baseline",
+                error=str(run_error) if run_error is not None else None,
+            )
+
+        if run_error is not None:
+            raise PipelineRunError(
+                str(run_error),
+                meta=meta,
+                latency_s=latency_s,
+                image=out,
+                debug_paths=dbg,
+            ) from run_error
+        if out is None or body_pil is None:
+            raise PipelineRunError(
+                "pipeline finished without output image",
+                meta=meta,
+                latency_s=latency_s,
+                debug_paths=dbg,
+            )
+
         return PipelineResult(
             image=out,
             latency_s=latency_s,
