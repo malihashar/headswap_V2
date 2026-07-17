@@ -121,9 +121,20 @@ def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
 
     fallbacks: list[str] = []
     flux_kontext_applied = False
+    flux_kontext_image_scale_applied = False
 
     with torch.inference_mode():
-        body_latent = rt.call("VAEEncode", vae=bundle["vae"], pixels=body_t)
+        # Official Qwen Image Edit 2511: FluxKontextImageScale on image1 before
+        # TextEncodeQwenImageEditPlus and VAEEncode.
+        image1 = body_t
+        if rt.has("FluxKontextImageScale"):
+            scaled = rt.call("FluxKontextImageScale", image=body_t)
+            image1 = get_value_at_index(scaled, 0)
+            flux_kontext_image_scale_applied = True
+        else:
+            fallbacks.append("flux_kontext_image_scale_missing")
+
+        body_latent = rt.call("VAEEncode", vae=bundle["vae"], pixels=image1)
         if not rt.has("TextEncodeQwenImageEditPlus"):
             raise KeyError("TextEncodeQwenImageEditPlus node missing — update ComfyUI")
         pos = rt.call(
@@ -131,7 +142,7 @@ def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
             clip=bundle["clip"],
             prompt=prompt,
             vae=bundle["vae"],
-            image1=body_t,
+            image1=image1,
             image2=face_t,
         )
         neg = rt.call(
@@ -139,11 +150,13 @@ def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
             clip=bundle["clip"],
             prompt=str(cfg.get("negative_prompt", "") or ""),
             vae=bundle["vae"],
-            image1=body_t,
+            image1=image1,
             image2=face_t,
         )
         positive = get_value_at_index(pos, 0)
         negative = get_value_at_index(neg, 0)
+        # Official Qwen 2511 blueprint includes Edit Model Reference Method
+        # (FluxKontextMultiReferenceLatentMethod) with index_timestep_zero.
         if rt.has("FluxKontextMultiReferenceLatentMethod"):
             positive = get_value_at_index(
                 rt.call(
@@ -162,7 +175,6 @@ def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
                 0,
             )
             flux_kontext_applied = True
-            fallbacks.append("flux_kontext_multi_ref_applied_on_qwen")
 
         noise = get_value_at_index(
             rt.call("RandomNoise", noise_seed=int(cfg.get("seed", 46))), 0
@@ -207,6 +219,7 @@ def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
         sample_meta = {
             "reference_latent_used": False,
             "flux_kontext_applied": flux_kontext_applied,
+            "flux_kontext_image_scale_applied": flux_kontext_image_scale_applied,
             "fallbacks": fallbacks,
         }
         return image, sample_meta
@@ -281,11 +294,16 @@ class QwenBaselinePipeline(BasePipeline):
             "body_size": list(body_pil.size),
             "reference_latent_used": bool(sample_meta.get("reference_latent_used")),
             "flux_kontext_applied": bool(sample_meta.get("flux_kontext_applied")),
+            "flux_kontext_image_scale_applied": bool(
+                sample_meta.get("flux_kontext_image_scale_applied")
+            ),
             "fallbacks": fallbacks,
         }
         print(
             f"[qwen_baseline] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
             f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
+            f"flux_kontext={meta['flux_kontext_applied']} "
+            f"image_scale={meta['flux_kontext_image_scale_applied']} "
             f"fallbacks={fallbacks or 'none'}"
         )
         return PipelineResult(
@@ -377,11 +395,16 @@ class QwenImprovedPipeline(BasePipeline):
             "face_ref_size": list(face_ref.size),
             "reference_latent_used": bool(sample_meta.get("reference_latent_used")),
             "flux_kontext_applied": bool(sample_meta.get("flux_kontext_applied")),
+            "flux_kontext_image_scale_applied": bool(
+                sample_meta.get("flux_kontext_image_scale_applied")
+            ),
             "fallbacks": fallbacks,
         }
         print(
             f"[qwen_improved] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
             f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
+            f"flux_kontext={meta['flux_kontext_applied']} "
+            f"image_scale={meta['flux_kontext_image_scale_applied']} "
             f"fallbacks={fallbacks or 'none'}"
         )
         return PipelineResult(

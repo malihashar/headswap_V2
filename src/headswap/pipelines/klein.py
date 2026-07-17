@@ -24,6 +24,47 @@ from headswap.preprocess import (
 )
 
 
+def _maybe_rmbg_face(
+    rt: NodeRuntime, face_t
+) -> tuple[object, bool, str | None, str | None]:
+    """
+    Official BFS Klein runs RMBG on the face reference before VAEEncode.
+
+    Returns (face_tensor, applied, node_name, skip_note).
+    Only runs when an RMBG-compatible node is registered; never invents a fallback
+    background-removal path.
+    """
+    # comfyui-rmbg registers "RMBG"; keep a short alias list for common forks.
+    for name in ("RMBG", "ImageRemoveBackground+", "easy imageRemBg"):
+        if not rt.has(name):
+            continue
+        try:
+            out = rt.call(name, image=face_t)
+            return get_value_at_index(out, 0), True, name, None
+        except TypeError:
+            # comfyui-rmbg typically requires a model widget; match official defaults.
+            try:
+                out = rt.call(
+                    name,
+                    image=face_t,
+                    model="RMBG-2.0",
+                    sensitivity=1.0,
+                    process_res=1024,
+                    mask_blur=0,
+                    mask_offset=0,
+                    invert_output=False,
+                    refine_foreground=False,
+                    background="Alpha",
+                    background_color="#222222",
+                )
+                return get_value_at_index(out, 0), True, name, None
+            except Exception as exc:
+                return face_t, False, None, f"face_rmbg_call_failed:{name}:{exc}"
+        except Exception as exc:
+            return face_t, False, None, f"face_rmbg_call_failed:{name}:{exc}"
+    return face_t, False, None, "face_rmbg_node_unavailable"
+
+
 class KleinMaskCropPipeline(BasePipeline):
     """
     FLUX.2 [klein] 4B distilled multi-reference head swap with:
@@ -161,11 +202,18 @@ class KleinMaskCropPipeline(BasePipeline):
         reference_latent_used = False
         empty_flux2_latent_used = False
         flux2_scheduler_used = False
+        face_rmbg_applied = False
+        face_rmbg_node = None
         negative_mode = "none"
 
         with torch.inference_mode():
             body_t = pil_to_comfy_tensor(crop_work, torch)
             face_t = pil_to_comfy_tensor(face_ref, torch)
+
+            # Official BFS Klein: RMBG on face reference before VAEEncode / ReferenceLatent.
+            face_t, face_rmbg_applied, face_rmbg_node, rmbg_note = _maybe_rmbg_face(rt, face_t)
+            if rmbg_note:
+                fallbacks.append(rmbg_note)
 
             body_lat = rt.call("VAEEncode", pixels=body_t, vae=bundle["vae"])
             face_lat = rt.call("VAEEncode", pixels=face_t, vae=bundle["vae"])
@@ -173,38 +221,57 @@ class KleinMaskCropPipeline(BasePipeline):
             pos = rt.call("CLIPTextEncode", text=prompt, clip=bundle["clip"])
             conditioning = get_value_at_index(pos, 0)
 
-            # Official Klein multi-ref: chain ReferenceLatent(body) → ReferenceLatent(face)
+            # Official BFS Klein multi-ref: ReferenceLatent(body) → ReferenceLatent(face)
+            # on BOTH positive and negative conditioning.
             if rt.has("ReferenceLatent"):
+                body_latent = get_value_at_index(body_lat, 0)
+                face_latent = get_value_at_index(face_lat, 0)
+
                 ref1 = rt.call(
                     "ReferenceLatent",
                     conditioning=conditioning,
-                    latent=get_value_at_index(body_lat, 0),
+                    latent=body_latent,
                 )
                 ref2 = rt.call(
                     "ReferenceLatent",
                     conditioning=get_value_at_index(ref1, 0),
-                    latent=get_value_at_index(face_lat, 0),
+                    latent=face_latent,
                 )
                 positive = get_value_at_index(ref2, 0)
                 reference_latent_used = True
+
+                # Negative: CLIPTextEncode (empty string OK) then same ReferenceLatent chain.
+                neg_c = rt.call("CLIPTextEncode", text=neg, clip=bundle["clip"])
+                neg_conditioning = get_value_at_index(neg_c, 0)
+                neg_ref1 = rt.call(
+                    "ReferenceLatent",
+                    conditioning=neg_conditioning,
+                    latent=body_latent,
+                )
+                neg_ref2 = rt.call(
+                    "ReferenceLatent",
+                    conditioning=get_value_at_index(neg_ref1, 0),
+                    latent=face_latent,
+                )
+                negative = get_value_at_index(neg_ref2, 0)
+                negative_mode = "clip_text_reference_latent_body_face"
             else:
                 positive = conditioning
                 fallbacks.append("reference_latent_missing_text_only")
-
-            if neg.strip() and rt.has("CLIPTextEncode"):
-                neg_c = rt.call("CLIPTextEncode", text=neg, clip=bundle["clip"])
-                negative = get_value_at_index(neg_c, 0)
-                negative_mode = "clip_text"
-            elif rt.has("ConditioningZeroOut"):
-                negative = get_value_at_index(
-                    rt.call("ConditioningZeroOut", conditioning=positive), 0
-                )
-                negative_mode = "conditioning_zero_out"
-                fallbacks.append("negative_conditioning_zero_out")
-            else:
-                negative = positive
-                negative_mode = "copied_positive"
-                fallbacks.append("negative_copied_from_positive")
+                if neg.strip() and rt.has("CLIPTextEncode"):
+                    neg_c = rt.call("CLIPTextEncode", text=neg, clip=bundle["clip"])
+                    negative = get_value_at_index(neg_c, 0)
+                    negative_mode = "clip_text"
+                elif rt.has("ConditioningZeroOut"):
+                    negative = get_value_at_index(
+                        rt.call("ConditioningZeroOut", conditioning=positive), 0
+                    )
+                    negative_mode = "conditioning_zero_out"
+                    fallbacks.append("negative_conditioning_zero_out")
+                else:
+                    negative = positive
+                    negative_mode = "copied_positive"
+                    fallbacks.append("negative_copied_from_positive")
 
             w, h = crop_work.size
             if rt.has("EmptyFlux2LatentImage"):
@@ -295,13 +362,16 @@ class KleinMaskCropPipeline(BasePipeline):
             "reference_latent_used": reference_latent_used,
             "empty_flux2_latent_used": empty_flux2_latent_used,
             "flux2_scheduler_used": flux2_scheduler_used,
+            "face_rmbg_applied": face_rmbg_applied,
+            "face_rmbg_node": face_rmbg_node,
             "negative_mode": negative_mode,
             "fallbacks": fallbacks,
         }
         print(
             f"[klein] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
             f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
-            f"reference_latent={reference_latent_used} fallbacks={fallbacks or 'none'}"
+            f"reference_latent={reference_latent_used} negative_mode={negative_mode} "
+            f"face_rmbg={face_rmbg_applied} fallbacks={fallbacks or 'none'}"
         )
         return PipelineResult(
             image=stitched,
