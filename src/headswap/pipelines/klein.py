@@ -206,7 +206,9 @@ class KleinMaskCropPipeline(BasePipeline):
         face_rmbg_node = None
         negative_mode = "none"
 
-        with torch.inference_mode():
+        # no_grad (not inference_mode): ComfyUI model load/unload must wrap weights
+        # as Parameters; inference tensors from inference_mode break partially_unload.
+        with torch.no_grad():
             body_t = pil_to_comfy_tensor(crop_work, torch)
             face_t = pil_to_comfy_tensor(face_ref, torch)
 

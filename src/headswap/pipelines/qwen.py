@@ -238,7 +238,12 @@ def _sample_qwen(
             },
         )
 
-    with torch.inference_mode():
+    # Use no_grad — not inference_mode. ComfyUI may load/unload/partially_unload
+    # model weights between nodes (especially VAEDecode after sampling). Weights
+    # streamed under inference_mode become inference tensors; Parameter() then
+    # raises "Cannot set version_counter for inference tensor". ComfyUI's own
+    # set_attr_param only clones those tensors when inference_mode is disabled.
+    with torch.no_grad():
         image1 = body_t
         input_h, input_w = int(body_t.shape[1]), int(body_t.shape[2])
         with _track(profiler, timings, "flux_kontext_image_scale"):
