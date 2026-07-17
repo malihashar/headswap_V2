@@ -79,51 +79,91 @@ def _loaded_models_light() -> list[dict[str, Any]]:
 
 
 def print_vae_probe(label: str, *, bundle: dict | None = None, extra: dict | None = None) -> None:
-    """Print allocator + loaded-model identity. Safe to call after UNet unload."""
-    stats = _cuda_stats()
-    loaded = _loaded_models_light()
+    """
+    Print allocator + loaded-model identity.
+
+    CRITICAL: emit the label line FIRST, before any CUDA API call. A deferred
+    CUDA OOM can be raised by mem_get_info/memory_allocated; if we query CUDA
+    before printing, the probe appears to "never run".
+    """
+    # --- always visible, even if the next CUDA call aborts the process ---
     print("", flush=True)
     print(f"[vae_probe] === {label} ===", flush=True)
-    print(
-        f"[vae_probe] cuda device={stats.get('device')!r} idx={stats.get('device_index')} "
-        f"allocated_mb={stats.get('allocated_mb')} reserved_mb={stats.get('reserved_mb')} "
-        f"free_mb={stats.get('free_mb')} total_mb={stats.get('total_mb')}",
-        flush=True,
-    )
-    if stats.get("error"):
-        print(f"[vae_probe] cuda_stats_error={stats['error']}", flush=True)
-    print(f"[vae_probe] current_loaded_models count={len(loaded)}", flush=True)
-    for row in loaded:
-        print(f"[vae_probe]   loaded: {row}", flush=True)
+    if extra is not None:
+        try:
+            print(f"[vae_probe] extra={extra}", flush=True)
+        except Exception as exc:
+            print(f"[vae_probe] extra_print_failed={exc}", flush=True)
+    _flush()
+
+    try:
+        stats = _cuda_stats()
+        print(
+            f"[vae_probe] cuda device={stats.get('device')!r} idx={stats.get('device_index')} "
+            f"allocated_mb={stats.get('allocated_mb')} reserved_mb={stats.get('reserved_mb')} "
+            f"free_mb={stats.get('free_mb')} total_mb={stats.get('total_mb')}",
+            flush=True,
+        )
+        if stats.get("error"):
+            print(f"[vae_probe] cuda_stats_error={stats['error']}", flush=True)
+    except BaseException as exc:
+        print(
+            f"[vae_probe] cuda_stats RAISED {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        _flush()
+        return
+
+    try:
+        loaded = _loaded_models_light()
+        print(f"[vae_probe] current_loaded_models count={len(loaded)}", flush=True)
+        for row in loaded:
+            print(f"[vae_probe]   loaded: {row}", flush=True)
+    except BaseException as exc:
+        print(
+            f"[vae_probe] loaded_models RAISED {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
     if bundle is not None:
-        model = bundle.get("model")
-        clip = bundle.get("clip")
-        vae = bundle.get("vae")
-        vae_patcher = getattr(vae, "patcher", None)
-        print(
-            f"[vae_probe] bundle ids model={id(model)} clip={id(clip)} vae={id(vae)} "
-            f"vae_patcher={id(vae_patcher) if vae_patcher is not None else None}",
-            flush=True,
-        )
-        print(
-            f"[vae_probe] types model={type(model).__name__} clip={type(clip).__name__} "
-            f"vae={type(vae).__name__} vae_patcher={type(vae_patcher).__name__ if vae_patcher else None}",
-            flush=True,
-        )
-        same = vae_patcher is model
-        print(f"[vae_probe] vae.patcher is bundle['model']: {same}", flush=True)
-    if extra:
-        print(f"[vae_probe] extra={extra}", flush=True)
+        try:
+            model = bundle.get("model")
+            clip = bundle.get("clip")
+            vae = bundle.get("vae")
+            vae_patcher = getattr(vae, "patcher", None)
+            print(
+                f"[vae_probe] bundle ids model={id(model)} clip={id(clip)} vae={id(vae)} "
+                f"vae_patcher={id(vae_patcher) if vae_patcher is not None else None}",
+                flush=True,
+            )
+            print(
+                f"[vae_probe] types model={type(model).__name__} clip={type(clip).__name__} "
+                f"vae={type(vae).__name__} "
+                f"vae_patcher={type(vae_patcher).__name__ if vae_patcher else None}",
+                flush=True,
+            )
+            print(
+                f"[vae_probe] vae.patcher is bundle['model']: {vae_patcher is model}",
+                flush=True,
+            )
+        except BaseException as exc:
+            print(
+                f"[vae_probe] bundle_ids RAISED {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
     try:
         import torch
 
         if torch.cuda.is_available():
-            # Abbreviated summary last — can be large but should not allocate model weights.
             print("[vae_probe] --- memory_summary(abbreviated=True) ---", flush=True)
             print(torch.cuda.memory_summary(abbreviated=True), flush=True)
             print("[vae_probe] --- end memory_summary ---", flush=True)
-    except Exception as exc:
-        print(f"[vae_probe] memory_summary_error={exc}", flush=True)
+    except BaseException as exc:
+        print(
+            f"[vae_probe] memory_summary RAISED {type(exc).__name__}: {exc}",
+            flush=True,
+        )
     _flush()
 
 

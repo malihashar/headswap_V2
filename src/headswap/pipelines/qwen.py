@@ -365,8 +365,10 @@ def _sample_qwen(
                     profiler.note("vram_load_probe", load_probe.report.to_dict())
             finally:
                 profiler.restore_sampling_hook()
+            print("[vae_probe] MARKER reached_post_sampling_before_del_guider", flush=True)
             # Drop guider so its ModelPatcher / cond refs cannot keep CUDA tensors alive.
             del guider
+            print("[vae_probe] MARKER after_del_guider", flush=True)
             print_vae_probe(
                 "after_sampling_unload",
                 bundle=bundle,
@@ -410,13 +412,16 @@ def _sample_qwen(
                         sigmas=sigmas,
                         latent_image=body_latent_t,
                     )
+                print("[vae_probe] MARKER reached_post_sampling_before_del_guider", flush=True)
                 del guider
+                print("[vae_probe] MARKER after_del_guider", flush=True)
                 print_vae_probe(
                     "after_sampling_unload",
                     bundle=bundle,
                     extra={"has_samples": samples is not None},
                 )
 
+        print("[vae_probe] MARKER entered_common_post_sampling_path", flush=True)
         # Free refs that could keep diffusion state alive across the VAE boundary.
         try:
             del noise
@@ -457,18 +462,28 @@ def _sample_qwen(
         except Exception as exc:
             latent_meta = {"error": str(exc)}
         print_vae_probe(
-            "immediately_before_rt.call(VAEDecode)",
+            "immediately_before_VAEDecode_setup",
             bundle=bundle,
             extra={"latent": latent_meta},
         )
 
+        # Install Comfy monkey-patches BEFORE profiler.stage("vae_decode"), because
+        # GpuStageProfiler.stage() calls torch.cuda.synchronize() on entry and that
+        # can raise a deferred CUDA OOM before rt.call("VAEDecode") runs.
         decode_probe_events: list = []
-        with _track(profiler, timings, "vae_decode"):
-            with install_vae_decode_probes(bundle=bundle, runtime=rt) as probe_state:
-                print_vae_probe(
-                    "after_monkeypatch_install_before_rt.call(VAEDecode)",
-                    bundle=bundle,
-                )
+        print("[vae_probe] MARKER before_install_vae_decode_probes", flush=True)
+        with install_vae_decode_probes(bundle=bundle, runtime=rt) as probe_state:
+            print_vae_probe(
+                "after_monkeypatch_install_before_profiler_vae_stage",
+                bundle=bundle,
+            )
+            print(
+                "[vae_probe] MARKER before_profiler_stage_vae_decode "
+                "(stage entry will cuda.synchronize)",
+                flush=True,
+            )
+            with _track(profiler, timings, "vae_decode"):
+                print("[vae_probe] MARKER inside_profiler_stage_before_rt.call", flush=True)
                 try:
                     decoded = rt.call(
                         "VAEDecode",
@@ -491,7 +506,7 @@ def _sample_qwen(
                 bundle=bundle,
                 extra={"decode_events": len(decode_probe_events)},
             )
-            image = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
+        image = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
         sample_meta = {
             "reference_latent_used": False,
             "flux_kontext_applied": flux_kontext_applied,
