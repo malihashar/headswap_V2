@@ -349,7 +349,7 @@ def _sample_qwen(
             hook_ok = profiler.install_sampling_step_hook()
             profiler.note("sampling_step_hook", hook_ok)
             try:
-                with force_sampling_full_load() as full_load_info:
+                with force_sampling_full_load(models=(bundle["model"],)) as full_load_info:
                     profiler.note("force_sampling_full_load", full_load_info)
                     with vram_load_probe() as load_probe:
                         with profiler.stage("sampling_total"):
@@ -364,6 +364,8 @@ def _sample_qwen(
                     profiler.note("vram_load_probe", load_probe.report.to_dict())
             finally:
                 profiler.restore_sampling_hook()
+            # Drop guider so its ModelPatcher / cond refs cannot keep CUDA tensors alive.
+            del guider
         else:
             with _stage(timings, "diffusion_sampling"):
                 noise = get_value_at_index(
@@ -393,7 +395,7 @@ def _sample_qwen(
                     ),
                     0,
                 )
-                with force_sampling_full_load() as full_load_info:
+                with force_sampling_full_load(models=(bundle["model"],)) as full_load_info:
                     samples = rt.call(
                         "SamplerCustomAdvanced",
                         noise=noise,
@@ -402,6 +404,7 @@ def _sample_qwen(
                         sigmas=sigmas,
                         latent_image=body_latent_t,
                     )
+                del guider
 
         with _track(profiler, timings, "vae_decode"):
             decoded = rt.call(

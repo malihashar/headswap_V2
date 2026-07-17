@@ -321,7 +321,7 @@ class KleinMaskCropPipeline(BasePipeline):
                 0,
             )
             samples = None
-            with force_sampling_full_load():
+            with force_sampling_full_load(models=(bundle["model"],)):
                 samples = rt.call(
                     "SamplerCustomAdvanced",
                     noise=noise,
@@ -330,6 +330,7 @@ class KleinMaskCropPipeline(BasePipeline):
                     sigmas=sigmas,
                     latent_image=latent_image,
                 )
+            del guider
             decoded = rt.call(
                 "VAEDecode",
                 samples=get_value_at_index(samples, 0),

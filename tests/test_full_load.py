@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -11,15 +11,48 @@ sys.path.insert(0, str(ROOT / "src"))
 from headswap.comfy.full_load import force_sampling_full_load, offload_gpu_models
 
 
-def _install_fake_comfy(prepare_sampling):
-    """Install minimal comfy stubs so force_sampling_full_load can patch them."""
+class _FakeLoadedModel:
+    def __init__(self, patcher):
+        self._patcher = patcher
+        self.unload_calls = 0
+
+    @property
+    def model(self):
+        return self._patcher
+
+    def is_dead(self):
+        return False
+
+    def model_loaded_memory(self):
+        return 11_000_000_000
+
+    def model_unload(self, memory_to_free=None, unpatch_weights=True):
+        self.unload_calls += 1
+        self._patcher.detach(unpatch_weights)
+        return True
+
+
+class _FakePatcher:
+    def __init__(self):
+        self.detach_calls = 0
+
+    def detach(self, unpatch_all=True):
+        self.detach_calls += 1
+        return self
+
+    def is_clone(self, other):
+        return other is self
+
+
+def _install_fake_comfy(prepare_sampling, loaded=None):
     fake_mm = types.ModuleType("comfy.model_management")
     fake_mm.get_torch_device = lambda: "cuda:0"
-    # before free, after free, before unload-after, after unload-after
-    fake_mm.get_free_memory = MagicMock(side_effect=[5e9, 14e9, 12e6, 13e9])
+    fake_mm.get_free_memory = MagicMock(side_effect=[5e9, 14e9, 12e6, 13e9, 13e9, 13e9])
     fake_mm.free_memory = MagicMock(return_value=[])
     fake_mm.unload_all_models = MagicMock()
+    fake_mm.unload_model_and_clones = MagicMock()
     fake_mm.soft_empty_cache = MagicMock()
+    fake_mm.current_loaded_models = list(loaded or [])
 
     fake_sh = types.ModuleType("comfy.sampler_helpers")
     fake_sh.prepare_sampling = prepare_sampling
@@ -57,34 +90,42 @@ def test_force_sampling_full_load_passes_force_full_load_true():
         calls.append({"force_full_load": force_full_load, "force_offload": force_offload})
         return ("model", conds, [])
 
-    fake_mm, fake_sh, saved = _install_fake_comfy(fake_prepare)
+    patcher = _FakePatcher()
+    loaded = _FakeLoadedModel(patcher)
+    fake_mm, fake_sh, saved = _install_fake_comfy(fake_prepare, loaded=[loaded])
     try:
-        with force_sampling_full_load() as info:
+        with force_sampling_full_load(models=(patcher,)) as info:
             assert info["enabled"] is True
             assert info["force_full_load"] is True
             assert info["freed_before_sample"] is True
-            fake_mm.unload_all_models.assert_called()
-            # Caller requests False; patch must override to True.
             fake_sh.prepare_sampling("m", (1, 16, 72, 57), {}, force_full_load=False)
 
         assert calls and calls[0]["force_full_load"] is True
-        # Patch restored on exit
         assert fake_sh.prepare_sampling is fake_prepare
-        # UNet must be offloaded after sampling for VAE decode headroom.
         assert info["freed_after_sample"] is True
-        assert fake_mm.unload_all_models.call_count == 2
-        assert fake_mm.soft_empty_cache.call_count == 2
+        # Sampling patcher must be detached even if also registry-unloaded.
+        assert patcher.detach_calls >= 1
+        assert loaded.unload_calls >= 1
+        fake_mm.unload_model_and_clones.assert_called()
+        fake_mm.unload_all_models.assert_called()
+        fake_mm.soft_empty_cache.assert_called()
+        # After forced unload, registry should no longer hold the UNet.
+        assert loaded not in fake_mm.current_loaded_models
     finally:
         _restore_modules(saved)
 
 
-def test_offload_gpu_models_falls_back_to_free_memory():
+def test_offload_detaches_patcher_not_in_current_loaded_models():
+    """Regression: unload_all_models no-ops when registry is empty but patcher holds GPU weights."""
+    patcher = _FakePatcher()
     fake_mm = types.ModuleType("comfy.model_management")
     fake_mm.get_torch_device = lambda: "cuda:0"
-    fake_mm.get_free_memory = MagicMock(side_effect=[1e7, 12e9])
-    fake_mm.free_memory = MagicMock(return_value=["unet"])
-    # No unload_all_models attribute → fallback path.
+    fake_mm.get_free_memory = MagicMock(return_value=14e9)
+    fake_mm.free_memory = MagicMock(return_value=[])
+    fake_mm.unload_all_models = MagicMock()
+    fake_mm.unload_model_and_clones = MagicMock()
     fake_mm.soft_empty_cache = MagicMock()
+    fake_mm.current_loaded_models = []  # empty registry — previous bug path
 
     fake_comfy = types.ModuleType("comfy")
     saved = {
@@ -94,11 +135,11 @@ def test_offload_gpu_models_falls_back_to_free_memory():
     sys.modules["comfy"] = fake_comfy
     sys.modules["comfy.model_management"] = fake_mm
     try:
-        info = offload_gpu_models(reason="test_fallback")
+        info = offload_gpu_models(reason="after_sample", patchers=(patcher,))
         assert info["ok"] is True
-        assert info["api"] == "free_memory"
-        fake_mm.free_memory.assert_called_once_with(1e30, "cuda:0")
-        fake_mm.soft_empty_cache.assert_called_once()
+        assert patcher.detach_calls == 1
+        fake_mm.unload_model_and_clones.assert_called_once_with(patcher)
+        fake_mm.unload_all_models.assert_called_once()
     finally:
         _restore_modules(saved)
 
