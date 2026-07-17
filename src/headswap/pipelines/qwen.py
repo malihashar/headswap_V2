@@ -27,6 +27,7 @@ from headswap.profiling.gpu_stages import (
     reset_vram_peak,
 )
 from headswap.profiling.reporting import emit_profile_report, profile_timing_meta
+from headswap.profiling.vram_load_probe import vram_load_probe
 
 
 @contextmanager
@@ -340,16 +341,19 @@ def _sample_qwen(
                 profiler.note("scheduler_name", cfg.get("scheduler", "simple"))
             hook_ok = profiler.install_sampling_step_hook()
             profiler.note("sampling_step_hook", hook_ok)
+            # Verification only: capture full vs partial UNet residency (no perf changes).
             try:
-                with profiler.stage("sampling_total"):
-                    samples = rt.call(
-                        "SamplerCustomAdvanced",
-                        noise=noise,
-                        guider=guider,
-                        sampler=sampler,
-                        sigmas=sigmas,
-                        latent_image=body_latent_t,
-                    )
+                with vram_load_probe() as load_probe:
+                    with profiler.stage("sampling_total"):
+                        samples = rt.call(
+                            "SamplerCustomAdvanced",
+                            noise=noise,
+                            guider=guider,
+                            sampler=sampler,
+                            sigmas=sigmas,
+                            latent_image=body_latent_t,
+                        )
+                profiler.note("vram_load_probe", load_probe.report.to_dict())
             finally:
                 profiler.restore_sampling_hook()
         else:
@@ -407,6 +411,8 @@ def _sample_qwen(
             "encode_megapixels": round((encode_w * encode_h) / 1_000_000, 3),
             "fallbacks": fallbacks,
         }
+        if profiler is not None and "vram_load_probe" in profiler.extras:
+            sample_meta["vram_load_probe"] = profiler.extras["vram_load_probe"]
         return image, sample_meta
 
 
@@ -522,6 +528,8 @@ class QwenBaselinePipeline(BasePipeline):
                 "profile": profiler.to_dict(),
                 "latency_s": round(latency_s, 4),
             }
+            if sample_meta.get("vram_load_probe") is not None:
+                meta["vram_load_probe"] = sample_meta["vram_load_probe"]
             if run_error is not None:
                 meta["run_error"] = str(run_error)
                 meta["run_error_type"] = type(run_error).__name__
