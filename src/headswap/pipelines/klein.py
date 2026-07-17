@@ -47,23 +47,46 @@ class KleinMaskCropPipeline(BasePipeline):
 
         models = Path(comfyui_path()) / "models"
         unet_dir = models / "diffusion_models"
+        preferred_unet = self.cfg.get("unet_name", "flux-2-klein-4b-fp8.safetensors")
+        fallback_unet = self.cfg.get("unet_name_fallback", "flux-2-klein-4b.safetensors")
         unet_name = resolve_model_file(
             unet_dir,
-            self.cfg.get("unet_name", "flux-2-klein-4b-fp8.safetensors"),
-            fallbacks=[self.cfg.get("unet_name_fallback", "flux-2-klein-4b.safetensors")],
+            preferred_unet,
+            fallbacks=[fallback_unet],
         )
-        key = f"klein::{unet_name}::{self.cfg.get('bfs_lora_name')}::{self.cfg.get('bfs_lora_strength')}"
+        strength = float(self.cfg.get("bfs_lora_strength", 1.0) or 0.0)
+        lora_name = self.cfg.get("bfs_lora_name")
+        key = f"klein::{unet_name}::{lora_name}::{strength}"
         if key in rt.models:
             return rt.models[key]
+
+        load_meta: dict = {
+            "checkpoint": unet_name,
+            "checkpoint_preferred": preferred_unet,
+            "checkpoint_fallback_used": unet_name != preferred_unet,
+            "loras_loaded": [],
+            "lora_strengths": {},
+            "fallbacks": [],
+        }
+        if unet_name != preferred_unet:
+            load_meta["fallbacks"].append(
+                f"unet_fallback:{preferred_unet}->{unet_name}"
+            )
 
         unet = rt.call("UNETLoader", unet_name=unet_name, weight_dtype="default")
         model = get_value_at_index(unet, 0)
 
-        strength = float(self.cfg.get("bfs_lora_strength", 0.0) or 0.0)
-        lora_name = self.cfg.get("bfs_lora_name")
         if strength > 0 and lora_name:
             loras = models / "loras"
             resolved = resolve_model_file(loras, lora_name, fallbacks=[lora_name])
+            if not (loras / resolved).exists():
+                load_meta["fallbacks"].append(f"bfs_lora_missing:{resolved}")
+                raise FileNotFoundError(
+                    f"BFS Klein LoRA not found at {loras / resolved}. "
+                    "Run: python scripts/download_models.py --set klein"
+                )
+            if resolved != lora_name:
+                load_meta["fallbacks"].append(f"bfs_lora_resolved:{lora_name}->{resolved}")
             model = get_value_at_index(
                 rt.call(
                     "LoraLoaderModelOnly",
@@ -73,6 +96,16 @@ class KleinMaskCropPipeline(BasePipeline):
                 ),
                 0,
             )
+            load_meta["loras_loaded"].append(resolved)
+            load_meta["lora_strengths"][resolved] = strength
+            print(f"[klein] loaded LoRA {resolved} strength={strength}")
+        elif lora_name:
+            load_meta["fallbacks"].append(
+                f"bfs_lora_skipped_strength_zero:{lora_name}"
+            )
+            print(f"[klein] WARNING: BFS LoRA skipped (strength={strength})")
+        else:
+            load_meta["fallbacks"].append("bfs_lora_name_unset")
 
         clip = rt.call(
             "CLIPLoader",
@@ -82,7 +115,12 @@ class KleinMaskCropPipeline(BasePipeline):
         )
         vae = rt.call("VAELoader", vae_name=self.cfg.get("vae_name", "flux2-vae.safetensors"))
 
-        bundle = {"model": model, "clip": get_value_at_index(clip, 0), "vae": get_value_at_index(vae, 0)}
+        bundle = {
+            "model": model,
+            "clip": get_value_at_index(clip, 0),
+            "vae": get_value_at_index(vae, 0),
+            "load_meta": load_meta,
+        }
         rt.models[key] = bundle
         return bundle
 
@@ -92,6 +130,8 @@ class KleinMaskCropPipeline(BasePipeline):
         t0 = time.perf_counter()
         rt = self._ensure_runtime()
         bundle = self._load_models(rt)
+        load_meta = dict(bundle.get("load_meta") or {})
+        fallbacks: list[str] = list(load_meta.get("fallbacks") or [])
         div_by = int(self.cfg.get("div_by", 16))
 
         body_full = resize_max_keep_ar(
@@ -118,6 +158,11 @@ class KleinMaskCropPipeline(BasePipeline):
         prompt = build_prompt(self.cfg, body_full, face_crop, self.cache_dir)
         neg = str(self.cfg.get("negative_prompt", "") or "")
 
+        reference_latent_used = False
+        empty_flux2_latent_used = False
+        flux2_scheduler_used = False
+        negative_mode = "none"
+
         with torch.inference_mode():
             body_t = pil_to_comfy_tensor(crop_work, torch)
             face_t = pil_to_comfy_tensor(face_ref, torch)
@@ -141,31 +186,41 @@ class KleinMaskCropPipeline(BasePipeline):
                     latent=get_value_at_index(face_lat, 0),
                 )
                 positive = get_value_at_index(ref2, 0)
+                reference_latent_used = True
             else:
                 positive = conditioning
+                fallbacks.append("reference_latent_missing_text_only")
 
             if neg.strip() and rt.has("CLIPTextEncode"):
                 neg_c = rt.call("CLIPTextEncode", text=neg, clip=bundle["clip"])
                 negative = get_value_at_index(neg_c, 0)
+                negative_mode = "clip_text"
             elif rt.has("ConditioningZeroOut"):
                 negative = get_value_at_index(
                     rt.call("ConditioningZeroOut", conditioning=positive), 0
                 )
+                negative_mode = "conditioning_zero_out"
+                fallbacks.append("negative_conditioning_zero_out")
             else:
                 negative = positive
+                negative_mode = "copied_positive"
+                fallbacks.append("negative_copied_from_positive")
 
             w, h = crop_work.size
             if rt.has("EmptyFlux2LatentImage"):
                 empty = rt.call("EmptyFlux2LatentImage", width=w, height=h, batch_size=1)
                 latent_image = get_value_at_index(empty, 0)
+                empty_flux2_latent_used = True
             else:
                 latent_image = get_value_at_index(body_lat, 0)
+                fallbacks.append("empty_flux2_latent_missing_used_body_latent")
 
             steps = int(self.cfg.get("steps", 4))
             if rt.has("Flux2Scheduler"):
                 sigmas = get_value_at_index(
                     rt.call("Flux2Scheduler", steps=steps, width=w, height=h), 0
                 )
+                flux2_scheduler_used = True
             else:
                 sigmas = get_value_at_index(
                     rt.call(
@@ -177,6 +232,7 @@ class KleinMaskCropPipeline(BasePipeline):
                     ),
                     0,
                 )
+                fallbacks.append("flux2_scheduler_missing_used_basic_scheduler")
 
             sampler = get_value_at_index(
                 rt.call("KSamplerSelect", sampler_name=self.cfg.get("sampler", "euler")), 0
@@ -223,15 +279,33 @@ class KleinMaskCropPipeline(BasePipeline):
             }.items()
             if v
         }
+        meta = {
+            "pipeline": self.name,
+            "checkpoint": load_meta.get("checkpoint"),
+            "checkpoint_preferred": load_meta.get("checkpoint_preferred"),
+            "checkpoint_fallback_used": bool(load_meta.get("checkpoint_fallback_used")),
+            "loras_loaded": list(load_meta.get("loras_loaded") or []),
+            "lora_strengths": dict(load_meta.get("lora_strengths") or {}),
+            "bfs_lora_name": self.cfg.get("bfs_lora_name"),
+            "bfs_lora_strength": float(self.cfg.get("bfs_lora_strength", 0) or 0),
+            "prompt": prompt,
+            "crop_size": list(crop_work.size),
+            "body_size": list(body_full.size),
+            "face_ref_size": list(face_ref.size),
+            "reference_latent_used": reference_latent_used,
+            "empty_flux2_latent_used": empty_flux2_latent_used,
+            "flux2_scheduler_used": flux2_scheduler_used,
+            "negative_mode": negative_mode,
+            "fallbacks": fallbacks,
+        }
+        print(
+            f"[klein] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
+            f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
+            f"reference_latent={reference_latent_used} fallbacks={fallbacks or 'none'}"
+        )
         return PipelineResult(
             image=stitched,
             latency_s=time.perf_counter() - t0,
-            meta={
-                "pipeline": self.name,
-                "prompt": prompt,
-                "crop_size": list(crop_work.size),
-                "body_size": list(body_full.size),
-                "bfs_lora_strength": float(self.cfg.get("bfs_lora_strength", 0) or 0),
-            },
+            meta=meta,
             debug_paths=dbg,
         )

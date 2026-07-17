@@ -18,10 +18,10 @@ clip_type: flux2
 # https://huggingface.co/Comfy-Org/flux2-dev
 vae_name: flux2-vae.safetensors
 
-# OPTIONAL community head-swap LoRA (MIT). Keep strength 0 unless A/B testing.
+# Community BFS head-swap LoRA (MIT) — required for reliable Klein swaps.
 # https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap
 bfs_lora_name: bfs_head_v1.1_optional_flux-klein_4b.safetensors
-bfs_lora_strength: 0.0
+bfs_lora_strength: 1.0
 
 steps: 4
 cfg: 1.0

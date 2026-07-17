@@ -30,6 +30,16 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict):
     if key in rt.models:
         return rt.models[key]
 
+    checkpoint = cfg["unet_name"]
+    load_meta: dict = {
+        "checkpoint": checkpoint,
+        "checkpoint_preferred": checkpoint,
+        "checkpoint_fallback_used": False,
+        "loras_loaded": [],
+        "lora_strengths": {},
+        "fallbacks": [],
+    }
+
     vae = rt.call("VAELoader", vae_name=cfg["vae_name"])
     clip = rt.call(
         "CLIPLoader",
@@ -37,29 +47,41 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict):
         type=cfg.get("clip_type", "qwen_image"),
         device="default",
     )
-    unet = rt.call("UNETLoader", unet_name=cfg["unet_name"], weight_dtype="default")
+    unet = rt.call("UNETLoader", unet_name=checkpoint, weight_dtype="default")
     model = get_value_at_index(unet, 0)
 
+    hs_name = cfg["headswap_lora_name"]
+    hs_strength = float(cfg.get("headswap_lora_strength", 1.0))
     model = get_value_at_index(
         rt.call(
             "LoraLoaderModelOnly",
             model=model,
-            lora_name=cfg["headswap_lora_name"],
-            strength_model=float(cfg.get("headswap_lora_strength", 1.0)),
+            lora_name=hs_name,
+            strength_model=hs_strength,
         ),
         0,
     )
+    load_meta["loras_loaded"].append(hs_name)
+    load_meta["lora_strengths"][hs_name] = hs_strength
+    print(f"[qwen] loaded LoRA {hs_name} strength={hs_strength}")
+
     lt = float(cfg.get("lightning_lora_strength", 0) or 0)
-    if lt > 0 and cfg.get("lightning_lora_name"):
+    lt_name = cfg.get("lightning_lora_name")
+    if lt > 0 and lt_name:
         model = get_value_at_index(
             rt.call(
                 "LoraLoaderModelOnly",
                 model=model,
-                lora_name=cfg["lightning_lora_name"],
+                lora_name=lt_name,
                 strength_model=lt,
             ),
             0,
         )
+        load_meta["loras_loaded"].append(lt_name)
+        load_meta["lora_strengths"][lt_name] = lt
+        print(f"[qwen] loaded LoRA {lt_name} strength={lt}")
+    elif lt_name:
+        load_meta["fallbacks"].append(f"lightning_lora_skipped_strength_zero:{lt_name}")
 
     if rt.has("ModelSamplingAuraFlow"):
         model = get_value_at_index(
@@ -70,6 +92,8 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict):
             ),
             0,
         )
+    else:
+        load_meta["fallbacks"].append("model_sampling_auraflow_missing")
     if rt.has("CFGNorm"):
         model = get_value_at_index(
             rt.call(
@@ -79,11 +103,14 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict):
             ),
             0,
         )
+    else:
+        load_meta["fallbacks"].append("cfgnorm_missing")
 
     bundle = {
         "model": model,
         "clip": get_value_at_index(clip, 0),
         "vae": get_value_at_index(vae, 0),
+        "load_meta": load_meta,
     }
     rt.models[key] = bundle
     return bundle
@@ -91,6 +118,9 @@ def _load_qwen_stack(rt: NodeRuntime, cfg: dict):
 
 def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
     import torch
+
+    fallbacks: list[str] = []
+    flux_kontext_applied = False
 
     with torch.inference_mode():
         body_latent = rt.call("VAEEncode", vae=bundle["vae"], pixels=body_t)
@@ -131,6 +161,8 @@ def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
                 ),
                 0,
             )
+            flux_kontext_applied = True
+            fallbacks.append("flux_kontext_multi_ref_applied_on_qwen")
 
         noise = get_value_at_index(
             rt.call("RandomNoise", noise_seed=int(cfg.get("seed", 46))), 0
@@ -171,7 +203,13 @@ def _sample_qwen(rt: NodeRuntime, bundle, body_t, face_t, cfg, prompt: str):
             samples=get_value_at_index(samples, 0),
             vae=bundle["vae"],
         )
-        return comfy_tensor_to_pil(get_value_at_index(decoded, 0))
+        image = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
+        sample_meta = {
+            "reference_latent_used": False,
+            "flux_kontext_applied": flux_kontext_applied,
+            "fallbacks": fallbacks,
+        }
+        return image, sample_meta
 
 
 class QwenBaselinePipeline(BasePipeline):
@@ -210,13 +248,17 @@ class QwenBaselinePipeline(BasePipeline):
             face_for_model = face_crop.resize(body_pil.size, Image.Resampling.LANCZOS)
 
         prompt = str(self.cfg.get("prompt", "")).strip()
-        out = _sample_qwen(
+        out, sample_meta = _sample_qwen(
             rt,
             bundle,
             pil_to_comfy_tensor(body_pil, torch),
             pil_to_comfy_tensor(face_for_model, torch),
             self.cfg,
             prompt,
+        )
+        load_meta = dict(bundle.get("load_meta") or {})
+        fallbacks = list(load_meta.get("fallbacks") or []) + list(
+            sample_meta.get("fallbacks") or []
         )
         dbg = {
             k: v
@@ -229,10 +271,27 @@ class QwenBaselinePipeline(BasePipeline):
             }.items()
             if v
         }
+        meta = {
+            "pipeline": self.name,
+            "checkpoint": load_meta.get("checkpoint"),
+            "loras_loaded": list(load_meta.get("loras_loaded") or []),
+            "lora_strengths": dict(load_meta.get("lora_strengths") or {}),
+            "prompt": prompt,
+            "crop_size": list(body_pil.size),
+            "body_size": list(body_pil.size),
+            "reference_latent_used": bool(sample_meta.get("reference_latent_used")),
+            "flux_kontext_applied": bool(sample_meta.get("flux_kontext_applied")),
+            "fallbacks": fallbacks,
+        }
+        print(
+            f"[qwen_baseline] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
+            f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
+            f"fallbacks={fallbacks or 'none'}"
+        )
         return PipelineResult(
             image=out,
             latency_s=time.perf_counter() - t0,
-            meta={"pipeline": self.name, "body_size": list(body_pil.size), "prompt": prompt},
+            meta=meta,
             debug_paths=dbg,
         )
 
@@ -282,7 +341,7 @@ class QwenImprovedPipeline(BasePipeline):
             face_ref = face_crop.resize(crop_work.size, Image.Resampling.LANCZOS)
 
         prompt = build_prompt(self.cfg, body_full, face_crop, self.cache_dir)
-        edited = _sample_qwen(
+        edited, sample_meta = _sample_qwen(
             rt,
             bundle,
             pil_to_comfy_tensor(crop_work, torch),
@@ -292,6 +351,10 @@ class QwenImprovedPipeline(BasePipeline):
         )
         stitched = soft_composite(body_full, edited, mask, box)
         stitched = lab_histogram_match_face(stitched, body_full, mask, strength=0.3)
+        load_meta = dict(bundle.get("load_meta") or {})
+        fallbacks = list(load_meta.get("fallbacks") or []) + list(
+            sample_meta.get("fallbacks") or []
+        )
         dbg = {
             k: v
             for k, v in {
@@ -303,14 +366,27 @@ class QwenImprovedPipeline(BasePipeline):
             }.items()
             if v
         }
+        meta = {
+            "pipeline": self.name,
+            "checkpoint": load_meta.get("checkpoint"),
+            "loras_loaded": list(load_meta.get("loras_loaded") or []),
+            "lora_strengths": dict(load_meta.get("lora_strengths") or {}),
+            "prompt": prompt,
+            "crop_size": list(crop_work.size),
+            "body_size": list(body_full.size),
+            "face_ref_size": list(face_ref.size),
+            "reference_latent_used": bool(sample_meta.get("reference_latent_used")),
+            "flux_kontext_applied": bool(sample_meta.get("flux_kontext_applied")),
+            "fallbacks": fallbacks,
+        }
+        print(
+            f"[qwen_improved] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
+            f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
+            f"fallbacks={fallbacks or 'none'}"
+        )
         return PipelineResult(
             image=stitched,
             latency_s=time.perf_counter() - t0,
-            meta={
-                "pipeline": self.name,
-                "prompt": prompt,
-                "crop_size": list(crop_work.size),
-                "body_size": list(body_full.size),
-            },
+            meta=meta,
             debug_paths=dbg,
         )

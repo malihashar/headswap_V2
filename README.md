@@ -33,7 +33,7 @@ The current production full-frame Qwen+Lightning path (`qwen_baseline`) stays as
 5. Soft-alpha stitch + mild LAB skin match  
 6. Metrics: face detect, optional ArcFace identity, body PSNR outside mask, smoothness heuristic  
 
-BFS Flux Klein LoRA is **off by default** (`bfs_lora_strength: 0.0`); A/B with `0.8–1.0`.
+BFS Flux Klein LoRA is **on by default** (`bfs_lora_strength: 1.0`) and is a required download.
 
 ## Quick start (CPU mock / CI)
 

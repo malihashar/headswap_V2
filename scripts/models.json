@@ -37,7 +37,7 @@
     "url": "https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap/resolve/main/bfs_head_v1.1_optional_flux-klein_4b.safetensors",
     "download_repo_id": null,
     "set": "klein",
-    "required": false
+    "required": true
   },
   "flux-2-klein-4b.safetensors": {
     "size": 7751105712,
