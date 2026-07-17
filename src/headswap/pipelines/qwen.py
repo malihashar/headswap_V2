@@ -28,6 +28,10 @@ from headswap.profiling.gpu_stages import (
     reset_vram_peak,
 )
 from headswap.profiling.reporting import emit_profile_report, profile_timing_meta
+from headswap.profiling.vae_bridge_probe import (
+    print_bridge_checkpoint,
+    watch_load_models_gpu,
+)
 from headswap.profiling.vram_load_probe import vram_load_probe
 
 
@@ -313,6 +317,7 @@ def _sample_qwen(
                 flux_kontext_applied = True
 
         full_load_info = None
+        bridge_checkpoints: list = []
         if profiler is not None:
             with profiler.stage("scheduler_creation"):
                 noise = get_value_at_index(
@@ -366,6 +371,14 @@ def _sample_qwen(
                 profiler.restore_sampling_hook()
             # Drop guider so its ModelPatcher / cond refs cannot keep CUDA tensors alive.
             del guider
+            bridge_checkpoints = []
+            bridge_checkpoints.append(
+                print_bridge_checkpoint(
+                    "after_sampling_unload_before_hook_already_restored",
+                    bundle=bundle,
+                    extra={"has_samples": samples is not None},
+                )
+            )
         else:
             with _stage(timings, "diffusion_sampling"):
                 noise = get_value_at_index(
@@ -405,12 +418,100 @@ def _sample_qwen(
                         latent_image=body_latent_t,
                     )
                 del guider
+                bridge_checkpoints = []
+                bridge_checkpoints.append(
+                    print_bridge_checkpoint(
+                        "after_sampling_unload",
+                        bundle=bundle,
+                        extra={"has_samples": samples is not None},
+                    )
+                )
 
+        # Free refs that could keep diffusion state alive across the VAE boundary.
+        try:
+            del noise
+        except Exception:
+            pass
+        try:
+            del sampler
+        except Exception:
+            pass
+        try:
+            del sigmas
+        except Exception:
+            pass
+        bridge_checkpoints.append(
+            print_bridge_checkpoint(
+                "after_del_sampler_locals",
+                bundle=bundle,
+            )
+        )
+        import gc
+
+        gc.collect()
+        bridge_checkpoints.append(
+            print_bridge_checkpoint(
+                "after_gc_collect",
+                bundle=bundle,
+                extra={"note": "if alloc jumps here, a finalizer/refcount is reallocating"},
+            )
+        )
+
+        latent_for_decode = get_value_at_index(samples, 0)
+        latent_meta = {}
+        try:
+            lat = latent_for_decode["samples"] if isinstance(latent_for_decode, dict) else latent_for_decode
+            latent_meta = {
+                "type": type(lat).__name__,
+                "shape": list(lat.shape) if hasattr(lat, "shape") else None,
+                "device": str(getattr(lat, "device", None)),
+                "dtype": str(getattr(lat, "dtype", None)),
+                "nbytes_mb": round(float(lat.numel() * lat.element_size()) / (1024**2), 3)
+                if hasattr(lat, "numel")
+                else None,
+            }
+        except Exception as exc:
+            latent_meta = {"error": str(exc)}
+        bridge_checkpoints.append(
+            print_bridge_checkpoint(
+                "immediately_before_VAEDecode",
+                bundle=bundle,
+                extra={"latent": latent_meta, "vae_type": type(bundle["vae"]).__name__},
+            )
+        )
+
+        decode_load_events: list = []
         with _track(profiler, timings, "vae_decode"):
-            decoded = rt.call(
-                "VAEDecode",
-                samples=get_value_at_index(samples, 0),
-                vae=bundle["vae"],
+            with watch_load_models_gpu("vae_decode") as decode_load_events:
+                bridge_checkpoints.append(
+                    print_bridge_checkpoint(
+                        "inside_vae_decode_stage_before_node_call",
+                        bundle=bundle,
+                    )
+                )
+                try:
+                    decoded = rt.call(
+                        "VAEDecode",
+                        samples=latent_for_decode,
+                        vae=bundle["vae"],
+                    )
+                except BaseException as decode_exc:
+                    print_bridge_checkpoint(
+                        "VAEDecode_FAILED",
+                        bundle=bundle,
+                        extra={
+                            "error": str(decode_exc),
+                            "error_type": type(decode_exc).__name__,
+                            "decode_load_events": decode_load_events,
+                        },
+                    )
+                    raise
+            bridge_checkpoints.append(
+                print_bridge_checkpoint(
+                    "after_VAEDecode_success",
+                    bundle=bundle,
+                    extra={"decode_load_events": len(decode_load_events)},
+                )
             )
             image = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
         sample_meta = {
@@ -423,6 +524,10 @@ def _sample_qwen(
             "encode_megapixels": round((encode_w * encode_h) / 1_000_000, 3),
             "fallbacks": fallbacks,
             "force_sampling_full_load": full_load_info,
+            "vae_bridge": {
+                "checkpoints": bridge_checkpoints,
+                "decode_load_events": decode_load_events,
+            },
         }
         if profiler is not None and "vram_load_probe" in profiler.extras:
             sample_meta["vram_load_probe"] = profiler.extras["vram_load_probe"]
