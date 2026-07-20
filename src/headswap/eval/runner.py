@@ -17,7 +17,13 @@ from headswap.pipelines.base import PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 from headswap.preprocess import head_hair_mask_from_face
 from headswap.profiling.reporting import emit_run_finished, flush_stdio
-from headswap.profiling.call_chain_trace import stop_post_sample_trace
+
+try:
+    from headswap.profiling.call_chain_trace import stop_post_sample_trace
+except ImportError:  # pragma: no cover
+
+    def stop_post_sample_trace(*, reason: str = "") -> None:
+        return None
 
 
 def _write_metrics_report(report_path: Path, report: dict[str, Any]) -> None:

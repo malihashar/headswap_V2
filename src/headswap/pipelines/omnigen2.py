@@ -196,6 +196,24 @@ class OmniGen2PipelineRunner(BasePipeline):
             pipe = pipe.to(device)
             load_meta["device_placement"] = device
 
+        # Auto-downgrade on small GPUs if config still requested model offload only.
+        if torch.cuda.is_available() and load_meta["device_placement"] == "model_cpu_offload":
+            try:
+                free_gb = torch.cuda.mem_get_info()[0] / (1024**3)
+                total_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            except Exception:
+                free_gb, total_gb = 0.0, 0.0
+            load_meta["cuda_free_gb"] = round(free_gb, 2)
+            load_meta["cuda_total_gb"] = round(total_gb, 2)
+            if total_gb and total_gb < 20 and hasattr(pipe, "enable_sequential_cpu_offload"):
+                print(
+                    f"[omnigen2] GPU {total_gb:.1f}GB < 20GB — switching to "
+                    "sequential_cpu_offload to avoid OOM"
+                )
+                pipe.enable_sequential_cpu_offload()
+                load_meta["device_placement"] = "sequential_cpu_offload_auto"
+                load_meta["enable_sequential_cpu_offload"] = True
+
         load_meta["load_time_s"] = round(time.perf_counter() - t0, 4)
         load_meta["vram_after_load_mb"] = vram_snapshot()
         self._pipe = pipe
@@ -238,6 +256,10 @@ class OmniGen2PipelineRunner(BasePipeline):
             import torch
 
             reset_vram_peak()
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
 
             t_pre = time.perf_counter()
             body_work = ImageOps.exif_transpose(body.convert("RGB"))

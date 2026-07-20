@@ -11,22 +11,22 @@ pipeline: omnigen2
 model_id: OmniGen2/OmniGen2
 model_path: /tmp/models/OmniGen2
 dtype: bf16
-enable_model_cpu_offload: true
-enable_sequential_cpu_offload: false
+# 14–16GB Kaggle GPUs: sequential offload is required (model offload alone OOMs).
+enable_model_cpu_offload: false
+enable_sequential_cpu_offload: true
 
 # Official example defaults (example_edit.sh / example_in_context_generation.sh).
-steps: 50
+steps: 28
 guidance: 5.0                 # text_guidance_scale
-image_guidance: 2.5           # in-context tip: 2.5–3.0 (edit-only tip: 1.2–2.0)
+image_guidance: 2.0           # slightly lower peak vs 2.5; still in edit/in-context band
 seed: 0
 scheduler: euler              # euler | dpmsolver++
 # Official API has no denoise/strength; kept for config parity.
 strength: 1.0
-# Longest side budget for body / output (official default canvas 1024).
-# On 16GB Kaggle GPUs prefer 768 if you hit CUDA OOM.
-crop_size: 768
-max_input_image_pixels: 1048576   # 1024*1024 official default
-max_input_image_side_length: 1024
+# Longest side for body / output. 512 fits ~15GB with sequential offload.
+crop_size: 512
+max_input_image_pixels: 262144    # 512*512
+max_input_image_side_length: 512
 cfg_range_start: 0.0
 cfg_range_end: 1.0
 
