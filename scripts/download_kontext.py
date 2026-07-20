@@ -3,19 +3,24 @@
 Download FLUX.1 Kontext [dev] weights into /tmp/models (never into the repo).
 
 Reuses scripts/download_models.py staging / HF-cache / Comfy symlink logic.
-Skips Place It / Put It Here LoRAs (not part of the first integration).
-
-Tokenizers for Flux/Kontext are embedded in the DualCLIP text-encoder
-safetensors (clip_l + t5xxl); no separate tokenizer download is required.
-
 Required assets (models.json set=kontext):
   - flux1-dev-kontext_fp8_scaled.safetensors  (~11.1 GiB)
   - clip_l.safetensors                        (~0.23 GiB)
   - t5xxl_fp8_e4m3fn_scaled.safetensors       (~4.8 GiB)
   - ae.safetensors                            (~0.31 GiB)
 
+Optional placement LoRAs (pass --include-optional):
+  - Put it here_V4.2.safetensors  (Civitai 2118949)
+  - place_it.safetensors           (Civitai 2015589)
+
+The pipeline auto-loads either LoRA if already present under ComfyUI/models/loras.
+
+Tokenizers for Flux/Kontext are embedded in the DualCLIP text-encoder
+safetensors (clip_l + t5xxl); no separate tokenizer download is required.
+
 Examples:
   python scripts/download_kontext.py
+  python scripts/download_kontext.py --include-optional
   python scripts/download_kontext.py --verify-only
   python scripts/download_kontext.py --comfy /path/to/ComfyUI
 """
@@ -66,7 +71,10 @@ def main() -> int:
     print(f"Model store: {os.environ.get('HEADSWAP_MODEL_STORE')}")
     print(f"Staging:     {os.environ.get('HEADSWAP_STAGING_DIR')}")
     print("Assets: Kontext FP8 UNET + clip_l + t5xxl_fp8 + ae VAE (~16.4 GiB)")
-    print("Skipped: Place It / Put It Here LoRAs (intentional for v1)")
+    if "--include-optional" in argv:
+        print("Optional: Put it here V4.2 + Place It LoRAs (~0.6 GiB)")
+    else:
+        print("Optional LoRAs skipped (pass --include-optional for Put it here / Place It)")
     print()
 
     sys.argv = [sys.argv[0], *argv]

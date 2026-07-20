@@ -65,6 +65,7 @@ _FACE_NET = None
 _PROTO_MODEL: tuple[str, str] | None = None
 _HAAR = None
 _FACE_BACKEND: str | None = None
+_INSIGHTFACE_APP = None
 
 
 def _ensure_face_dnn(cache_dir) -> tuple[str, str]:
@@ -349,6 +350,163 @@ def describe_hair_length_hint(body: Image.Image, face: Image.Image, cache_dir) -
     if top_room > 0.18 and face_frac < 0.28:
         return " Specifically remove the long hair from Picture 1 completely."
     return ""
+
+
+def get_face_landmarks5(
+    rgb: np.ndarray, cache_dir
+) -> tuple[np.ndarray | None, str, str | None]:
+    """
+    Return 5 face landmarks as float32 (5, 2) in image XY order.
+
+    Preference order:
+      1. InsightFace (buffalo_l / default) — community Align→Paste path
+      2. OpenCV box corners derived from detect_best_face — weak fallback
+
+    Returns (landmarks_or_None, backend_name, skip_reason_or_None).
+    """
+    # InsightFace (optional GPU extra)
+    try:
+        from insightface.app import FaceAnalysis  # type: ignore
+    except Exception as exc:
+        insight_err = f"insightface_import_failed:{exc}"
+    else:
+        insight_err = None
+        global _INSIGHTFACE_APP
+        try:
+            if _INSIGHTFACE_APP is None:
+                app = FaceAnalysis(
+                    name="buffalo_l",
+                    providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                )
+                app.prepare(ctx_id=0, det_size=(640, 640))
+                _INSIGHTFACE_APP = app
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            faces = _INSIGHTFACE_APP.get(bgr)
+            if not faces:
+                return None, "insightface", "insightface_no_face_detected"
+            face = max(
+                faces,
+                key=lambda f: float(
+                    (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+                ),
+            )
+            kps = np.asarray(face.kps, dtype=np.float32)
+            if kps.shape != (5, 2):
+                return None, "insightface", f"insightface_bad_kps_shape:{kps.shape}"
+            return kps, "insightface", None
+        except Exception as exc:
+            insight_err = f"insightface_runtime_failed:{exc}"
+
+    # OpenCV box → synthetic 5-point layout (eyes / nose / mouth corners)
+    box = detect_best_face(rgb, cache_dir)
+    if box is None:
+        reason = insight_err or "no_face_for_landmarks"
+        return None, "none", reason
+    x0, y0, x1, y1 = box.x0, box.y0, box.x1, box.y1
+    w, h = max(1, x1 - x0), max(1, y1 - y0)
+    # Approximate 5-point template inside the box (not as good as InsightFace).
+    pts = np.array(
+        [
+            [x0 + 0.30 * w, y0 + 0.38 * h],  # left eye
+            [x0 + 0.70 * w, y0 + 0.38 * h],  # right eye
+            [x0 + 0.50 * w, y0 + 0.55 * h],  # nose
+            [x0 + 0.35 * w, y0 + 0.75 * h],  # left mouth
+            [x0 + 0.65 * w, y0 + 0.75 * h],  # right mouth
+        ],
+        dtype=np.float32,
+    )
+    note = insight_err or "insightface_unavailable_used_box_prior"
+    return pts, "box_prior", note
+
+
+def align_face_to_destination(
+    source_face: Image.Image,
+    destination: Image.Image,
+    cache_dir,
+) -> tuple[Image.Image | None, dict]:
+    """
+    Warp source face onto destination face geometry (similarity transform).
+
+    Returns (aligned_rgba_or_None, info_dict).
+    aligned image is RGBA the same size as destination (transparent outside face).
+    """
+    info: dict = {
+        "face_alignment": False,
+        "face_alignment_backend": None,
+        "face_alignment_skip_reason": None,
+        "dest_landmarks_backend": None,
+        "src_landmarks_backend": None,
+    }
+    dest_rgb = pil_to_rgb_np(destination)
+    src_rgb = pil_to_rgb_np(source_face)
+
+    dest_lm, dest_backend, dest_note = get_face_landmarks5(dest_rgb, cache_dir)
+    src_lm, src_backend, src_note = get_face_landmarks5(src_rgb, cache_dir)
+    info["dest_landmarks_backend"] = dest_backend
+    info["src_landmarks_backend"] = src_backend
+
+    if dest_lm is None:
+        info["face_alignment_skip_reason"] = dest_note or "dest_landmarks_missing"
+        return None, info
+    if src_lm is None:
+        info["face_alignment_skip_reason"] = src_note or "src_landmarks_missing"
+        return None, info
+
+    # Similarity transform: src landmarks → dest landmarks
+    matrix, inliers = cv2.estimateAffinePartial2D(src_lm, dest_lm, method=cv2.LMEDS)
+    if matrix is None:
+        info["face_alignment_skip_reason"] = "estimateAffinePartial2D_failed"
+        return None, info
+
+    h, w = dest_rgb.shape[:2]
+    warped = cv2.warpAffine(
+        src_rgb,
+        matrix,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    # Soft elliptical alpha around dest face box from landmarks
+    xs, ys = dest_lm[:, 0], dest_lm[:, 1]
+    cx, cy = float(xs.mean()), float(ys.mean())
+    span_x = float(max(40.0, (xs.max() - xs.min()) * 1.55))
+    span_y = float(max(50.0, (ys.max() - ys.min()) * 2.10))
+    yy, xx = np.mgrid[0:h, 0:w]
+    # Ellipse falloff
+    nx = (xx - cx) / (span_x / 2.0)
+    ny = (yy - cy) / (span_y / 2.0)
+    r2 = nx * nx + ny * ny
+    alpha = np.clip(1.0 - (r2 - 0.55) / 0.45, 0.0, 1.0)
+    alpha = (alpha * 255.0).astype(np.uint8)
+    alpha = cv2.GaussianBlur(alpha, (31, 31), 0)
+
+    rgba = np.dstack([warped, alpha])
+    info["face_alignment"] = True
+    info["face_alignment_backend"] = (
+        f"src={src_backend}+dest={dest_backend}"
+        + (f";note={src_note or dest_note}" if (src_note or dest_note) else "")
+    )
+    if inliers is not None:
+        info["face_alignment_inliers"] = int(np.asarray(inliers).sum())
+    return Image.fromarray(rgba, mode="RGBA"), info
+
+
+def paste_aligned_face(
+    destination: Image.Image,
+    aligned_rgba: Image.Image,
+) -> tuple[Image.Image, dict]:
+    """Alpha-composite aligned RGBA face onto destination RGB. Returns (RGB, info)."""
+    info = {"composite_paste": False, "composite_paste_skip_reason": None}
+    if aligned_rgba is None:
+        info["composite_paste_skip_reason"] = "aligned_rgba_none"
+        return destination.convert("RGB"), info
+    if aligned_rgba.size != destination.size:
+        aligned_rgba = aligned_rgba.resize(destination.size, Image.Resampling.LANCZOS)
+    base = destination.convert("RGBA")
+    out = Image.alpha_composite(base, aligned_rgba.convert("RGBA"))
+    info["composite_paste"] = True
+    return out.convert("RGB"), info
 
 
 def lab_histogram_match_face(

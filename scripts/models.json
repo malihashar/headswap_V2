@@ -138,5 +138,25 @@
     "download_repo_id": null,
     "set": "kontext",
     "required": true
+  },
+  "Put it here_V4.2.safetensors": {
+    "size": 358706112,
+    "path": "loras",
+    "repo_id": "civitai/put-it-here-kontext-v4",
+    "repo_path": "Put it here_V4.2.safetensors",
+    "url": "https://civitai.com/api/download/models/2118949",
+    "download_repo_id": null,
+    "set": "kontext",
+    "required": false
+  },
+  "place_it.safetensors": {
+    "size": 306592768,
+    "path": "loras",
+    "repo_id": "civitai/place-it-flux-kontext",
+    "repo_path": "place_it.safetensors",
+    "url": "https://civitai.com/api/download/models/2015589",
+    "download_repo_id": null,
+    "set": "kontext",
+    "required": false
   }
 }
