@@ -98,5 +98,45 @@
     "download_repo_id": null,
     "set": "qwen",
     "required": true
+  },
+  "flux1-dev-kontext_fp8_scaled.safetensors": {
+    "size": 11904640136,
+    "path": "diffusion_models",
+    "repo_id": "Comfy-Org/flux1-kontext-dev_ComfyUI",
+    "repo_path": "split_files/diffusion_models/flux1-dev-kontext_fp8_scaled.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/flux1-kontext-dev_ComfyUI/resolve/main/split_files/diffusion_models/flux1-dev-kontext_fp8_scaled.safetensors",
+    "download_repo_id": null,
+    "set": "kontext",
+    "required": true
+  },
+  "clip_l.safetensors": {
+    "size": 246144152,
+    "path": "text_encoders",
+    "repo_id": "comfyanonymous/flux_text_encoders",
+    "repo_path": "clip_l.safetensors",
+    "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
+    "download_repo_id": null,
+    "set": "kontext",
+    "required": true
+  },
+  "t5xxl_fp8_e4m3fn_scaled.safetensors": {
+    "size": 5157348688,
+    "path": "text_encoders",
+    "repo_id": "comfyanonymous/flux_text_encoders",
+    "repo_path": "t5xxl_fp8_e4m3fn_scaled.safetensors",
+    "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn_scaled.safetensors",
+    "download_repo_id": null,
+    "set": "kontext",
+    "required": true
+  },
+  "ae.safetensors": {
+    "size": 335304388,
+    "path": "vae",
+    "repo_id": "Comfy-Org/Lumina_Image_2.0_Repackaged",
+    "repo_path": "split_files/vae/ae.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors",
+    "download_repo_id": null,
+    "set": "kontext",
+    "required": true
   }
 }

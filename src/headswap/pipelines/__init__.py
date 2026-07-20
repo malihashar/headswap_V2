@@ -5,12 +5,14 @@ from typing import Any
 from headswap.config import load_config
 from headswap.pipelines.base import BasePipeline, MockHeadSwapPipeline
 from headswap.pipelines.klein import KleinMaskCropPipeline
+from headswap.pipelines.kontext import FluxKontextPipeline
 from headswap.pipelines.qwen import QwenBaselinePipeline, QwenImprovedPipeline
 
 
 PIPELINES: dict[str, type[BasePipeline]] = {
     "klein": KleinMaskCropPipeline,
     "klein4b_mask_crop_stitch": KleinMaskCropPipeline,
+    "flux_kontext": FluxKontextPipeline,
     "qwen_baseline": QwenBaselinePipeline,
     "qwen_improved": QwenImprovedPipeline,
     "qwen_improved_mask_crop": QwenImprovedPipeline,

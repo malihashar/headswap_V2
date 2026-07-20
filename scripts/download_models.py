@@ -1572,7 +1572,11 @@ def main() -> int:
             "Kaggle, else /content/ComfyUI."
         ),
     )
-    ap.add_argument("--set", choices=["klein", "qwen", "all"], default="klein")
+    ap.add_argument(
+        "--set",
+        choices=["klein", "qwen", "kontext", "all"],
+        default="klein",
+    )
     ap.add_argument(
         "--include-optional",
         action="store_true",

@@ -1,0 +1,38 @@
+name: flux_kontext
+pipeline: flux_kontext
+
+# FLUX.1 Kontext [dev] FP8 — first integration (no Place It / Put It Here LoRA yet).
+unet_name: flux1-dev-kontext_fp8_scaled.safetensors
+clip_name1: clip_l.safetensors
+clip_name2: t5xxl_fp8_e4m3fn_scaled.safetensors
+clip_type: flux
+vae_name: ae.safetensors
+
+# TODO: Place It / Put It Here LoRA
+# place_it_lora_name: ...
+# place_it_lora_strength: 1.0
+
+steps: 20
+cfg: 1.0
+flux_guidance: 2.5
+sampler: euler
+scheduler: simple
+seed: 46
+denoise: 1.0
+max_dim: 576
+div_by: 8
+
+# Official Kontext workflows scale the input to preferred resolutions.
+flux_kontext_image_scale: true
+
+prompt: >-
+  Replace the entire head in image 1 with the head from image 2.
+  Match image 2 identity strongly.
+  Preserve body, pose, clothes, and background of image 1.
+
+negative_prompt: ""
+
+face_side_pad: 0.35
+face_top_pad: 0.65
+face_bot_pad: 0.15
+blur_pad_face: true
