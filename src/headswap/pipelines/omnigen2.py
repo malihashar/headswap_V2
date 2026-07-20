@@ -153,12 +153,12 @@ class OmniGen2PipelineRunner(BasePipeline):
                 f"Original error: {exc}"
             ) from exc
 
+        # Match official inference.py load order exactly:
+        # from_pretrained → replace transformer subclass → then offload/to(device).
         pipe = OmniGen2Pipeline.from_pretrained(
             str(model_ref),
             torch_dtype=dtype,
-            trust_remote_code=True,
         )
-        # Official inference.py always reloads the custom transformer subclass.
         pipe.transformer = OmniGen2Transformer2DModel.from_pretrained(
             str(model_ref),
             subfolder="transformer",
@@ -275,6 +275,9 @@ class OmniGen2PipelineRunner(BasePipeline):
                 timing["load_s"] = round(time.perf_counter() - t_load, 4)
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
+            # Diffusers + model_cpu_offload: keep generator on CPU (official Accelerate
+            # path is fine either way; CUDA generators often break under offload).
+            generator = torch.Generator(device="cpu").manual_seed(seed)
             call_kwargs: dict[str, Any] = {
                 "prompt": prompt,
                 "input_images": [body_work, face_crop],
@@ -282,12 +285,17 @@ class OmniGen2PipelineRunner(BasePipeline):
                 "height": height,
                 "num_inference_steps": steps,
                 "max_sequence_length": 1024,
+                "max_pixels": max_pixels,
+                "max_input_image_side_length": int(
+                    self.cfg.get("max_input_image_side_length", crop_size)
+                ),
+                "align_res": False,  # we already chose width/height from the body
                 "text_guidance_scale": text_guidance,
                 "image_guidance_scale": image_guidance,
                 "cfg_range": (cfg_start, cfg_end),
                 "negative_prompt": negative,
                 "num_images_per_prompt": 1,
-                "generator": torch.Generator(device=device).manual_seed(seed),
+                "generator": generator,
                 "output_type": "pil",
             }
 
@@ -304,7 +312,28 @@ class OmniGen2PipelineRunner(BasePipeline):
 
             v_before = vram_snapshot()
             t_sample = time.perf_counter()
-            result = pipe(**call_kwargs)
+            try:
+                result = pipe(**call_kwargs)
+            except torch.cuda.OutOfMemoryError as oom:
+                # One automatic retry with sequential offload + smaller canvas.
+                if not bool(self.cfg.get("_oom_retried")):
+                    print(
+                        "[omnigen2] CUDA OOM on sample — retrying with "
+                        "sequential_cpu_offload and crop_size=768"
+                    )
+                    self.cfg["_oom_retried"] = True
+                    self.cfg["enable_sequential_cpu_offload"] = True
+                    self.cfg["enable_model_cpu_offload"] = False
+                    self.cfg["crop_size"] = min(crop_size, 768)
+                    self._pipe = None
+                    self._load_meta = {}
+                    torch.cuda.empty_cache()
+                    raise RuntimeError(
+                        f"CUDA OOM during OmniGen2 sample (will not auto-loop here): {oom}. "
+                        "Re-run with crop_size: 768 and enable_sequential_cpu_offload: true "
+                        "in configs/omnigen2.yaml"
+                    ) from oom
+                raise
             timing["sampling_s"] = round(time.perf_counter() - t_sample, 4)
             v_after = vram_snapshot()
 
@@ -346,7 +375,10 @@ class OmniGen2PipelineRunner(BasePipeline):
                 if v
             }
         except BaseException as exc:
+            import traceback
+
             run_error = exc
+            print("[omnigen2] TRACEBACK:\n" + traceback.format_exc(), flush=True)
 
         latency_s = time.perf_counter() - t0
         timing["total_s"] = round(latency_s, 4)

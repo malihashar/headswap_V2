@@ -17,6 +17,7 @@ from headswap.pipelines.base import PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 from headswap.preprocess import head_hair_mask_from_face
 from headswap.profiling.reporting import emit_run_finished, flush_stdio
+from headswap.profiling.call_chain_trace import stop_post_sample_trace
 
 
 def _write_metrics_report(report_path: Path, report: dict[str, Any]) -> None:
@@ -118,8 +119,9 @@ def run_eval(
                     flush_stdio()
                     print(
                         f"[{pipeline_name}] {p['id']} FAILED lat={exc.latency_s:.2f}s "
-                        f"(profile saved to metrics.json)"
+                        f"error={pair_error!r} (profile saved to metrics.json)"
                     )
+                    stop_post_sample_trace(reason="pipeline_run_error_no_image")
                     continue
                 result.meta.setdefault("run_error", pair_error)
 
@@ -137,6 +139,7 @@ def run_eval(
             try:
                 out_file = pair_out / "result.png"
                 result.image.save(out_file)
+                stop_post_sample_trace(reason=f"after Image.save({out_file})")
                 out_path = str(out_file)
 
                 mask = head_hair_mask_from_face(body, pipe.cache_dir)
@@ -155,6 +158,9 @@ def run_eval(
             except Exception as post_exc:
                 post_error = str(post_exc)
                 traceback.print_exc()
+                stop_post_sample_trace(reason=f"post_save_error: {post_error}")
+            finally:
+                stop_post_sample_trace(reason="pair_finally")
 
             if metrics is not None:
                 row = {

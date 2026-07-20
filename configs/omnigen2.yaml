@@ -23,8 +23,10 @@ scheduler: euler              # euler | dpmsolver++
 # Official API has no denoise/strength; kept for config parity.
 strength: 1.0
 # Longest side budget for body / output (official default canvas 1024).
-crop_size: 1024
+# On 16GB Kaggle GPUs prefer 768 if you hit CUDA OOM.
+crop_size: 768
 max_input_image_pixels: 1048576   # 1024*1024 official default
+max_input_image_side_length: 1024
 cfg_range_start: 0.0
 cfg_range_end: 1.0
 
