@@ -21,17 +21,17 @@ from headswap.preprocess import (
     resize_max_keep_ar,
     soft_composite,
 )
+from headswap.profiling.call_chain_trace import (
+    install_live_decode_cuda_log,
+    start_post_sample_trace,
+)
 from headswap.profiling.gpu_stages import (
     GpuStageProfiler,
     count_sigmas,
     describe_latent,
     reset_vram_peak,
 )
-from headswap.profiling.path_proof import (
-    dump_identity,
-    enter,
-    install_decode_chain_enters,
-)
+from headswap.profiling.path_proof import dump_identity, enter
 from headswap.profiling.reporting import emit_profile_report, profile_timing_meta
 from headswap.profiling.vram_load_probe import vram_load_probe
 
@@ -319,6 +319,7 @@ def _sample_qwen(
                 flux_kontext_applied = True
 
         full_load_info = None
+        use_full_load = bool(cfg.get("force_full_load", True))
         if profiler is not None:
             with profiler.stage("scheduler_creation"):
                 noise = get_value_at_index(
@@ -355,7 +356,9 @@ def _sample_qwen(
             hook_ok = profiler.install_sampling_step_hook()
             profiler.note("sampling_step_hook", hook_ok)
             try:
-                with force_sampling_full_load(models=(bundle["model"],)) as full_load_info:
+                with force_sampling_full_load(
+                    models=(bundle["model"],), enabled=use_full_load
+                ) as full_load_info:
                     profiler.note("force_sampling_full_load", full_load_info)
                     with vram_load_probe() as load_probe:
                         with profiler.stage("sampling_total"):
@@ -403,7 +406,9 @@ def _sample_qwen(
                     ),
                     0,
                 )
-                with force_sampling_full_load(models=(bundle["model"],)) as full_load_info:
+                with force_sampling_full_load(
+                    models=(bundle["model"],), enabled=use_full_load
+                ) as full_load_info:
                     samples = rt.call(
                         "SamplerCustomAdvanced",
                         noise=noise,
@@ -431,13 +436,15 @@ def _sample_qwen(
         except Exception:
             pass
 
-        latent_for_decode = get_value_at_index(samples, 0)
-        enter("C", "immediately before VAEDecode setup")
-        dump_identity("pre_VAEDecode")
-
-        # Path proof only — no CUDA queries, no unload/memory changes.
-        with install_decode_chain_enters(runtime=rt):
-            enter("C2", "inside install_decode_chain_enters, before profiler.stage")
+        # Prove the live post-sample path. vae_bridge_probe is intentionally NOT
+        # imported here (orphaned since path_proof landed) — this tracer + live
+        # decode wrappers are the active instrumentation.
+        start_post_sample_trace(reason="qwen._sample_qwen after sampling")
+        restore_decode = install_live_decode_cuda_log(runtime=rt)
+        try:
+            latent_for_decode = get_value_at_index(samples, 0)
+            enter("C", "immediately before rt.call(VAEDecode)")
+            dump_identity("pre_VAEDecode")
             with _track(profiler, timings, "vae_decode"):
                 enter("C3", "inside profiler.stage(vae_decode), before rt.call(VAEDecode)")
                 decoded = rt.call(
@@ -446,7 +453,11 @@ def _sample_qwen(
                     vae=bundle["vae"],
                 )
                 enter("C4", "rt.call(VAEDecode) returned OK")
-        image = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
+            image = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
+            enter("C5", "comfy_tensor_to_pil done (PIL image in hand)")
+        finally:
+            restore_decode()
+
         sample_meta = {
             "reference_latent_used": False,
             "flux_kontext_applied": flux_kontext_applied,

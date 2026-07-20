@@ -267,13 +267,19 @@ def offload_gpu_models(
 @contextmanager
 def force_sampling_full_load(
     models: Iterable[Any] | None = None,
+    *,
+    enabled: bool = True,
 ) -> Iterator[dict]:
     """
-    Context manager: free idle GPU models, force full UNet load for sample,
-    then release the sampling ModelPatcher(s) so VAE decode can allocate.
+    Context manager: free idle GPU models, optionally force full UNet load for
+    sample, then release the sampling ModelPatcher(s) so VAE decode can allocate.
 
     Pass the diffusion ModelPatcher(s) as ``models`` (e.g. ``bundle["model"]``)
     so release works even when they are not in ``current_loaded_models``.
+
+    Set ``enabled=False`` on 15GB T4 / fragmented Kaggle sessions — Comfy's
+    partial-load path is slower but avoids OOM when UNet+activations cannot
+    fully reside (Qwen Image Edit reports ~20GB model_size on T4).
     """
     patchers = [p for p in (list(models) if models is not None else []) if p is not None]
     info: dict = {
@@ -284,6 +290,31 @@ def force_sampling_full_load(
         "n_release_patchers": len(patchers),
         "error": None,
     }
+
+    # Always free CLIP/VAE before sampling for headroom.
+    before = offload_gpu_models(reason="before_sample", patchers=None)
+    info["freed_before_sample"] = bool(before.get("ok"))
+    info["offload_before"] = before
+    if before.get("error") and not info.get("error"):
+        info["error"] = f"before_sample:{before['error']}"
+
+    if not enabled:
+        info["enabled"] = False
+        info["force_full_load"] = False
+        print(
+            "[full_load] skipped (force_full_load=false) — "
+            "Comfy partial/low-VRAM path (slower, T4-safe)"
+        )
+        try:
+            yield info
+        finally:
+            after = offload_gpu_models(reason="after_sample", patchers=patchers)
+            info["freed_after_sample"] = bool(after.get("ok"))
+            info["offload_after"] = after
+            if after.get("error") and not info.get("error"):
+                info["error"] = f"after_sample:{after['error']}"
+        return
+
     try:
         import comfy.sampler_helpers as sh
     except Exception as exc:
@@ -291,12 +322,6 @@ def force_sampling_full_load(
         print(f"[full_load] skip — ComfyUI not available: {exc}")
         yield info
         return
-
-    before = offload_gpu_models(reason="before_sample", patchers=None)
-    info["freed_before_sample"] = bool(before.get("ok"))
-    info["offload_before"] = before
-    if before.get("error") and not info.get("error"):
-        info["error"] = f"before_sample:{before['error']}"
 
     orig = sh.prepare_sampling
 

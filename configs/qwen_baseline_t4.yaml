@@ -1,6 +1,9 @@
-name: qwen_baseline
+name: qwen_baseline_t4
 pipeline: qwen_baseline
 
+# T4 / 15GB-safe Qwen baseline:
+# - force_full_load=false → Comfy partial VRAM (slower, avoids OOM)
+# - max_dim 448 → smaller activations
 unet_name: qwen_image_edit_2511_fp8mixed.safetensors
 clip_name: qwen_2.5_vl_7b_fp8_scaled.safetensors
 clip_type: qwen_image
@@ -19,18 +22,10 @@ sampler: euler
 scheduler: simple
 seed: 46
 denoise: 1.0
-max_dim: 576
+max_dim: 448
 div_by: 8
-
-# Colab Cell 5 does not run FluxKontextImageScale (keeps ~456×576 encode size).
-# Enabling this snaps to Kontext preferred resolutions (~880×1184 for portrait),
-# ~4× more latent pixels and ~3–10× slower diffusion with no Colab quality gain.
+force_full_load: false
 flux_kontext_image_scale: false
-
-# Colab T4 speed path forces full UNet residency. On fragmented / tight 15GB
-# Kaggle sessions this OOMs — use configs/qwen_baseline_t4.yaml instead
-# (force_full_load: false).
-force_full_load: true
 
 prompt: >-
   Replace the entire head in image 1 with the head from image 2.
