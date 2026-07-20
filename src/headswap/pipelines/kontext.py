@@ -467,11 +467,17 @@ class FluxKontextPipeline(BasePipeline):
                 include_shoulders=False,
             )
 
-            # --- Stage B: Align → color-match → Paste ---
+            # --- Stage B: Align → color-match → hard Paste ---
             aligned_rgba, align_info = align_face_to_destination(
-                face_crop, body_pil, self.cache_dir
+                face_crop,
+                body_pil,
+                self.cache_dir,
+                core_min_alpha=float(self.cfg.get("paste_core_min_alpha", 0.94)),
+                ellipse_scale_x=float(self.cfg.get("paste_ellipse_scale_x", 2.05)),
+                ellipse_scale_y=float(self.cfg.get("paste_ellipse_scale_y", 2.55)),
+                feather_px=int(self.cfg.get("paste_feather_px", 21)),
             )
-            pre_match = float(self.cfg.get("pre_color_match_strength", 0.55) or 0.0)
+            pre_match = float(self.cfg.get("pre_color_match_strength", 0.45) or 0.0)
             if aligned_rgba is not None:
                 if pre_match > 0:
                     aligned_rgba = color_match_rgba_to_destination(
@@ -507,8 +513,8 @@ class FluxKontextPipeline(BasePipeline):
             head_mask = head_hair_mask_from_face(
                 body_pil,
                 self.cache_dir,
-                expand_px=int(self.cfg.get("mask_expand_px", 22)),
-                blur_px=int(self.cfg.get("mask_blur_px", 14)),
+                expand_px=int(self.cfg.get("mask_expand_px", 28)),
+                blur_px=int(self.cfg.get("mask_blur_px", 10)),
             )
 
             composite_t = pil_to_comfy_tensor(composite, torch)
@@ -517,13 +523,15 @@ class FluxKontextPipeline(BasePipeline):
                 rt, bundle, composite_t, self.cfg, prompt, face_t=face_t
             )
 
-            # --- Stage C: soft stitch refined head back onto original body ---
-            # Keeps clothing / background pixel-stable (community locality).
+            # --- Stage C: stitch refined head ---
+            # Base = pasted composite (not original body) so soft mask edges cannot
+            # reintroduce the destination identity (esp. glasses).
             if refined.size != body_pil.size:
                 refined = refined.resize(body_pil.size, Image.Resampling.LANCZOS)
             box = (0, 0, body_pil.width, body_pil.height)
-            out = soft_composite(body_pil, refined, head_mask, box)
-            post_match = float(self.cfg.get("post_color_match_strength", 0.35) or 0.0)
+            stitch_base = composite if bool(self.cfg.get("stitch_from_composite", True)) else body_pil
+            out = soft_composite(stitch_base, refined, head_mask, box)
+            post_match = float(self.cfg.get("post_color_match_strength", 0.25) or 0.0)
             out = lab_histogram_match_face(out, body_pil, head_mask, strength=post_match)
 
             load_meta = dict(bundle.get("load_meta") or {})
@@ -582,10 +590,15 @@ class FluxKontextPipeline(BasePipeline):
             ),
             "pre_color_match_strength": align_info.get(
                 "pre_color_match_strength",
-                float(self.cfg.get("pre_color_match_strength", 0.55) or 0.0),
+                float(self.cfg.get("pre_color_match_strength", 0.45) or 0.0),
             ),
-            "denoise": sample_meta.get("denoise", self.cfg.get("denoise", 0.72)),
-            "steps": sample_meta.get("steps", self.cfg.get("steps", 32)),
+            "paste_mean_alpha": align_info.get("paste_mean_alpha"),
+            "paste_core_min_alpha": align_info.get(
+                "paste_core_min_alpha",
+                float(self.cfg.get("paste_core_min_alpha", 0.94) or 0.0),
+            ),
+            "denoise": sample_meta.get("denoise", self.cfg.get("denoise", 0.55)),
+            "steps": sample_meta.get("steps", self.cfg.get("steps", 28)),
             "conditioning_zero_out_enabled": bool(
                 sample_meta.get("conditioning_zero_out_enabled", True)
             ),
@@ -642,7 +655,8 @@ class FluxKontextPipeline(BasePipeline):
 
         print(
             f"[flux_kontext] checkpoint={meta.get('checkpoint')} "
-            f"align={meta.get('face_alignment')} paste={meta.get('composite_paste')} "
+            f"align={meta.get('face_alignment')} backend={align_info.get('face_alignment_backend')} "
+            f"paste={meta.get('composite_paste')} mean_a={meta.get('paste_mean_alpha')} "
             f"ref_latent={meta.get('reference_latent_used')} "
             f"id_ref={meta.get('identity_reference_used')} "
             f"zero_out={meta.get('conditioning_zero_out_applied')} "

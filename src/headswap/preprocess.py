@@ -125,6 +125,44 @@ def get_face_backend(cache_dir) -> str:
     return _FACE_BACKEND
 
 
+def _nonblack_content_box(rgb: np.ndarray, thresh: float = 14.0) -> FaceBox | None:
+    """Bounding box of non-black pixels — works for cutout faces on black backgrounds."""
+    lum = rgb.astype(np.float32).mean(axis=2)
+    ys, xs = np.where(lum > thresh)
+    if len(xs) < 100:
+        return None
+    h, w = rgb.shape[:2]
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    # Reject if almost the full frame (not a cutout) or tiny.
+    area = (x1 - x0) * (y1 - y0)
+    if area < 0.05 * h * w or area > 0.98 * h * w:
+        return None
+    return FaceBox(x0, y0, x1, y1, 0.35)
+
+
+def _face_box_from_cutout(rgb: np.ndarray) -> FaceBox | None:
+    """
+    For studio cutouts on black: content bbox, then keep the upper face
+    (drop jersey/shoulders) and center horizontally.
+    """
+    content = _nonblack_content_box(rgb)
+    if content is None:
+        return None
+    cw, ch = content.width, content.height
+    # Upper ~58% is face+hair; lower is neck/jersey on typical athlete cutouts.
+    face_h = max(32, int(ch * 0.58))
+    # Horizontal: center 78% of content width to avoid arms/jersey edges.
+    face_w = max(32, int(cw * 0.78))
+    cx = (content.x0 + content.x1) / 2.0
+    x0 = int(round(cx - face_w / 2.0))
+    x1 = int(round(cx + face_w / 2.0))
+    y0 = content.y0
+    y1 = content.y0 + face_h
+    h, w = rgb.shape[:2]
+    return FaceBox(max(0, x0), max(0, y0), min(w, x1), min(h, y1), 0.35)
+
+
 def detect_best_face(rgb: np.ndarray, cache_dir, conf_thresh: float = 0.30) -> FaceBox | None:
     backend = get_face_backend(cache_dir)
     h, w = rgb.shape[:2]
@@ -145,42 +183,62 @@ def detect_best_face(rgb: np.ndarray, cache_dir, conf_thresh: float = 0.30) -> F
         det = _FACE_NET.forward()
         best: FaceBox | None = None
         best_score = -1.0
-        for i in range(det.shape[2]):
-            conf = float(det[0, 0, i, 2])
-            if conf < conf_thresh:
-                continue
-            x0 = int(det[0, 0, i, 3] * sw)
-            y0 = int(det[0, 0, i, 4] * sh)
-            x1 = int(det[0, 0, i, 5] * sw)
-            y1 = int(det[0, 0, i, 6] * sh)
-            if scale < 1.0:
-                x0 = int(round(x0 / scale))
-                x1 = int(round(x1 / scale))
-                y0 = int(round(y0 / scale))
-                y1 = int(round(y1 / scale))
-            x0, y0 = max(0, x0), max(0, y0)
-            x1, y1 = min(w, x1), min(h, y1)
-            if x1 <= x0 + 2 or y1 <= y0 + 2:
-                continue
-            area = (x1 - x0) * (y1 - y0)
-            score = conf * area
-            if score > best_score:
-                best_score = score
-                best = FaceBox(x0, y0, x1, y1, conf)
-        return best
+        # Retry with a lower conf floor — glossy studio faces on black often score ~0.2–0.3.
+        for min_conf in (conf_thresh, 0.15):
+            for i in range(det.shape[2]):
+                conf = float(det[0, 0, i, 2])
+                if conf < min_conf:
+                    continue
+                x0 = int(det[0, 0, i, 3] * sw)
+                y0 = int(det[0, 0, i, 4] * sh)
+                x1 = int(det[0, 0, i, 5] * sw)
+                y1 = int(det[0, 0, i, 6] * sh)
+                if scale < 1.0:
+                    x0 = int(round(x0 / scale))
+                    x1 = int(round(x1 / scale))
+                    y0 = int(round(y0 / scale))
+                    y1 = int(round(y1 / scale))
+                x0, y0 = max(0, x0), max(0, y0)
+                x1, y1 = min(w, x1), min(h, y1)
+                if x1 <= x0 + 2 or y1 <= y0 + 2:
+                    continue
+                area = (x1 - x0) * (y1 - y0)
+                score = conf * area
+                if score > best_score:
+                    best_score = score
+                    best = FaceBox(x0, y0, x1, y1, conf)
+            if best is not None:
+                return best
 
-    if backend == "haar":
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        faces = _haar_cascade().detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(32, 32))
-        if len(faces) == 0:
-            return None
-        x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        return FaceBox(int(x), int(y), int(x + fw), int(y + fh), 0.5)
+    if backend == "haar" or backend == "caffe":
+        # Haar as secondary when caffe misses (common on black-bg cutouts).
+        try:
+            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+            faces = _haar_cascade().detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=4, minSize=(32, 32)
+            )
+            if len(faces) > 0:
+                x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+                return FaceBox(int(x), int(y), int(x + fw), int(y + fh), 0.5)
+        except Exception:
+            pass
 
-    # Geometric prior: upper-center ellipse face box (works for our synthetic set)
-    cx, cy = w // 2, int(h * 0.28)
-    hr = int(min(w, h) * 0.16)
-    return FaceBox(cx - hr, cy - hr, cx + hr, cy + hr, 0.2)
+    content = _face_box_from_cutout(rgb)
+    if content is not None:
+        return content
+
+    # Geometric prior for portrait selfies: large upper-center face.
+    # Used when OpenCV DNN/Haar are unavailable in the environment.
+    face_h = int(h * 0.42)
+    face_w = int(min(w * 0.55, face_h * 0.90))
+    cx, cy = w // 2, int(h * 0.36)
+    return FaceBox(
+        max(0, cx - face_w // 2),
+        max(0, cy - face_h // 2),
+        min(w, cx + face_w // 2),
+        min(h, cy + face_h // 2),
+        0.2,
+    )
 
 
 def expand_box(
@@ -214,6 +272,12 @@ def crop_face_reference(
     box = detect_best_face(rgb, cache_dir)
     if box is None:
         return face_pil.convert("RGB")
+    # Cutout / content boxes are already face-sized — large pads pull in jersey/bg.
+    if box.conf <= 0.40 and box.height >= 0.28 * face_pil.height:
+        top = min(float(top), 0.18)
+        bot = min(float(bot), 0.22)
+        side = min(float(side), 0.18)
+        include_shoulders = False
     expanded = expand_box(
         box,
         face_pil.width,
@@ -419,16 +483,127 @@ def get_face_landmarks5(
     return pts, "box_prior", note
 
 
+def _ellipse_alpha(
+    h: int,
+    w: int,
+    cx: float,
+    cy: float,
+    span_x: float,
+    span_y: float,
+    *,
+    core_min_alpha: float,
+    feather_px: int,
+) -> np.ndarray:
+    yy, xx = np.mgrid[0:h, 0:w]
+    nx = (xx - cx) / max(1e-3, span_x / 2.0)
+    ny = (yy - cy) / max(1e-3, span_y / 2.0)
+    r2 = nx * nx + ny * ny
+    alpha = np.clip(1.0 - (r2 - 0.35) / 0.65, 0.0, 1.0)
+    core = r2 <= 0.70
+    alpha = np.where(core, np.maximum(alpha, float(core_min_alpha)), alpha)
+    alpha_u8 = (np.clip(alpha, 0.0, 1.0) * 255.0).astype(np.uint8)
+    k = max(3, int(feather_px) | 1)
+    alpha_u8 = cv2.GaussianBlur(alpha_u8, (k, k), 0)
+    alpha_f = alpha_u8.astype(np.float32) / 255.0
+    alpha_f = np.where(core, np.maximum(alpha_f, float(core_min_alpha)), alpha_f)
+    return (np.clip(alpha_f, 0.0, 1.0) * 255.0).astype(np.uint8), core, alpha_f
+
+
+def _box_paste_rgba(
+    source_face: Image.Image,
+    destination: Image.Image,
+    cache_dir,
+    *,
+    core_min_alpha: float,
+    feather_px: int,
+    scale: float = 1.12,
+) -> tuple[Image.Image | None, dict]:
+    """
+    Resize donor face into the destination face box (no affine).
+
+    Used when InsightFace landmarks are unavailable — synthetic box_prior
+    landmarks produce black/garbage warps that Kontext then "heals" back to
+    the original identity.
+    """
+    info: dict = {
+        "face_alignment": False,
+        "face_alignment_backend": "box_paste",
+        "face_alignment_skip_reason": None,
+        "paste_core_min_alpha": float(core_min_alpha),
+    }
+    dest_rgb = pil_to_rgb_np(destination)
+    src_rgb = pil_to_rgb_np(source_face)
+    dest_box = detect_best_face(dest_rgb, cache_dir)
+    if dest_box is None:
+        info["face_alignment_skip_reason"] = "dest_face_box_missing"
+        return None, info
+
+    h, w = dest_rgb.shape[:2]
+    # Expand dest box upward/sideways so glasses + forehead are covered.
+    fw = max(8, int(dest_box.width * scale))
+    fh = max(8, int(dest_box.height * scale * 1.08))
+    cx = (dest_box.x0 + dest_box.x1) / 2.0
+    # Bias upward: top of paste near top of dest face box (not centered, which
+    # leaves original hair/glasses above the donor).
+    top = float(dest_box.y0) - 0.25 * dest_box.height
+    x0 = int(round(cx - fw / 2.0))
+    y0 = int(round(top))
+    x1, y1 = x0 + fw, y0 + fh
+    x0c, y0c = max(0, x0), max(0, y0)
+    x1c, y1c = min(w, x1), min(h, y1)
+    if x1c - x0c < 8 or y1c - y0c < 8:
+        info["face_alignment_skip_reason"] = "dest_face_box_too_small"
+        return None, info
+
+    donor = cv2.resize(src_rgb, (x1 - x0, y1 - y0), interpolation=cv2.INTER_LINEAR)
+    canvas = np.zeros((h, w, 3), dtype=np.uint8)
+    dx0, dy0 = x0c - x0, y0c - y0
+    canvas[y0c:y1c, x0c:x1c] = donor[dy0 : dy0 + (y1c - y0c), dx0 : dx0 + (x1c - x0c)]
+
+    alpha_u8, core, alpha_f = _ellipse_alpha(
+        h,
+        w,
+        (x0c + x1c) / 2.0,
+        (y0c + y1c) / 2.0,
+        float(x1c - x0c) * 1.02,
+        float(y1c - y0c) * 1.05,
+        core_min_alpha=core_min_alpha,
+        feather_px=feather_px,
+    )
+    placed = np.zeros((h, w), dtype=np.uint8)
+    placed[y0c:y1c, x0c:x1c] = 1
+    lum = canvas.astype(np.float32).mean(axis=2)
+    valid = (placed > 0) & (lum > 12.0)
+    alpha_u8 = (alpha_u8.astype(np.float32) * valid.astype(np.float32)).astype(np.uint8)
+    alpha_f = alpha_u8.astype(np.float32) / 255.0
+    core = core & valid
+
+    rgba = np.dstack([canvas, alpha_u8])
+    info["face_alignment"] = True
+    info["face_alignment_backend"] = "box_paste"
+    info["paste_mean_alpha"] = float(alpha_f[core].mean()) if core.any() else 0.0
+    info["dest_face_box"] = [dest_box.x0, dest_box.y0, dest_box.x1, dest_box.y1]
+    info["paste_valid_px"] = int(valid.sum())
+    return Image.fromarray(rgba, mode="RGBA"), info
+
+
 def align_face_to_destination(
     source_face: Image.Image,
     destination: Image.Image,
     cache_dir,
+    *,
+    core_min_alpha: float = 0.92,
+    ellipse_scale_x: float = 2.05,
+    ellipse_scale_y: float = 2.55,
+    feather_px: int = 21,
 ) -> tuple[Image.Image | None, dict]:
     """
     Warp source face onto destination face geometry (similarity transform).
 
     Returns (aligned_rgba_or_None, info_dict).
-    aligned image is RGBA the same size as destination (transparent outside face).
+    Falls back to box-paste when InsightFace is missing or the affine warp is
+    low-quality (black/empty), because bad warps make Kontext regenerate the
+    destination identity.
     """
     info: dict = {
         "face_alignment": False,
@@ -436,6 +611,7 @@ def align_face_to_destination(
         "face_alignment_skip_reason": None,
         "dest_landmarks_backend": None,
         "src_landmarks_backend": None,
+        "paste_core_min_alpha": float(core_min_alpha),
     }
     dest_rgb = pil_to_rgb_np(destination)
     src_rgb = pil_to_rgb_np(source_face)
@@ -445,16 +621,46 @@ def align_face_to_destination(
     info["dest_landmarks_backend"] = dest_backend
     info["src_landmarks_backend"] = src_backend
 
-    if dest_lm is None:
-        info["face_alignment_skip_reason"] = dest_note or "dest_landmarks_missing"
-        return None, info
-    if src_lm is None:
-        info["face_alignment_skip_reason"] = src_note or "src_landmarks_missing"
+    use_affine = (
+        dest_lm is not None
+        and src_lm is not None
+        and dest_backend == "insightface"
+        and src_backend == "insightface"
+    )
+
+    if not use_affine:
+        # box_prior affine is unreliable — use explicit box paste instead.
+        boxed, box_info = _box_paste_rgba(
+            source_face,
+            destination,
+            cache_dir,
+            core_min_alpha=core_min_alpha,
+            feather_px=feather_px,
+        )
+        box_info["dest_landmarks_backend"] = dest_backend
+        box_info["src_landmarks_backend"] = src_backend
+        box_info["affine_skipped_reason"] = (
+            dest_note or src_note or "insightface_required_for_affine"
+        )
+        if boxed is not None:
+            return boxed, box_info
+        info["face_alignment_skip_reason"] = box_info.get(
+            "face_alignment_skip_reason"
+        ) or (dest_note or src_note or "align_failed")
         return None, info
 
-    # Similarity transform: src landmarks → dest landmarks
     matrix, inliers = cv2.estimateAffinePartial2D(src_lm, dest_lm, method=cv2.LMEDS)
     if matrix is None:
+        boxed, box_info = _box_paste_rgba(
+            source_face,
+            destination,
+            cache_dir,
+            core_min_alpha=core_min_alpha,
+            feather_px=feather_px,
+        )
+        if boxed is not None:
+            box_info["affine_skipped_reason"] = "estimateAffinePartial2D_failed"
+            return boxed, box_info
         info["face_alignment_skip_reason"] = "estimateAffinePartial2D_failed"
         return None, info
 
@@ -467,29 +673,45 @@ def align_face_to_destination(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
-    # Soft elliptical alpha — slightly generous so hairline/jaw survive paste
-    # and Kontext can blend edges instead of hard cutouts.
     xs, ys = dest_lm[:, 0], dest_lm[:, 1]
-    cx, cy = float(xs.mean()), float(ys.mean() - 0.08 * (ys.max() - ys.min()))
-    span_x = float(max(40.0, (xs.max() - xs.min()) * 1.75))
-    span_y = float(max(50.0, (ys.max() - ys.min()) * 2.35))
-    yy, xx = np.mgrid[0:h, 0:w]
-    # Ellipse falloff
-    nx = (xx - cx) / (span_x / 2.0)
-    ny = (yy - cy) / (span_y / 2.0)
-    r2 = nx * nx + ny * ny
-    alpha = np.clip(1.0 - (r2 - 0.50) / 0.50, 0.0, 1.0)
-    alpha = (alpha * 255.0).astype(np.uint8)
-    alpha = cv2.GaussianBlur(alpha, (41, 41), 0)
-
-    rgba = np.dstack([warped, alpha])
-    info["face_alignment"] = True
-    info["face_alignment_backend"] = (
-        f"src={src_backend}+dest={dest_backend}"
-        + (f";note={src_note or dest_note}" if (src_note or dest_note) else "")
+    cx, cy = float(xs.mean()), float(ys.mean() - 0.05 * (ys.max() - ys.min()))
+    span_x = float(max(48.0, (xs.max() - xs.min()) * float(ellipse_scale_x)))
+    span_y = float(max(60.0, (ys.max() - ys.min()) * float(ellipse_scale_y)))
+    alpha_u8, core, alpha_f = _ellipse_alpha(
+        h,
+        w,
+        cx,
+        cy,
+        span_x,
+        span_y,
+        core_min_alpha=core_min_alpha,
+        feather_px=feather_px,
     )
+
+    # Reject black/empty warps (landmark failure residue).
+    lum = warped.astype(np.float32).mean(axis=2)
+    core_lum = float(lum[core].mean()) if core.any() else 0.0
+    if core_lum < 18.0:
+        boxed, box_info = _box_paste_rgba(
+            source_face,
+            destination,
+            cache_dir,
+            core_min_alpha=core_min_alpha,
+            feather_px=feather_px,
+        )
+        if boxed is not None:
+            box_info["affine_skipped_reason"] = f"warp_too_dark:core_lum={core_lum:.1f}"
+            return boxed, box_info
+        info["face_alignment_skip_reason"] = f"warp_too_dark:core_lum={core_lum:.1f}"
+        return None, info
+
+    rgba = np.dstack([warped, alpha_u8])
+    info["face_alignment"] = True
+    info["face_alignment_backend"] = f"src={src_backend}+dest={dest_backend}"
     if inliers is not None:
         info["face_alignment_inliers"] = int(np.asarray(inliers).sum())
+    info["paste_mean_alpha"] = float(alpha_f[core].mean()) if core.any() else 0.0
+    info["warp_core_luminance"] = core_lum
     return Image.fromarray(rgba, mode="RGBA"), info
 
 
