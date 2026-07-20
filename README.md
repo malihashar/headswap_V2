@@ -113,30 +113,9 @@ Kaggle splits storage into two filesystems:
 | `/kaggle/working` | 20GB loop device | ComfyUI + notebook outputs only |
 | `/tmp` (overlay root) | ~1T free | **model store + HF staging** |
 
-### One-command bootstrap
+**Default model path is FLUX.1 Kontext** (`configs/flux_kontext.yaml`). Klein / Qwen downloads are opt-in.
 
-In a notebook with GPU + Internet enabled:
-
-```python
-%cd /kaggle/working/headswap_V2
-!bash scripts/bootstrap_kaggle.sh
-```
-
-On a completely fresh runtime (repo not cloned yet), either clone once then run the line above, or:
-
-```python
-!curl -fsSL https://raw.githubusercontent.com/malihashar/headswap_V2/main/scripts/bootstrap_kaggle.sh | bash
-```
-
-[`scripts/bootstrap_kaggle.sh`](scripts/bootstrap_kaggle.sh) is idempotent: pull/clone → ComfyUI + deps → `/tmp` models (symlink-only if already complete) → if `data/custom/body.png` + `face.png` exist, prepare the 1-pair set and `run_compare.py --gpu --limit 1`.
-
-Defaults:
-
-- `COMFYUI_PATH=/kaggle/working/ComfyUI`
-- `HEADSWAP_MODEL_STORE=/tmp/models`
-- `HEADSWAP_STAGING_DIR=/tmp/_hf_dl_staging`
-
-Manual step-by-step (optional):
+### Fresh session (recommended)
 
 ```python
 %cd /kaggle/working
@@ -145,11 +124,53 @@ Manual step-by-step (optional):
 !git pull --ff-only
 
 from huggingface_hub import login
-login()  # or: import os; os.environ["HF_TOKEN"] = "hf_..."
+login()  # optional for Kontext (Comfy-Org mirrors are public); useful for rate limits
 
+# ComfyUI + Python deps only (NO model download)
 !bash scripts/setup_kaggle.sh
-!python scripts/run_compare.py --gpu --limit 12
+
+# Kontext weights → /tmp/models (never /kaggle/working)
+!python scripts/download_kontext.py
+
+# or equivalently in one step:
+# !bash scripts/setup_kaggle.sh --kontext
+
+!python scripts/run_pipeline.py --config configs/flux_kontext.yaml --limit 1
 ```
+
+### `setup_kaggle.sh` flags
+
+| Command | Effect |
+| --- | --- |
+| `bash scripts/setup_kaggle.sh` | ComfyUI + deps + aria2 only; **no models** |
+| `bash scripts/setup_kaggle.sh --kontext` | + FLUX.1 Kontext set → `/tmp/models` |
+| `bash scripts/setup_kaggle.sh --klein` | + FLUX.2 Klein (+ BFS) set → `/tmp/models` |
+| `bash scripts/setup_kaggle.sh --qwen` | + Qwen Image Edit 2511 set → `/tmp/models` |
+
+### One-command bootstrap
+
+In a notebook with GPU + Internet enabled:
+
+```python
+%cd /kaggle/working/headswap_V2
+!bash scripts/bootstrap_kaggle.sh            # default: Kontext models
+# !bash scripts/bootstrap_kaggle.sh --klein  # Klein instead
+# !bash scripts/bootstrap_kaggle.sh --no-models
+```
+
+On a completely fresh runtime (repo not cloned yet):
+
+```python
+!curl -fsSL https://raw.githubusercontent.com/malihashar/headswap_V2/main/scripts/bootstrap_kaggle.sh | bash
+```
+
+[`scripts/bootstrap_kaggle.sh`](scripts/bootstrap_kaggle.sh) is idempotent: pull/clone → ComfyUI + deps → `/tmp` Kontext models (symlink-only if already complete) → if `data/custom/body.png` + `face.png` exist, prepare the 1-pair set and `run_compare.py --gpu --limit 1`.
+
+Defaults:
+
+- `COMFYUI_PATH=/kaggle/working/ComfyUI`
+- `HEADSWAP_MODEL_STORE=/tmp/models`
+- `HEADSWAP_STAGING_DIR=/tmp/_hf_dl_staging`
 
 On start the downloader prints `store_dir`, `staging_dir`, and `df -h /tmp` / `df -h /kaggle/working` so you can confirm downloads are not hitting the 20GB loop.
 

@@ -93,18 +93,24 @@ ensure_repo() {
 }
 
 # ---------------------------------------------------------------------------
-# True when every required artifact in models.json is complete under store.
+# True when every required artifact for MODEL_SET is complete under store.
+# MODEL_SET: kontext (default) | klein | qwen | all
 # ---------------------------------------------------------------------------
 models_complete() {
-  python3 - "$HEADSWAP_MODEL_STORE" "$REPO_DIR/scripts/models.json" <<'PY'
+  local set_name="${1:-kontext}"
+  python3 - "$HEADSWAP_MODEL_STORE" "$REPO_DIR/scripts/models.json" "$set_name" <<'PY'
 import json, sys
 from pathlib import Path
 
 store = Path(sys.argv[1])
 manifest = json.loads(Path(sys.argv[2]).read_text())
+want_set = sys.argv[3]
 missing = []
 for name, entry in manifest.items():
     if not entry.get("required", True):
+        continue
+    set_name = str(entry.get("set", "all"))
+    if want_set != "all" and set_name != want_set:
         continue
     path = store / entry["path"] / name
     want = int(entry["size"])
@@ -181,10 +187,11 @@ ensure_deps() {
 }
 
 # ---------------------------------------------------------------------------
-# Models: link-only when complete, else download.
+# Models: default Kontext only (Klein/Qwen via BOOTSTRAP_MODEL_SET or flags).
 # ---------------------------------------------------------------------------
 ensure_models() {
-  stage "Models under $HEADSWAP_MODEL_STORE"
+  local model_set="${BOOTSTRAP_MODEL_SET:-kontext}"
+  stage "Models under $HEADSWAP_MODEL_STORE (set=$model_set)"
 
   local dl_common=(
     --comfy "$COMFYUI_PATH"
@@ -195,16 +202,20 @@ ensure_models() {
     --manifest "$REPO_DIR/scripts/models.json"
   )
 
-  if models_complete; then
-    echo "All required models already present with correct sizes."
+  if models_complete "$model_set"; then
+    echo "Required $model_set models already present with correct sizes."
     echo "Recreating ComfyUI symlinks only (no re-download) ..."
-    python3 "$REPO_DIR/scripts/download_models.py" --set all "${dl_common[@]}"
   else
-    echo "Missing or incomplete models — downloading into $HEADSWAP_MODEL_STORE ..."
+    echo "Missing or incomplete $model_set models — downloading into $HEADSWAP_MODEL_STORE ..."
     if [[ -z "${HF_TOKEN:-}${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
       echo "  HINT: set HF_TOKEN if gated Hugging Face assets fail to download."
     fi
-    python3 "$REPO_DIR/scripts/download_models.py" --set all "${dl_common[@]}"
+  fi
+
+  if [[ "$model_set" == "kontext" && -f "$REPO_DIR/scripts/download_kontext.py" ]]; then
+    python3 "$REPO_DIR/scripts/download_kontext.py" "${dl_common[@]}"
+  else
+    python3 "$REPO_DIR/scripts/download_models.py" --set "$model_set" "${dl_common[@]}"
   fi
 }
 
@@ -302,7 +313,7 @@ PY
   fi
 
   # Preferred single-pair paths for the common case
-  for pipe in klein4b qwen_improved qwen_baseline; do
+  for pipe in flux_kontext klein4b qwen_improved qwen_baseline; do
     local r="$REPO_DIR/results/$pipe/images/custom_001/result.png"
     local m="$REPO_DIR/results/$pipe/metrics.json"
     if [[ -f "$r" ]]; then
@@ -320,10 +331,43 @@ PY
 # ---------------------------------------------------------------------------
 main() {
   echo "=== headswap_V2 Kaggle bootstrap ==="
+  # Default model set is Kontext. Override with:
+  #   BOOTSTRAP_MODEL_SET=klein|qwen|all bash scripts/bootstrap_kaggle.sh
+  #   bash scripts/bootstrap_kaggle.sh --klein
+  #   bash scripts/bootstrap_kaggle.sh --kontext   (default)
+  #   bash scripts/bootstrap_kaggle.sh --no-models
+  local skip_models=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --kontext) BOOTSTRAP_MODEL_SET=kontext ;;
+      --klein) BOOTSTRAP_MODEL_SET=klein ;;
+      --qwen) BOOTSTRAP_MODEL_SET=qwen ;;
+      --all-models) BOOTSTRAP_MODEL_SET=all ;;
+      --no-models) skip_models=1 ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: bash scripts/bootstrap_kaggle.sh [--kontext|--klein|--qwen|--all-models|--no-models]
+Default model download set: kontext → /tmp/models
+EOF
+        exit 0
+        ;;
+      *)
+        echo "ERROR: unknown argument: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+  export BOOTSTRAP_MODEL_SET="${BOOTSTRAP_MODEL_SET:-kontext}"
+
   CUSTOM_RAN=0
   ensure_repo
   ensure_deps
-  ensure_models
+  if [[ "$skip_models" -eq 0 ]]; then
+    ensure_models
+  else
+    echo "Skipping model download (--no-models)."
+  fi
   run_or_prompt_custom
   print_summary
 }
