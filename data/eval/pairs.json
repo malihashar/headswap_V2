@@ -1,46 +1,17 @@
 {
   "version": 1,
-  "description": "Synthetic head-swap eval pairs for harness testing. Swap in real photos for production eval.",
-  "n_pairs": 4,
+  "description": "Custom 1-pair eval set from data/custom (body.png \u2192 body, face.png \u2192 face).",
+  "n_pairs": 1,
+  "source_custom_dir": "/Users/ali/repos/headswap_V2/data/custom",
   "pairs": [
     {
-      "id": "pair_000",
-      "body": "bodies/pair_000.png",
-      "face": "faces/pair_000.png",
-      "difficulty": "hard",
+      "id": "custom_001",
+      "body": "bodies/custom_001.png",
+      "face": "faces/custom_001.png",
+      "difficulty": "real",
       "tags": [
-        "synthetic",
-        "long_hair_mismatch"
-      ]
-    },
-    {
-      "id": "pair_001",
-      "body": "bodies/pair_001.png",
-      "face": "faces/pair_001.png",
-      "difficulty": "hard",
-      "tags": [
-        "synthetic",
-        "long_hair_mismatch"
-      ]
-    },
-    {
-      "id": "pair_002",
-      "body": "bodies/pair_002.png",
-      "face": "faces/pair_002.png",
-      "difficulty": "easy",
-      "tags": [
-        "synthetic",
-        "frontal"
-      ]
-    },
-    {
-      "id": "pair_003",
-      "body": "bodies/pair_003.png",
-      "face": "faces/pair_003.png",
-      "difficulty": "easy",
-      "tags": [
-        "synthetic",
-        "frontal"
+        "custom",
+        "real_photo"
       ]
     }
   ]
