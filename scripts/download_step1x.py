@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Download OmniGen2 weights into /tmp/models (never into the repo).
+Download Step1X-Edit-v1p2 weights into /tmp/models (never into the repo).
 
 Official sources (do not invent alternate filenames):
-  Repo:    https://github.com/VectorSpaceLab/OmniGen2
-  Weights: https://huggingface.co/OmniGen2/OmniGen2
+  Repo:    https://github.com/stepfun-ai/Step1X-Edit
+  Weights: https://huggingface.co/stepfun-ai/Step1X-Edit-v1p2
+  Diffusers branch required for inference:
+           https://github.com/Peyton-Chen/diffusers/tree/step1xedit_v1p2
 
-This is a full Diffusers-style snapshot with custom remote code
-(``OmniGen2Pipeline``). ComfyUI flat files (omnigen2_fp16.safetensors) are
-a separate community packaging path — this downloader targets the official HF
-snapshot used by ``inference.py``.
+This is a full Diffusers snapshot (~42 GiB on disk), not a ComfyUI flat-file set.
+ComfyUI symlinks are therefore skipped (pipeline runs via Diffusers, not Comfy nodes).
 
 Examples:
-  python scripts/download_omnigen2.py
-  python scripts/download_omnigen2.py --verify-only
-  HF_TOKEN=hf_xxx python scripts/download_omnigen2.py
+  python scripts/download_step1x.py
+  python scripts/download_step1x.py --verify-only
+  HF_TOKEN=hf_xxx python scripts/download_step1x.py
 """
 from __future__ import annotations
 
@@ -25,13 +25,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Force store + staging onto /tmp before any download work.
 os.environ.setdefault("HEADSWAP_MODEL_STORE", "/tmp/models")
 os.environ.setdefault("HEADSWAP_STAGING_DIR", "/tmp/_hf_dl_staging")
 
-REPO_ID = "OmniGen2/OmniGen2"
-LOCAL_DIRNAME = "OmniGen2"
+REPO_ID = "stepfun-ai/Step1X-Edit-v1p2"
+LOCAL_DIRNAME = "Step1X-Edit-v1p2"
 
-# Marker files from model_index.json / HF siblings.
+# Marker files that must exist for a usable Diffusers snapshot (from model_index.json).
 REQUIRED_RELATIVE = (
     "model_index.json",
     "scheduler/scheduler_config.json",
@@ -39,9 +40,8 @@ REQUIRED_RELATIVE = (
     "vae/diffusion_pytorch_model.safetensors",
     "transformer/config.json",
     "transformer/diffusion_pytorch_model.safetensors.index.json",
-    "mllm/config.json",
-    "mllm/model.safetensors.index.json",
-    "mllm_processor/tokenizer_config.json",
+    "text_encoder/config.json",
+    "text_encoder/model.safetensors.index.json",
     "processor/tokenizer_config.json",
 )
 
@@ -77,10 +77,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--local-dir",
         default=None,
-        help="Override snapshot directory (default: <store-dir>/OmniGen2)",
+        help="Override snapshot directory (default: <store-dir>/Step1X-Edit-v1p2)",
     )
-    ap.add_argument("--verify-only", action="store_true")
-    ap.add_argument("--revision", default="main")
+    ap.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Only check that required files already exist",
+    )
+    ap.add_argument(
+        "--revision",
+        default="main",
+        help="HF revision / branch / commit (default: main)",
+    )
     args = ap.parse_args(argv)
 
     store = Path(args.store_dir).expanduser().resolve()
@@ -92,12 +100,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     _reject_kaggle_working("--local-dir", str(local))
 
-    print("=== download_omnigen2 ===")
+    print("=== download_step1x ===")
     print(f"Repo:        {REPO_ID}")
     print(f"Revision:    {args.revision}")
     print(f"Model store: {store}")
     print(f"Local dir:   {local}")
-    print("ComfyUI:     not required for official OmniGen2Pipeline path")
+    print(f"Staging HF:  {os.environ.get('HF_HOME') or os.environ.get('HEADSWAP_STAGING_DIR')}")
+    print("ComfyUI:     not required (Diffusers pipeline)")
     print()
 
     ok, missing = snapshot_complete(local)
@@ -125,8 +134,12 @@ def main(argv: list[str] | None = None) -> int:
         ) from exc
 
     token = _token()
-    print(f"Auth: {'HF_TOKEN present' if token else 'no HF_TOKEN (public repo)'}")
+    if token:
+        print("Auth: HF_TOKEN present")
+    else:
+        print("Auth: no HF_TOKEN (public repo; token still helps with rate limits)")
 
+    # Prefer /tmp for HF cache blobs on Kaggle.
     staging = Path(os.environ.get("HEADSWAP_STAGING_DIR", "/tmp/_hf_dl_staging"))
     staging.mkdir(parents=True, exist_ok=True)
     cache_dir = staging / "hf_hub_cache"
@@ -158,13 +171,16 @@ def main(argv: list[str] | None = None) -> int:
     print("Verified required files:")
     for rel in REQUIRED_RELATIVE:
         p = local / rel
-        print(f"  OK  {p}  ({p.stat().st_size:,} bytes)")
+        size = p.stat().st_size
+        print(f"  OK  {p}  ({size:,} bytes)")
     print()
     print(f"Final model path: {local}")
     print()
-    print("Inference deps (official code tree, NOT pip install -e):")
-    print("  bash scripts/setup_omnigen2.sh")
-    print("  # Do NOT pip install -r OmniGen2/requirements.txt on Kaggle")
+    print("Inference deps (official):")
+    print("  pip install 'transformers==4.55.0'")
+    print("  git clone -b step1xedit_v1p2 https://github.com/Peyton-Chen/diffusers.git")
+    print("  pip install -e ./diffusers")
+    print("  # optional: pip install RegionE")
     return 0
 
 

@@ -1,0 +1,43 @@
+name: step1x_edit
+pipeline: step1x_edit
+
+# Experimental — Step1X-Edit-v1p2 (ReasonEdit-S), Diffusers backend.
+# Official weights: https://huggingface.co/stepfun-ai/Step1X-Edit-v1p2
+# Official code:    https://github.com/stepfun-ai/Step1X-Edit
+# Diffusers branch: https://github.com/Peyton-Chen/diffusers/tree/step1xedit_v1p2
+#
+# Does NOT modify qwen_baseline / flux_kontext.
+
+model_id: stepfun-ai/Step1X-Edit-v1p2
+# Local snapshot from scripts/download_step1x.py (preferred on Kaggle).
+model_path: /tmp/models/Step1X-Edit-v1p2
+dtype: bfloat16
+# CPU offload helps on <40GB GPUs; disable on H100/A100-80GB if desired.
+enable_cpu_offload: true
+enable_thinking_mode: true
+enable_reflection_mode: true
+
+# Official v1p2 recommended settings (README example with thinking+reflection).
+steps: 50
+guidance: 6.0          # maps to true_cfg_scale
+seed: 42
+# Official API has no denoise/strength; exposed for config parity, recorded as unused.
+strength: 1.0
+# Maps to Diffusers size_level (shortest-side budget for the dual-panel input).
+crop_size: 1024
+
+# Dual-panel layout: left = body (image 1), right = face (image 2).
+# Step1X-Edit is single-image instruction editing — both identities must be in one frame.
+input_mode: dual_panel
+
+prompt: >-
+  Replace the entire head in image 1 with the head from image 2.
+  Preserve the body, pose, clothing, background, camera angle and lighting.
+  Match the identity from image 2 as accurately as possible.
+  Do not change anything except the head and neck transition.
+
+negative_prompt: ""
+
+face_side_pad: 0.35
+face_top_pad: 0.65
+face_bot_pad: 0.15
