@@ -2,7 +2,7 @@
   "version": 1,
   "description": "Custom 1-pair eval set from data/custom (body.png \u2192 body, face.png \u2192 face).",
   "n_pairs": 1,
-  "source_custom_dir": "/Users/ali/repos/headswap_V2/data/custom",
+  "source_custom_dir": "data/custom",
   "pairs": [
     {
       "id": "custom_001",
