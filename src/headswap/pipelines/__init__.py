@@ -8,7 +8,12 @@ from headswap.pipelines.klein import KleinMaskCropPipeline
 from headswap.pipelines.kontext import FluxKontextPipeline
 from headswap.pipelines.omnigen2 import OmniGen2PipelineRunner
 from headswap.pipelines.qwen import QwenBaselinePipeline, QwenImprovedPipeline
-from headswap.pipelines.step1x_edit import Step1XEditPipeline
+
+# Optional experimental pipelines — missing modules must not break imports.
+try:
+    from headswap.pipelines.step1x_edit import Step1XEditPipeline
+except ImportError:  # pragma: no cover
+    Step1XEditPipeline = None  # type: ignore[misc, assignment]
 
 
 PIPELINES: dict[str, type[BasePipeline]] = {
@@ -18,10 +23,11 @@ PIPELINES: dict[str, type[BasePipeline]] = {
     "qwen_baseline": QwenBaselinePipeline,
     "qwen_improved": QwenImprovedPipeline,
     "qwen_improved_mask_crop": QwenImprovedPipeline,
-    "step1x_edit": Step1XEditPipeline,
     "omnigen2": OmniGen2PipelineRunner,
     "mock": MockHeadSwapPipeline,
 }
+if Step1XEditPipeline is not None:
+    PIPELINES["step1x_edit"] = Step1XEditPipeline
 
 
 def create_pipeline(cfg: dict[str, Any], runtime=None, force_mock: bool = False) -> BasePipeline:
