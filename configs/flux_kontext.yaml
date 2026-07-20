@@ -1,40 +1,49 @@
 name: flux_kontext
 pipeline: flux_kontext
 
-# FLUX.1 Kontext [dev] FP8 — Align → Paste → Refine (community face-swap path).
+# FLUX.1 Kontext [dev] FP8 — Align → color-match → Paste → Refine.
+# Tuned for identity-preserving face swap (community Align-Paste-Refine path).
 unet_name: flux1-dev-kontext_fp8_scaled.safetensors
 clip_name1: clip_l.safetensors
 clip_name2: t5xxl_fp8_e4m3fn_scaled.safetensors
 clip_type: flux
 vae_name: ae.safetensors
 
-# Placement LoRA (Put it here V4 / Place It). Auto-discovers under ComfyUI/models/loras
-# when unset; set explicitly to force a filename.
+# Placement LoRA is required for reliable localization. Auto-discovers under
+# ComfyUI/models/loras when unset; set explicitly to force a filename.
 placement_lora: null
 placement_lora_strength: 1.0
 
-steps: 28
+# Sampling: partial denoise from pasted composite (not empty-canvas regen).
+# Lower denoise keeps donor identity; higher heals seams but can drift back
+# to the destination face. 0.72 is the quality sweet spot for pasted refine.
+steps: 32
 cfg: 1.0
-flux_guidance: 3.5
+flux_guidance: 4.0
 sampler: euler
 scheduler: simple
 seed: 46
-# Refine the pasted composite (not full empty-canvas regen).
-denoise: 0.85
+denoise: 0.72
 empty_latent: false
 max_dim: 768
 div_by: 8
 
 # Feature toggles (community defaults = on)
 reference_latent: true
+# Second ReferenceLatent on the face crop — keeps donor identity under denoise.
+identity_reference: true
 conditioning_zero_out: true
 image_scale: true
 # alias kept for back-compat with earlier configs
 flux_kontext_image_scale: true
 
 # Soft locality after refine
-mask_expand_px: 18
-mask_blur_px: 12
+mask_expand_px: 22
+mask_blur_px: 14
+
+# Color match pasted face to body lighting before Kontext; mild post stitch match.
+pre_color_match_strength: 0.55
+post_color_match_strength: 0.35
 
 # Put it here / Place It trigger language — keep short and face-local.
 prompt: >-
@@ -43,6 +52,7 @@ prompt: >-
 
 negative_prompt: ""
 
-face_side_pad: 0.35
-face_top_pad: 0.65
-face_bot_pad: 0.15
+# Slightly generous face crop so forehead / upper cheeks survive align.
+face_side_pad: 0.40
+face_top_pad: 0.75
+face_bot_pad: 0.18

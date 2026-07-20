@@ -26,6 +26,7 @@ from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 from headswap.preprocess import (
     align_face_to_destination,
+    color_match_rgba_to_destination,
     crop_face_reference,
     head_hair_mask_from_face,
     lab_histogram_match_face,
@@ -191,6 +192,7 @@ def _sample_kontext_refine(
     composite_t,
     cfg: dict,
     prompt: str,
+    face_t=None,
 ) -> tuple[Image.Image, dict]:
     """Kontext refine pass on an already align-pasted composite."""
     import torch
@@ -205,14 +207,19 @@ def _sample_kontext_refine(
         "reference_latent_enabled": _cfg_bool(cfg, "reference_latent", default=True),
         "reference_latent_used": False,
         "reference_latent_skip_reason": None,
+        "identity_reference_enabled": _cfg_bool(cfg, "identity_reference", default=True),
+        "identity_reference_used": False,
+        "identity_reference_skip_reason": None,
         "conditioning_zero_out_enabled": _cfg_bool(
             cfg, "conditioning_zero_out", default=True
         ),
         "conditioning_zero_out_applied": False,
         "conditioning_zero_out_skip_reason": None,
-        "flux_guidance_value": float(cfg.get("flux_guidance", 3.5)),
+        "flux_guidance_value": float(cfg.get("flux_guidance", 4.0)),
         "flux_guidance_applied": False,
         "flux_guidance_skip_reason": None,
+        "denoise": float(cfg.get("denoise", 0.72)),
+        "steps": int(cfg.get("steps", 32)),
     }
 
     with torch.no_grad():
@@ -281,11 +288,46 @@ def _sample_kontext_refine(
                     0,
                 )
                 feature["reference_latent_used"] = True
+
+                # Extra identity anchor: encode the face crop and attach it as a
+                # second reference so refine keeps donor identity under denoise.
+                if feature["identity_reference_enabled"] and face_t is not None:
+                    try:
+                        face_img = face_t
+                        if feature["flux_kontext_image_scale_applied"] and rt.has(
+                            "FluxKontextImageScale"
+                        ):
+                            face_img = get_value_at_index(
+                                rt.call("FluxKontextImageScale", image=face_t), 0
+                            )
+                        face_lat = get_value_at_index(
+                            rt.call("VAEEncode", pixels=face_img, vae=bundle["vae"]), 0
+                        )
+                        positive = get_value_at_index(
+                            rt.call(
+                                "ReferenceLatent",
+                                conditioning=positive,
+                                latent=face_lat,
+                            ),
+                            0,
+                        )
+                        feature["identity_reference_used"] = True
+                    except Exception as exc:
+                        feature["identity_reference_skip_reason"] = (
+                            f"identity_reference_failed:{exc}"
+                        )
+                        fallbacks.append(feature["identity_reference_skip_reason"])
+                elif feature["identity_reference_enabled"]:
+                    feature["identity_reference_skip_reason"] = "face_tensor_missing"
+                else:
+                    feature["identity_reference_skip_reason"] = "disabled_by_config"
             else:
                 feature["reference_latent_skip_reason"] = "ReferenceLatent_node_missing"
                 fallbacks.append(feature["reference_latent_skip_reason"])
+                feature["identity_reference_skip_reason"] = "reference_latent_unavailable"
         else:
             feature["reference_latent_skip_reason"] = "disabled_by_config"
+            feature["identity_reference_skip_reason"] = "reference_latent_disabled"
 
         guidance = feature["flux_guidance_value"]
         if rt.has("FluxGuidance"):
@@ -342,8 +384,8 @@ def _sample_kontext_refine(
                 "BasicScheduler",
                 model=bundle["model"],
                 scheduler=cfg.get("scheduler", "simple"),
-                steps=int(cfg.get("steps", 28)),
-                denoise=float(cfg.get("denoise", 1.0)),
+                steps=feature["steps"],
+                denoise=feature["denoise"],
             ),
             0,
         )
@@ -425,11 +467,17 @@ class FluxKontextPipeline(BasePipeline):
                 include_shoulders=False,
             )
 
-            # --- Stage B: Align → Paste (community FaceAlign + Image Paste Face) ---
+            # --- Stage B: Align → color-match → Paste ---
             aligned_rgba, align_info = align_face_to_destination(
                 face_crop, body_pil, self.cache_dir
             )
+            pre_match = float(self.cfg.get("pre_color_match_strength", 0.55) or 0.0)
             if aligned_rgba is not None:
+                if pre_match > 0:
+                    aligned_rgba = color_match_rgba_to_destination(
+                        aligned_rgba, body_pil, strength=pre_match
+                    )
+                    align_info["pre_color_match_strength"] = pre_match
                 composite, paste_info = paste_aligned_face(body_pil, aligned_rgba)
             else:
                 paste_info = {
@@ -459,13 +507,14 @@ class FluxKontextPipeline(BasePipeline):
             head_mask = head_hair_mask_from_face(
                 body_pil,
                 self.cache_dir,
-                expand_px=int(self.cfg.get("mask_expand_px", 18)),
-                blur_px=int(self.cfg.get("mask_blur_px", 12)),
+                expand_px=int(self.cfg.get("mask_expand_px", 22)),
+                blur_px=int(self.cfg.get("mask_blur_px", 14)),
             )
 
             composite_t = pil_to_comfy_tensor(composite, torch)
+            face_t = pil_to_comfy_tensor(face_crop.convert("RGB"), torch)
             refined, sample_meta = _sample_kontext_refine(
-                rt, bundle, composite_t, self.cfg, prompt
+                rt, bundle, composite_t, self.cfg, prompt, face_t=face_t
             )
 
             # --- Stage C: soft stitch refined head back onto original body ---
@@ -474,7 +523,8 @@ class FluxKontextPipeline(BasePipeline):
                 refined = refined.resize(body_pil.size, Image.Resampling.LANCZOS)
             box = (0, 0, body_pil.width, body_pil.height)
             out = soft_composite(body_pil, refined, head_mask, box)
-            out = lab_histogram_match_face(out, body_pil, head_mask, strength=0.3)
+            post_match = float(self.cfg.get("post_color_match_strength", 0.35) or 0.0)
+            out = lab_histogram_match_face(out, body_pil, head_mask, strength=post_match)
 
             load_meta = dict(bundle.get("load_meta") or {})
             fallbacks = list(load_meta.get("fallbacks") or []) + list(
@@ -523,6 +573,19 @@ class FluxKontextPipeline(BasePipeline):
             ),
             "reference_latent_used": bool(sample_meta.get("reference_latent_used")),
             "reference_latent_skip_reason": sample_meta.get("reference_latent_skip_reason"),
+            "identity_reference_enabled": bool(
+                sample_meta.get("identity_reference_enabled", True)
+            ),
+            "identity_reference_used": bool(sample_meta.get("identity_reference_used")),
+            "identity_reference_skip_reason": sample_meta.get(
+                "identity_reference_skip_reason"
+            ),
+            "pre_color_match_strength": align_info.get(
+                "pre_color_match_strength",
+                float(self.cfg.get("pre_color_match_strength", 0.55) or 0.0),
+            ),
+            "denoise": sample_meta.get("denoise", self.cfg.get("denoise", 0.72)),
+            "steps": sample_meta.get("steps", self.cfg.get("steps", 32)),
             "conditioning_zero_out_enabled": bool(
                 sample_meta.get("conditioning_zero_out_enabled", True)
             ),
@@ -546,7 +609,7 @@ class FluxKontextPipeline(BasePipeline):
             "placement_lora_strength": load_meta.get("placement_lora_strength"),
             "placement_lora_skip_reason": load_meta.get("placement_lora_skip_reason"),
             "flux_guidance_value": sample_meta.get(
-                "flux_guidance_value", self.cfg.get("flux_guidance", 3.5)
+                "flux_guidance_value", self.cfg.get("flux_guidance", 4.0)
             ),
             "flux_guidance_applied": bool(sample_meta.get("flux_guidance_applied")),
             "flux_guidance_skip_reason": sample_meta.get("flux_guidance_skip_reason"),
@@ -559,6 +622,7 @@ class FluxKontextPipeline(BasePipeline):
                 "face_alignment": bool(align_info.get("face_alignment")),
                 "composite_paste": bool(paste_info.get("composite_paste")),
                 "reference_latent": bool(sample_meta.get("reference_latent_used")),
+                "identity_reference": bool(sample_meta.get("identity_reference_used")),
                 "conditioning_zero_out": bool(
                     sample_meta.get("conditioning_zero_out_applied")
                 ),
@@ -567,8 +631,9 @@ class FluxKontextPipeline(BasePipeline):
                 ),
                 "placement_lora_loaded": bool(load_meta.get("placement_lora_loaded")),
                 "flux_guidance_value": sample_meta.get(
-                    "flux_guidance_value", self.cfg.get("flux_guidance", 3.5)
+                    "flux_guidance_value", self.cfg.get("flux_guidance", 4.0)
                 ),
+                "denoise": sample_meta.get("denoise", self.cfg.get("denoise", 0.72)),
             },
         }
         if run_error is not None:
@@ -579,10 +644,12 @@ class FluxKontextPipeline(BasePipeline):
             f"[flux_kontext] checkpoint={meta.get('checkpoint')} "
             f"align={meta.get('face_alignment')} paste={meta.get('composite_paste')} "
             f"ref_latent={meta.get('reference_latent_used')} "
+            f"id_ref={meta.get('identity_reference_used')} "
             f"zero_out={meta.get('conditioning_zero_out_applied')} "
             f"image_scale={meta.get('flux_kontext_image_scale_applied')} "
             f"lora={meta.get('placement_lora_name')} "
             f"guidance={meta.get('flux_guidance_value')} "
+            f"denoise={meta.get('denoise')} steps={meta.get('steps')} "
             f"fallbacks={fallbacks or 'none'}"
         )
 

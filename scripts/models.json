@@ -142,12 +142,12 @@
   "Put it here_V4.2.safetensors": {
     "size": 358706112,
     "path": "loras",
-    "repo_id": "civitai/put-it-here-kontext-v4",
+    "repo_id": "opocai/Put-it-here_KonText_V4",
     "repo_path": "Put it here_V4.2.safetensors",
-    "url": "https://civitai.com/api/download/models/2118949",
+    "url": "https://huggingface.co/opocai/Put-it-here_KonText_V4/resolve/main/Put%20it%20here_V4.2.safetensors",
     "download_repo_id": null,
     "set": "kontext",
-    "required": false
+    "required": true
   },
   "place_it.safetensors": {
     "size": 306592768,

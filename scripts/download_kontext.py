@@ -8,12 +8,12 @@ Required assets (models.json set=kontext):
   - clip_l.safetensors                        (~0.23 GiB)
   - t5xxl_fp8_e4m3fn_scaled.safetensors       (~4.8 GiB)
   - ae.safetensors                            (~0.31 GiB)
+  - Put it here_V4.2.safetensors              (~0.34 GiB)  # placement LoRA
 
-Optional placement LoRAs (pass --include-optional):
-  - Put it here_V4.2.safetensors  (Civitai 2118949)
-  - place_it.safetensors           (Civitai 2015589)
+Optional:
+  - place_it.safetensors                      (pass --include-optional)
 
-The pipeline auto-loads either LoRA if already present under ComfyUI/models/loras.
+The pipeline auto-loads Put it here / Place It if present under ComfyUI/models/loras.
 
 Tokenizers for Flux/Kontext are embedded in the DualCLIP text-encoder
 safetensors (clip_l + t5xxl); no separate tokenizer download is required.
@@ -70,11 +70,14 @@ def main() -> int:
     print("=== download_kontext ===")
     print(f"Model store: {os.environ.get('HEADSWAP_MODEL_STORE')}")
     print(f"Staging:     {os.environ.get('HEADSWAP_STAGING_DIR')}")
-    print("Assets: Kontext FP8 UNET + clip_l + t5xxl_fp8 + ae VAE (~16.4 GiB)")
+    print(
+        "Assets: Kontext FP8 UNET + clip_l + t5xxl_fp8 + ae VAE "
+        "+ Put it here V4.2 LoRA (~16.8 GiB)"
+    )
     if "--include-optional" in argv:
-        print("Optional: Put it here V4.2 + Place It LoRAs (~0.6 GiB)")
+        print("Optional: Place It LoRA")
     else:
-        print("Optional LoRAs skipped (pass --include-optional for Put it here / Place It)")
+        print("Optional Place It LoRA skipped (pass --include-optional)")
     print()
 
     sys.argv = [sys.argv[0], *argv]

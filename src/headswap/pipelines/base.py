@@ -151,6 +151,7 @@ class MockHeadSwapPipeline(BasePipeline):
         """Exercise Align→Paste + record which community features config requests."""
         from headswap.preprocess import (
             align_face_to_destination,
+            color_match_rgba_to_destination,
             paste_aligned_face,
             resize_max_keep_ar,
         )
@@ -167,15 +168,21 @@ class MockHeadSwapPipeline(BasePipeline):
         face_crop = crop_face_reference(
             face,
             self.cache_dir,
-            top=float(self.cfg.get("face_top_pad", 0.65)),
-            bot=float(self.cfg.get("face_bot_pad", 0.15)),
-            side=float(self.cfg.get("face_side_pad", 0.35)),
+            top=float(self.cfg.get("face_top_pad", 0.75)),
+            bot=float(self.cfg.get("face_bot_pad", 0.18)),
+            side=float(self.cfg.get("face_side_pad", 0.40)),
             include_shoulders=False,
         )
         aligned_rgba, align_info = align_face_to_destination(
             face_crop, body_pil, self.cache_dir
         )
+        pre_match = float(self.cfg.get("pre_color_match_strength", 0.55) or 0.0)
         if aligned_rgba is not None:
+            if pre_match > 0:
+                aligned_rgba = color_match_rgba_to_destination(
+                    aligned_rgba, body_pil, strength=pre_match
+                )
+                align_info["pre_color_match_strength"] = pre_match
             composite, paste_info = paste_aligned_face(body_pil, aligned_rgba)
         else:
             paste_info = {
@@ -200,8 +207,8 @@ class MockHeadSwapPipeline(BasePipeline):
         mask = head_hair_mask_from_face(
             body_pil,
             self.cache_dir,
-            expand_px=int(self.cfg.get("mask_expand_px", 18)),
-            blur_px=int(self.cfg.get("mask_blur_px", 12)),
+            expand_px=int(self.cfg.get("mask_expand_px", 22)),
+            blur_px=int(self.cfg.get("mask_blur_px", 14)),
         )
         box = (0, 0, body_pil.width, body_pil.height)
         # Mild mock refine: slightly soften composite inside head mask
@@ -213,10 +220,14 @@ class MockHeadSwapPipeline(BasePipeline):
             np.clip(arr * (1 - 0.08 * m) + 8.0 * m, 0, 255).astype("uint8")
         )
         stitched = soft_composite(body_pil, refined, mask, box)
-        stitched = lab_histogram_match_face(stitched, body_pil, mask, strength=0.3)
+        post_match = float(self.cfg.get("post_color_match_strength", 0.35) or 0.0)
+        stitched = lab_histogram_match_face(
+            stitched, body_pil, mask, strength=post_match
+        )
 
-        guidance = float(self.cfg.get("flux_guidance", 3.5))
+        guidance = float(self.cfg.get("flux_guidance", 4.0))
         ref_en = _cfg_bool("reference_latent", default=True)
+        id_en = _cfg_bool("identity_reference", default=True)
         zero_en = _cfg_bool("conditioning_zero_out", default=True)
         scale_en = _cfg_bool("image_scale", "flux_kontext_image_scale", default=True)
         lora_name = self.cfg.get("placement_lora")
@@ -231,10 +242,18 @@ class MockHeadSwapPipeline(BasePipeline):
             "composite_paste": bool(paste_info.get("composite_paste")),
             "composite_paste_skip_reason": paste_info.get("composite_paste_skip_reason"),
             "composite_paste_fallback": paste_info.get("composite_paste_fallback"),
+            "pre_color_match_strength": align_info.get(
+                "pre_color_match_strength", pre_match
+            ),
             "reference_latent_enabled": ref_en,
             "reference_latent_used": False,
             "reference_latent_skip_reason": (
                 mock_skip if ref_en else "disabled_by_config"
+            ),
+            "identity_reference_enabled": id_en,
+            "identity_reference_used": False,
+            "identity_reference_skip_reason": (
+                mock_skip if id_en else "disabled_by_config"
             ),
             "conditioning_zero_out_enabled": zero_en,
             "conditioning_zero_out_applied": False,
@@ -255,14 +274,18 @@ class MockHeadSwapPipeline(BasePipeline):
             "flux_guidance_value": guidance,
             "flux_guidance_applied": False,
             "flux_guidance_skip_reason": mock_skip,
+            "denoise": float(self.cfg.get("denoise", 0.72)),
+            "steps": int(self.cfg.get("steps", 32)),
             "features": {
                 "face_alignment": bool(align_info.get("face_alignment")),
                 "composite_paste": bool(paste_info.get("composite_paste")),
                 "reference_latent": False,
+                "identity_reference": False,
                 "conditioning_zero_out": False,
                 "flux_kontext_image_scale": False,
                 "placement_lora_loaded": False,
                 "flux_guidance_value": guidance,
+                "denoise": float(self.cfg.get("denoise", 0.72)),
             },
         }
         dbg = {

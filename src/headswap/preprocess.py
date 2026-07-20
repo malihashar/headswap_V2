@@ -467,19 +467,20 @@ def align_face_to_destination(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
-    # Soft elliptical alpha around dest face box from landmarks
+    # Soft elliptical alpha — slightly generous so hairline/jaw survive paste
+    # and Kontext can blend edges instead of hard cutouts.
     xs, ys = dest_lm[:, 0], dest_lm[:, 1]
-    cx, cy = float(xs.mean()), float(ys.mean())
-    span_x = float(max(40.0, (xs.max() - xs.min()) * 1.55))
-    span_y = float(max(50.0, (ys.max() - ys.min()) * 2.10))
+    cx, cy = float(xs.mean()), float(ys.mean() - 0.08 * (ys.max() - ys.min()))
+    span_x = float(max(40.0, (xs.max() - xs.min()) * 1.75))
+    span_y = float(max(50.0, (ys.max() - ys.min()) * 2.35))
     yy, xx = np.mgrid[0:h, 0:w]
     # Ellipse falloff
     nx = (xx - cx) / (span_x / 2.0)
     ny = (yy - cy) / (span_y / 2.0)
     r2 = nx * nx + ny * ny
-    alpha = np.clip(1.0 - (r2 - 0.55) / 0.45, 0.0, 1.0)
+    alpha = np.clip(1.0 - (r2 - 0.50) / 0.50, 0.0, 1.0)
     alpha = (alpha * 255.0).astype(np.uint8)
-    alpha = cv2.GaussianBlur(alpha, (31, 31), 0)
+    alpha = cv2.GaussianBlur(alpha, (41, 41), 0)
 
     rgba = np.dstack([warped, alpha])
     info["face_alignment"] = True
@@ -490,6 +491,50 @@ def align_face_to_destination(
     if inliers is not None:
         info["face_alignment_inliers"] = int(np.asarray(inliers).sum())
     return Image.fromarray(rgba, mode="RGBA"), info
+
+
+def color_match_rgba_to_destination(
+    aligned_rgba: Image.Image,
+    destination: Image.Image,
+    strength: float = 0.55,
+) -> Image.Image:
+    """
+    Shift pasted-face LAB toward destination skin under the RGBA alpha.
+
+    Done *before* Kontext refine so the model blends lighting instead of
+    fighting a strong color mismatch (which often reverts toward the original face).
+    """
+    if aligned_rgba is None or strength <= 0:
+        return aligned_rgba
+    if aligned_rgba.size != destination.size:
+        aligned_rgba = aligned_rgba.resize(destination.size, Image.Resampling.LANCZOS)
+    rgba = np.asarray(aligned_rgba.convert("RGBA")).astype(np.float32)
+    bod = pil_to_rgb_np(destination).astype(np.float32)
+    alpha = rgba[:, :, 3] / 255.0
+    if (alpha > 0.4).sum() < 50:
+        return aligned_rgba
+    # Destination ring just outside the paste for target skin stats.
+    core = (alpha > 0.45).astype(np.uint8)
+    ring = cv2.dilate(core, np.ones((25, 25), np.uint8)) - core
+    if ring.sum() < 40:
+        return aligned_rgba
+    face_lab = cv2.cvtColor(rgba[:, :, :3] / 255.0, cv2.COLOR_RGB2LAB)
+    bod_lab = cv2.cvtColor(bod / 255.0, cv2.COLOR_RGB2LAB)
+    for c in range(3):
+        src_vals = face_lab[:, :, c][alpha > 0.5]
+        tgt_vals = bod_lab[:, :, c][ring > 0]
+        if src_vals.size == 0 or tgt_vals.size == 0:
+            continue
+        shift = float(tgt_vals.mean() - src_vals.mean()) * float(strength)
+        face_lab[:, :, c] = face_lab[:, :, c] + shift * alpha
+    matched = cv2.cvtColor(face_lab.astype(np.float32), cv2.COLOR_LAB2RGB)
+    out = np.dstack(
+        [
+            np.clip(matched * 255.0, 0, 255).astype(np.uint8),
+            rgba[:, :, 3].astype(np.uint8),
+        ]
+    )
+    return Image.fromarray(out, mode="RGBA")
 
 
 def paste_aligned_face(
