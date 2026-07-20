@@ -6,7 +6,9 @@ from headswap.config import load_config
 from headswap.pipelines.base import BasePipeline, MockHeadSwapPipeline
 from headswap.pipelines.klein import KleinMaskCropPipeline
 from headswap.pipelines.kontext import FluxKontextPipeline
+from headswap.pipelines.omnigen2 import OmniGen2PipelineRunner
 from headswap.pipelines.qwen import QwenBaselinePipeline, QwenImprovedPipeline
+from headswap.pipelines.step1x_edit import Step1XEditPipeline
 
 
 PIPELINES: dict[str, type[BasePipeline]] = {
@@ -16,6 +18,8 @@ PIPELINES: dict[str, type[BasePipeline]] = {
     "qwen_baseline": QwenBaselinePipeline,
     "qwen_improved": QwenImprovedPipeline,
     "qwen_improved_mask_crop": QwenImprovedPipeline,
+    "step1x_edit": Step1XEditPipeline,
+    "omnigen2": OmniGen2PipelineRunner,
     "mock": MockHeadSwapPipeline,
 }
 

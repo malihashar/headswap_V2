@@ -1,0 +1,47 @@
+name: omnigen2
+pipeline: omnigen2
+
+# Experimental — OmniGen2 in-context head/face transfer.
+# Official repo:    https://github.com/VectorSpaceLab/OmniGen2
+# Official weights: https://huggingface.co/OmniGen2/OmniGen2
+#
+# Native multi-image API (body = image 1, face = image 2).
+# Does NOT modify qwen_baseline / flux_kontext / step1x_edit.
+
+model_id: OmniGen2/OmniGen2
+model_path: /tmp/models/OmniGen2
+dtype: bf16
+enable_model_cpu_offload: true
+enable_sequential_cpu_offload: false
+
+# Official example defaults (example_edit.sh / example_in_context_generation.sh).
+steps: 50
+guidance: 5.0                 # text_guidance_scale
+image_guidance: 2.5           # in-context tip: 2.5–3.0 (edit-only tip: 1.2–2.0)
+seed: 0
+scheduler: euler              # euler | dpmsolver++
+# Official API has no denoise/strength; kept for config parity.
+strength: 1.0
+# Longest side budget for body / output (official default canvas 1024).
+crop_size: 1024
+max_input_image_pixels: 1048576   # 1024*1024 official default
+cfg_range_start: 0.0
+cfg_range_end: 1.0
+
+# Official in-context prompt template (README tip #5).
+prompt: >-
+  Edit the first image: replace the head with the head from the second image.
+  Preserve the body, pose, clothing, background, camera angle and lighting of
+  the first image. Match the identity from the second image as accurately as
+  possible. Do not change anything except the head and neck transition.
+
+# Official inference.py default negative prompt.
+negative_prompt: >-
+  (((deformed))), blurry, over saturation, bad anatomy, disfigured,
+  poorly drawn face, mutation, mutated, (extra_limb), (ugly),
+  (poorly drawn hands), fused fingers, messy drawing, broken legs censor,
+  censored, censor_bar
+
+face_side_pad: 0.35
+face_top_pad: 0.65
+face_bot_pad: 0.15

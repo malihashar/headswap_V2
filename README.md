@@ -104,6 +104,88 @@ login()  # or: import os; os.environ["HF_TOKEN"] = "hf_..."
 
 On a later runtime, complete Drive files are skipped and only re-linked.
 
+## Experimental: Step1X-Edit (`step1x_edit`)
+
+Prototype Diffusers backend using **Step1X-Edit-v1p2** (ReasonEdit-S) — the highest-quality public Step1X image-editing checkpoint on GEdit-Bench / KRIS-Bench when thinking + reflection are enabled.
+
+| Item | Value |
+| --- | --- |
+| Official repo | https://github.com/stepfun-ai/Step1X-Edit |
+| Weights | https://huggingface.co/stepfun-ai/Step1X-Edit-v1p2 |
+| Diffusers branch | `Peyton-Chen/diffusers` @ `step1xedit_v1p2` (`Step1XEditPipelineV1P2`) |
+| Scheduler | `FlowMatchEulerDiscreteScheduler` |
+| Text encoder | `Qwen2_5_VLForConditionalGeneration` (+ `Qwen2_5_VLProcessor`) |
+| VAE | `AutoencoderKL` |
+| Recommended settings | `steps=50`, `true_cfg_scale=6` (`guidance`), thinking+reflection on, `size_level`/`crop_size=1024`, `bfloat16` |
+| Disk | ~42 GiB Diffusers snapshot |
+| VRAM | Full bf16 load needs a large GPU (~40–80 GiB class); default config uses `enable_cpu_offload: true` |
+
+**Variants (why v1p2):** v1.0 / v1.1 are older single-pass editors; v1p2-preview is weaker on KRIS overall; **v1p2 + thinking + reflection** is the top published open checkpoint.
+
+**Head-swap adaptation:** Step1X accepts **one** image + text. This pipeline builds a dual panel — left = body (image 1 / guy), right = face (image 2 / Ronaldo) — runs the instruction edit, then crops the left panel.
+
+**Limitation:** Official `__call__` has **no `strength`/denoise** parameter (config key kept for parity; recorded unused in metrics). Encode/decode timings are null because Diffusers bundles them inside sampling.
+
+### Kaggle commands
+
+```python
+%cd /kaggle/working/headswap_V2
+!bash scripts/setup_kaggle.sh   # ComfyUI optional for this pipeline
+
+# Diffusers branch (required — stock PyPI diffusers lacks Step1XEditPipelineV1P2)
+!pip install 'transformers==4.55.0'
+!git clone -b step1xedit_v1p2 https://github.com/Peyton-Chen/diffusers.git /tmp/diffusers-step1x
+!pip install -e /tmp/diffusers-step1x
+
+# Weights → /tmp/models/Step1X-Edit-v1p2 (~42 GiB, resumable)
+!python scripts/download_step1x.py
+
+# custom_001 = body guy + Ronaldo face
+!python scripts/run_pipeline.py --config configs/step1x_edit.yaml --pair-id custom_001 --limit 1
+```
+
+Outputs: `results/step1x_edit/images/…` and `results/step1x_edit/metrics.json`.
+
+Does **not** change `qwen_baseline` or `flux_kontext`.
+
+## Experimental: OmniGen2 (`omnigen2`)
+
+Prototype using **OmniGen2** in-context multi-image editing — native `input_images=[body, face]` (no dual-panel hack).
+
+| Item | Value |
+| --- | --- |
+| Official repo | https://github.com/VectorSpaceLab/OmniGen2 |
+| Weights | https://huggingface.co/OmniGen2/OmniGen2 |
+| Pipeline class | `omnigen2…OmniGen2Pipeline` (`trust_remote_code=True`) |
+| Scheduler | Flow-Match Euler (default) or `dpmsolver++` |
+| Conditioner | Qwen2.5-VL (`mllm`) · VAE `AutoencoderKL` |
+| Recommended | `steps=50`, `text_guidance_scale=5.0` (`guidance`), `image_guidance_scale=2.5` (`image_guidance`, in-context tip 2.5–3.0) |
+| VRAM | ~17 GB native (RTX 3090-class); `enable_model_cpu_offload` ≈ −50% VRAM |
+
+Official in-context prompt style (README tip #5): *“Edit the first image: replace … from the second image …”*.
+
+### Kaggle commands
+
+```python
+%cd /kaggle/working/headswap_V2
+!git pull --ff-only   # need omnigen2 files on the remote first
+
+# Clone OmniGen2 code ONLY — do NOT pip install its requirements.txt
+# (that file pins torch==2.6.0 and will break Kaggle's torch/CUDA stack).
+# Upstream also has no setup.py, so `pip install -e` fails.
+!bash scripts/setup_omnigen2.sh
+
+# Weights → /tmp/models/OmniGen2 (resumable)
+!python scripts/download_omnigen2.py
+
+# custom_001 = body guy + Ronaldo face
+!python scripts/run_pipeline.py --config configs/omnigen2.yaml --pair-id custom_001 --limit 1
+```
+
+Outputs: `results/omnigen2/`.
+
+**Limitation:** No `strength`/denoise in the official API (config key recorded unused). Encode/decode timings null (bundled in `__call__`). Needs the OmniGen2 git tree on `PYTHONPATH` (handled by `setup_omnigen2.sh` / auto-path), not Comfy-only weights.
+
 ## Kaggle
 
 Kaggle splits storage into two filesystems:
