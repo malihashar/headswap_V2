@@ -1,0 +1,46 @@
+name: krea2_identity_edit
+pipeline: krea2
+
+# Krea 2 Turbo FP8 + community Identity Edit LoRA (two-image head/face swap).
+# Scene = body (Picture 1), person = face (Picture 2) — fixed training order.
+# Requires: comfyui-krea2edit custom nodes + recent ComfyUI (CLIP type krea2).
+# T4 note: FP8 + r64 LoRA + max_dim 768; may still OOM — then try max_dim 640.
+unet_name: krea2_turbo_fp8_scaled.safetensors
+clip_name: qwen3vl_4b_fp8_scaled.safetensors
+clip_type: krea2
+vae_name: qwen_image_vae.safetensors
+
+# Rank-64 LoRA (~0.4 GiB) for T4; swap to full v1_2 via --include-optional download.
+identity_lora_name: krea2_identity_edit_v1_2_r64.safetensors
+identity_lora_strength: 1.0
+
+steps: 10
+cfg: 1.0
+sampler: euler
+scheduler: simple
+seed: 46
+denoise: 1.0
+
+# Two-image identity edit knobs (see comfyui-krea2edit README).
+ref_boost: 4.0
+ref_boost_a: 1.0
+grounding_px: 768
+fit_mode: fit
+max_dim: 768
+div_by: 16
+force_full_load: false
+
+prompt: >-
+  Replace the person's head and face in the first image with the person from
+  the second image. Preserve the exact facial identity of the second person —
+  bone structure, jawline, eyebrows, eyes, nose, mouth, hairline, and skin.
+  Keep the body, clothing, pose, camera angle, lighting, and background from
+  the first image. Remove the original face and glasses from the first person.
+  Photorealistic, natural skin texture, sharp details.
+
+negative_prompt: ""
+
+face_side_pad: 0.28
+face_top_pad: 0.55
+face_bot_pad: 0.20
+include_shoulders: false

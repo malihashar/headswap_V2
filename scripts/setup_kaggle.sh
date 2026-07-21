@@ -14,6 +14,7 @@
 #   bash scripts/setup_kaggle.sh              # no model download
 #   bash scripts/setup_kaggle.sh --kontext    # FLUX.1 Kontext weights → /tmp/models
 #   bash scripts/setup_kaggle.sh --klein      # FLUX.2 Klein (+ BFS) weights → /tmp/models
+#   bash scripts/setup_kaggle.sh --krea2      # Krea 2 Identity Edit stack → /tmp/models
 #   bash scripts/setup_kaggle.sh --kontext --klein   # both sets
 #
 # Equivalent to --kontext:
@@ -32,6 +33,7 @@ export HEADSWAP_STAGING_DIR="${HEADSWAP_STAGING_DIR:-/tmp/_hf_dl_staging}"
 DOWNLOAD_KONTEXT=0
 DOWNLOAD_KLEIN=0
 DOWNLOAD_QWEN=0
+DOWNLOAD_KREA2=0
 
 usage() {
   cat <<'EOF'
@@ -40,6 +42,7 @@ Usage: bash scripts/setup_kaggle.sh [options]
   (default)     Install ComfyUI + Python deps + aria2. Download NO models.
   --kontext     Download FLUX.1 Kontext set into /tmp/models (see configs/flux_kontext.yaml).
   --klein       Download FLUX.2 Klein set into /tmp/models (existing Klein baseline).
+  --krea2       Download Krea 2 Identity Edit set + install comfyui-krea2edit nodes.
   --qwen        Download Qwen Image Edit 2511 set into /tmp/models (optional legacy).
   -h, --help    Show this help.
 
@@ -53,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --kontext) DOWNLOAD_KONTEXT=1 ;;
     --klein) DOWNLOAD_KLEIN=1 ;;
     --qwen) DOWNLOAD_QWEN=1 ;;
+    --krea2) DOWNLOAD_KREA2=1 ;;
     -h|--help)
       usage
       exit 0
@@ -72,7 +76,7 @@ echo "ComfyUI:     $COMFYUI_PATH"
 echo "Model store: $HEADSWAP_MODEL_STORE"
 echo "Staging:     $HEADSWAP_STAGING_DIR"
 echo "HF_HUB_DISABLE_XET=$HF_HUB_DISABLE_XET"
-echo "Downloads:   kontext=$DOWNLOAD_KONTEXT klein=$DOWNLOAD_KLEIN qwen=$DOWNLOAD_QWEN"
+echo "Downloads:   kontext=$DOWNLOAD_KONTEXT klein=$DOWNLOAD_KLEIN qwen=$DOWNLOAD_QWEN krea2=$DOWNLOAD_KREA2"
 echo
 echo "Filesystem check (models must NOT land on the 20GB /kaggle/working loop):"
 df -h /tmp || true
@@ -173,6 +177,27 @@ if [[ "$DOWNLOAD_QWEN" -eq 1 ]]; then
   echo
 fi
 
+if [[ "$DOWNLOAD_KREA2" -eq 1 ]]; then
+  STEP=$((STEP + 1))
+  echo "[$STEP] Install Krea2 edit custom nodes"
+  bash "$REPO_ROOT/scripts/setup_krea2_nodes.sh"
+  echo
+  STEP=$((STEP + 1))
+  echo "[$STEP] Download Krea2 Identity Edit models → $HEADSWAP_MODEL_STORE"
+  if [[ -f "$REPO_ROOT/scripts/download_krea2.py" ]]; then
+    python3 "$REPO_ROOT/scripts/download_krea2.py" \
+      --comfy "$COMFYUI_PATH" \
+      --store-dir "$HEADSWAP_MODEL_STORE" \
+      --staging-dir "$HEADSWAP_STAGING_DIR" \
+      --backend auto \
+      --disable-xet \
+      --manifest "$REPO_ROOT/scripts/models.json"
+  else
+    python3 "$REPO_ROOT/scripts/download_models.py" --set krea2 "${DL_COMMON[@]}"
+  fi
+  echo
+fi
+
 echo "Setup complete."
 echo "store_dir=$HEADSWAP_MODEL_STORE"
 echo "staging_dir=$HEADSWAP_STAGING_DIR"
@@ -182,13 +207,14 @@ df -h /tmp || true
 df -h /kaggle/working || true
 echo
 
-if [[ "$DOWNLOAD_KONTEXT" -eq 0 && "$DOWNLOAD_KLEIN" -eq 0 && "$DOWNLOAD_QWEN" -eq 0 ]]; then
+if [[ "$DOWNLOAD_KONTEXT" -eq 0 && "$DOWNLOAD_KLEIN" -eq 0 && "$DOWNLOAD_QWEN" -eq 0 && "$DOWNLOAD_KREA2" -eq 0 ]]; then
   echo "No model sets downloaded (default)."
   echo "Next (Kontext — recommended):"
   echo "  python scripts/download_kontext.py"
   echo "  # or: bash scripts/setup_kaggle.sh --kontext"
   echo "Optional:"
   echo "  bash scripts/setup_kaggle.sh --klein"
+  echo "  bash scripts/setup_kaggle.sh --krea2"
   echo "  bash scripts/setup_kaggle.sh --qwen"
 else
   echo "Ready to run:"
@@ -198,5 +224,8 @@ else
   fi
   if [[ "$DOWNLOAD_KLEIN" -eq 1 ]]; then
     echo "  python scripts/run_pipeline.py --config configs/klein4b.yaml --limit 1"
+  fi
+  if [[ "$DOWNLOAD_KREA2" -eq 1 ]]; then
+    echo "  python scripts/run_pipeline.py --config configs/krea2_identity_edit.yaml --pair-id custom_001 --limit 1"
   fi
 fi

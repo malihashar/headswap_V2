@@ -55,7 +55,7 @@ def _ensure_prompt_server(loop: asyncio.AbstractEventLoop) -> Any:
     return server.PromptServer(loop)
 
 
-def bootstrap_comfy(init_custom_nodes: bool = False) -> dict[str, Any]:
+def bootstrap_comfy(init_custom_nodes: bool | None = None) -> dict[str, Any]:
     """
     Import ComfyUI node mappings into this process (Colab/RunPod style).
 
@@ -63,7 +63,16 @@ def bootstrap_comfy(init_custom_nodes: bool = False) -> dict[str, Any]:
       1. create asyncio loop
       2. construct PromptServer(loop)  → sets PromptServer.instance
       3. nodes.init_extra_nodes(...)
+
+    Custom nodes (e.g. comfyui-krea2edit) load only when init_custom_nodes=True
+    or HEADSWAP_INIT_CUSTOM_NODES=1.
     """
+    if init_custom_nodes is None:
+        init_custom_nodes = os.environ.get("HEADSWAP_INIT_CUSTOM_NODES", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
     path = comfyui_path()
     if not path.exists():
         raise FileNotFoundError(
@@ -154,8 +163,13 @@ def invoke_node(node_cls: type, **kwargs: Any) -> Any:
 
 
 class NodeRuntime:
-    def __init__(self, mappings: dict[str, Any] | None = None):
-        self.mappings = mappings or bootstrap_comfy()
+    def __init__(
+        self,
+        mappings: dict[str, Any] | None = None,
+        *,
+        init_custom_nodes: bool | None = None,
+    ):
+        self.mappings = mappings or bootstrap_comfy(init_custom_nodes=init_custom_nodes)
         self._cache: dict[str, Any] = {}
         self.models: dict[str, Any] = {}
 

@@ -6,6 +6,7 @@ from headswap.config import load_config
 from headswap.pipelines.base import BasePipeline, MockHeadSwapPipeline
 from headswap.pipelines.klein import KleinMaskCropPipeline
 from headswap.pipelines.kontext import FluxKontextPipeline
+from headswap.pipelines.krea2 import Krea2IdentityEditPipeline
 from headswap.pipelines.omnigen2 import OmniGen2PipelineRunner
 from headswap.pipelines.qwen import QwenBaselinePipeline, QwenImprovedPipeline
 
@@ -20,6 +21,8 @@ PIPELINES: dict[str, type[BasePipeline]] = {
     "klein": KleinMaskCropPipeline,
     "klein4b_mask_crop_stitch": KleinMaskCropPipeline,
     "flux_kontext": FluxKontextPipeline,
+    "krea2": Krea2IdentityEditPipeline,
+    "krea2_identity_edit": Krea2IdentityEditPipeline,
     "qwen_baseline": QwenBaselinePipeline,
     "qwen_improved": QwenImprovedPipeline,
     "qwen_improved_mask_crop": QwenImprovedPipeline,

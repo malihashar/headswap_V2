@@ -189,7 +189,14 @@ def select_artifacts(
     out: list[Artifact] = []
     for filename, entry in manifest.items():
         art = artifact_from_manifest(filename, entry)
-        if kind != "all" and art.set_name != kind:
+        sets = entry.get("sets")
+        if sets is None:
+            set_names = [art.set_name]
+        elif isinstance(sets, str):
+            set_names = [sets]
+        else:
+            set_names = list(sets)
+        if kind != "all" and kind not in set_names:
             continue
         if not art.required and not include_optional:
             continue
@@ -1574,7 +1581,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--set",
-        choices=["klein", "qwen", "kontext", "all"],
+        choices=["klein", "qwen", "kontext", "krea2", "all"],
         default="klein",
     )
     ap.add_argument(

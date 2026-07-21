@@ -67,6 +67,7 @@
     "url": "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors",
     "download_repo_id": null,
     "set": "qwen",
+    "sets": ["qwen", "krea2"],
     "required": true
   },
   "qwen_2.5_vl_7b_fp8_scaled.safetensors": {
@@ -157,6 +158,46 @@
     "url": "https://civitai.com/api/download/models/2015589",
     "download_repo_id": null,
     "set": "kontext",
+    "required": false
+  },
+  "krea2_turbo_fp8_scaled.safetensors": {
+    "size": 13141730784,
+    "path": "diffusion_models",
+    "repo_id": "Comfy-Org/Krea-2",
+    "repo_path": "diffusion_models/krea2_turbo_fp8_scaled.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors",
+    "download_repo_id": null,
+    "set": "krea2",
+    "required": true
+  },
+  "qwen3vl_4b_fp8_scaled.safetensors": {
+    "size": 5242467968,
+    "path": "text_encoders",
+    "repo_id": "Comfy-Org/Krea-2",
+    "repo_path": "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+    "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+    "download_repo_id": null,
+    "set": "krea2",
+    "required": true
+  },
+  "krea2_identity_edit_v1_2_r64.safetensors": {
+    "size": 457111048,
+    "path": "loras",
+    "repo_id": "conradlocke/krea2-identity-edit",
+    "repo_path": "krea2_identity_edit_v1_2_r64.safetensors",
+    "url": "https://huggingface.co/conradlocke/krea2-identity-edit/resolve/main/krea2_identity_edit_v1_2_r64.safetensors",
+    "download_repo_id": null,
+    "set": "krea2",
+    "required": true
+  },
+  "krea2_identity_edit_v1_2.safetensors": {
+    "size": 1828256432,
+    "path": "loras",
+    "repo_id": "conradlocke/krea2-identity-edit",
+    "repo_path": "krea2_identity_edit_v1_2.safetensors",
+    "url": "https://huggingface.co/conradlocke/krea2-identity-edit/resolve/main/krea2_identity_edit_v1_2.safetensors",
+    "download_repo_id": null,
+    "set": "krea2",
     "required": false
   }
 }
