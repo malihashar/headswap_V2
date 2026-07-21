@@ -30,12 +30,15 @@ scheduler: simple
 seed: 46
 denoise: 1.0
 
-# Locality
+# Locality — square crop improves identity without extra steps.
 max_body_dim: 1280
 crop_long_side: 1024
+square_crop: true
 mask_expand_px: 18
 mask_blur_px: 12
 div_by: 16
+post_color_match_strength: 0.35
+force_full_load: true
 
 prompt: >-
   head_swap: start with Picture 1 as the base image, keeping its lighting,

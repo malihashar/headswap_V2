@@ -260,6 +260,28 @@ def expand_box(
     return FaceBox(xx0, yy0, xx1, yy1, box.conf)
 
 
+def pad_to_square(
+    im: Image.Image,
+    *,
+    fill: tuple[int, int, int] = (0, 0, 0),
+    div_by: int = 16,
+) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    """
+    Pad RGB image to a square (divisible by div_by). Returns (square, content_box).
+    content_box = (ox, oy, w, h) of the original pixels inside the square.
+    """
+    im = im.convert("RGB")
+    w, h = im.size
+    # Round UP so the square never shrinks below the content size.
+    side = max(w, h)
+    if div_by > 1:
+        side = max(div_by, ((side + div_by - 1) // div_by) * div_by)
+    out = Image.new("RGB", (side, side), fill)
+    ox, oy = (side - w) // 2, (side - h) // 2
+    out.paste(im, (ox, oy))
+    return out, (ox, oy, w, h)
+
+
 def crop_face_reference(
     face_pil: Image.Image,
     cache_dir,

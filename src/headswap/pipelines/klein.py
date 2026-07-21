@@ -19,6 +19,7 @@ from headswap.preprocess import (
     crop_with_mask,
     head_hair_mask_from_face,
     lab_histogram_match_face,
+    pad_to_square,
     resize_long_side,
     resize_max_keep_ar,
     soft_composite,
@@ -197,6 +198,16 @@ class KleinMaskCropPipeline(BasePipeline):
         crop_work = resize_long_side(crop_img, int(self.cfg.get("crop_long_side", 1024)), div_by=div_by)
         face_ref = resize_long_side(face_crop, int(self.cfg.get("crop_long_side", 1024)), div_by=div_by)
 
+        # Community quality tip: square working crop (no extra diffusion steps).
+        square_crop = bool(self.cfg.get("square_crop", True))
+        crop_content_box: tuple[int, int, int, int] | None = None
+        if square_crop:
+            crop_work, crop_content_box = pad_to_square(crop_work, div_by=div_by)
+            face_ref, _ = pad_to_square(face_ref, div_by=div_by)
+            # Match face square side to body crop square for ReferenceLatent.
+            if face_ref.size != crop_work.size:
+                face_ref = face_ref.resize(crop_work.size, Image.Resampling.LANCZOS)
+
         prompt = build_prompt(self.cfg, body_full, face_crop, self.cache_dir)
         neg = str(self.cfg.get("negative_prompt", "") or "")
 
@@ -285,6 +296,7 @@ class KleinMaskCropPipeline(BasePipeline):
                 latent_image = get_value_at_index(body_lat, 0)
                 fallbacks.append("empty_flux2_latent_missing_used_body_latent")
 
+            # Distilled Klein: stay near 4 steps. More steps → waxy / overcooked.
             steps = int(self.cfg.get("steps", 4))
             if rt.has("Flux2Scheduler"):
                 sigmas = get_value_at_index(
@@ -321,7 +333,10 @@ class KleinMaskCropPipeline(BasePipeline):
                 0,
             )
             samples = None
-            with force_sampling_full_load(models=(bundle["model"],)):
+            use_full_load = bool(self.cfg.get("force_full_load", True))
+            with force_sampling_full_load(
+                models=(bundle["model"],), enabled=use_full_load
+            ):
                 samples = rt.call(
                     "SamplerCustomAdvanced",
                     noise=noise,
@@ -338,8 +353,16 @@ class KleinMaskCropPipeline(BasePipeline):
             )
             edited_crop = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
 
+        # Undo square pad so stitch geometry matches the original head box.
+        if crop_content_box is not None:
+            ox, oy, cw, ch = crop_content_box
+            edited_crop = edited_crop.crop((ox, oy, ox + cw, oy + ch))
+
         stitched = soft_composite(body_full, edited_crop, mask, box)
-        stitched = lab_histogram_match_face(stitched, body_full, mask, strength=0.3)
+        post_match = float(self.cfg.get("post_color_match_strength", 0.35) or 0.0)
+        stitched = lab_histogram_match_face(
+            stitched, body_full, mask, strength=post_match
+        )
 
         dbg = {
             k: v
@@ -365,6 +388,8 @@ class KleinMaskCropPipeline(BasePipeline):
             "crop_size": list(crop_work.size),
             "body_size": list(body_full.size),
             "face_ref_size": list(face_ref.size),
+            "square_crop": square_crop,
+            "steps": steps,
             "reference_latent_used": reference_latent_used,
             "empty_flux2_latent_used": empty_flux2_latent_used,
             "flux2_scheduler_used": flux2_scheduler_used,
@@ -376,6 +401,7 @@ class KleinMaskCropPipeline(BasePipeline):
         print(
             f"[klein] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
             f"strengths={meta['lora_strengths']} crop={meta['crop_size']} "
+            f"steps={steps} square={square_crop} "
             f"reference_latent={reference_latent_used} negative_mode={negative_mode} "
             f"face_rmbg={face_rmbg_applied} fallbacks={fallbacks or 'none'}"
         )
