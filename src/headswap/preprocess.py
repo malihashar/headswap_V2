@@ -424,6 +424,47 @@ def soft_composite(
     return out.convert("RGB")
 
 
+def face_on_white_background(
+    face: Image.Image,
+    *,
+    black_thresh: float = 18.0,
+) -> Image.Image:
+    """
+    Put a cutout-style face onto a white canvas (BFS 'sticker' prep).
+
+    For black-background studio faces, non-black pixels become the matte.
+    Otherwise returns the RGB face unchanged.
+    """
+    rgb = pil_to_rgb_np(face)
+    lum = rgb.astype(np.float32).mean(axis=2)
+    # Only treat as cutout if a large fraction is near-black.
+    black_frac = float((lum <= black_thresh).mean())
+    if black_frac < 0.20:
+        return face.convert("RGB")
+    alpha = (lum > black_thresh).astype(np.float32)
+    alpha = cv2.GaussianBlur(alpha, (5, 5), 0)
+    white = np.full_like(rgb, 255, dtype=np.float32)
+    out = rgb.astype(np.float32) * alpha[..., None] + white * (1.0 - alpha[..., None])
+    return np_to_pil(np.clip(out, 0, 255))
+
+
+def feathered_soft_composite(
+    base: Image.Image,
+    edit: Image.Image,
+    mask: Image.Image,
+    box: tuple[int, int, int, int],
+    *,
+    extra_blur_px: int = 8,
+) -> Image.Image:
+    """Soft stitch with an extra blur on the alpha for less obvious jaw seams."""
+    if extra_blur_px > 0:
+        m = mask.convert("L")
+        k = max(3, int(extra_blur_px) * 2 + 1)
+        arr = np.asarray(m)
+        arr = cv2.GaussianBlur(arr, (k, k), 0)
+        mask = Image.fromarray(arr)
+    return soft_composite(base, edit, mask, box)
+
 def describe_hair_length_hint(body: Image.Image, face: Image.Image, cache_dir) -> str:
     """Heuristic prompt add-on when body hair is longer than face crop."""
     br = pil_to_rgb_np(body)

@@ -1,0 +1,59 @@
+name: klein4b_realism
+pipeline: klein
+
+# Dramatic realism preset for FLUX.2 Klein 4B — still ~4 distilled steps.
+# Big change vs classic empty-latent swap:
+#   Align face → opaque paste into head crop → Klein refine at denoise 0.7
+#   + white-bg face sticker + square crop + feathered stitch.
+unet_name: flux-2-klein-4b-fp8.safetensors
+unet_name_fallback: flux-2-klein-4b.safetensors
+
+clip_name: qwen_3_4b.safetensors
+clip_type: flux2
+vae_name: flux2-vae.safetensors
+
+bfs_lora_name: bfs_head_v1.1_optional_flux-klein_4b.safetensors
+bfs_lora_strength: 1.0
+
+# Distilled sweet spot — do NOT raise to 20+.
+steps: 4
+cfg: 1.2
+sampler: euler
+scheduler: simple
+seed: 46
+
+# Align→Paste→Refine (partial denoise from pasted composite).
+align_paste_refine: true
+denoise: 0.70
+paste_core_min_alpha: 0.93
+paste_feather_px: 21
+pre_color_match_strength: 0.55
+face_white_bg: true
+
+max_body_dim: 1024
+crop_long_side: 896
+square_crop: true
+mask_expand_px: 26
+mask_blur_px: 16
+mask_top_extend: 1.35
+mask_side_extend: 0.65
+mask_bot_extend: 0.45
+stitch_feather_px: 14
+post_color_match_strength: 0.45
+div_by: 16
+force_full_load: true
+
+prompt: >-
+  head_swap: start with Picture 1 as the base image, keeping its lighting,
+  environment, and background. remove the head from Picture 1 completely and
+  replace it with the head from Picture 2, strictly preserving the hair, eye
+  color, nose structure of Picture 2. copy the direction of the eye, head
+  rotation, micro expressions from Picture 1, natural skin texture,
+  high quality, sharp details, 4k.
+
+negative_prompt: ""
+
+face_side_pad: 0.42
+face_top_pad: 0.75
+face_bot_pad: 0.35
+include_shoulders: true
