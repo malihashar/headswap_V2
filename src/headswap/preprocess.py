@@ -438,24 +438,75 @@ def face_on_white_background(
     face: Image.Image,
     *,
     black_thresh: float = 18.0,
+    cache_dir=None,
+    force_ellipse: bool = False,
 ) -> Image.Image:
     """
-    Put a cutout-style face onto a white canvas (BFS 'sticker' prep).
+    Put a face onto a white canvas (BFS 'sticker' prep for identity ReferenceLatent).
 
-    For black-background studio faces, non-black pixels become the matte.
-    Otherwise returns the RGB face unchanged.
+    Preference:
+      1. Black-studio cutout matte (non-black pixels kept)
+      2. Face-box ellipse matte (kills jersey / busy background around the head)
+      3. Unchanged RGB if neither applies
     """
     rgb = pil_to_rgb_np(face)
     lum = rgb.astype(np.float32).mean(axis=2)
-    # Only treat as cutout if a large fraction is near-black.
     black_frac = float((lum <= black_thresh).mean())
-    if black_frac < 0.20:
-        return face.convert("RGB")
-    alpha = (lum > black_thresh).astype(np.float32)
-    alpha = cv2.GaussianBlur(alpha, (5, 5), 0)
-    white = np.full_like(rgb, 255, dtype=np.float32)
-    out = rgb.astype(np.float32) * alpha[..., None] + white * (1.0 - alpha[..., None])
-    return np_to_pil(np.clip(out, 0, 255))
+    if black_frac >= 0.20 and not force_ellipse:
+        alpha = (lum > black_thresh).astype(np.float32)
+        alpha = cv2.GaussianBlur(alpha, (5, 5), 0)
+        white = np.full_like(rgb, 255, dtype=np.float32)
+        out = rgb.astype(np.float32) * alpha[..., None] + white * (1.0 - alpha[..., None])
+        return np_to_pil(np.clip(out, 0, 255))
+
+    # Ellipse matte from face detection — stronger ID sticker for jersey cutouts.
+    if cache_dir is not None:
+        box = detect_best_face(rgb, cache_dir)
+        if box is not None:
+            h, w = rgb.shape[:2]
+            fw, fh = box.width, box.height
+            cx = int((box.x0 + box.x1) / 2)
+            cy = int((box.y0 + box.y1) / 2)
+            # Slightly generous so hair / jaw stay in the sticker.
+            axes = (
+                max(8, int(0.62 * fw)),
+                max(8, int(0.78 * fh)),
+            )
+            alpha = np.zeros((h, w), dtype=np.float32)
+            cv2.ellipse(alpha, (cx, cy), axes, 0, 0, 360, 1.0, -1)
+            alpha = cv2.GaussianBlur(alpha, (21, 21), 0)
+            white = np.full_like(rgb, 255, dtype=np.float32)
+            out = rgb.astype(np.float32) * alpha[..., None] + white * (1.0 - alpha[..., None])
+            return np_to_pil(np.clip(out, 0, 255))
+    return face.convert("RGB")
+
+
+def fit_face_on_square(
+    im: Image.Image,
+    side: int,
+    *,
+    fill_frac: float = 0.90,
+    bg: tuple[int, int, int] = (255, 255, 255),
+    div_by: int = 16,
+) -> Image.Image:
+    """
+    Place face on a square canvas filling ~fill_frac of the side (stronger ID signal).
+    """
+    im = im.convert("RGB")
+    if div_by > 1:
+        side = max(div_by, ((side + div_by - 1) // div_by) * div_by)
+    fill_frac = float(min(0.98, max(0.55, fill_frac)))
+    target = max(div_by, int(side * fill_frac))
+    w, h = im.size
+    scale = target / max(w, h)
+    nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    if div_by > 1:
+        nw = max(div_by, (nw // div_by) * div_by)
+        nh = max(div_by, (nh // div_by) * div_by)
+    resized = im.resize((nw, nh), Image.Resampling.LANCZOS)
+    out = Image.new("RGB", (side, side), bg)
+    out.paste(resized, ((side - nw) // 2, (side - nh) // 2))
+    return out
 
 
 def feathered_soft_composite(

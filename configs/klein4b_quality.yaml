@@ -1,9 +1,10 @@
 name: klein4b_quality
 pipeline: klein
 
-# FLUX.2 [klein] 4B distilled — quality preset WITHOUT dumping steps.
-# Distilled Klein is designed for ~4 steps; 20+ steps makes it waxy/overcooked.
-# Quality comes from: square crop, solid BFS LoRA, better mask/stitch, RMBG face.
+# FLUX.2 [klein] 4B distilled — quality + stronger Picture-2 identity.
+# Keeps the empty-latent path that looked best (no paste-refine sticker).
+# Identity levers (vs earlier quality): white ellipse sticker, face fills canvas,
+# face→body→face ReferenceLatent chain, prompt drops Picture-1 face/glasses.
 unet_name: flux-2-klein-4b-fp8.safetensors
 unet_name_fallback: flux-2-klein-4b.safetensors
 
@@ -14,39 +15,52 @@ vae_name: flux2-vae.safetensors
 bfs_lora_name: bfs_head_v1.1_optional_flux-klein_4b.safetensors
 bfs_lora_strength: 1.0
 
-# Keep near official distilled sweet spot (do NOT raise to 20+).
+# Distilled sweet spot — do NOT raise to 20+.
 steps: 4
-cfg: 1.2
+cfg: 1.3
 sampler: euler
 scheduler: simple
 seed: 46
 denoise: 1.0
 
-# White-bg sticker is ReferenceLatent-only (never pasted onto the body).
-face_white_bg: true
 align_paste_refine: false
 
-# Working resolution: quality lever that barely affects step count.
-# 896 is a T4-friendly compromise vs 1024.
+# Stronger Picture-2 ID sticker (ref encode only — never pasted onto body).
+face_white_bg: true
+face_white_ellipse: true
+face_ref_fill: 0.92
+reference_order: face_body_face
+face_ref_repeats: 2
+
 max_body_dim: 1024
 crop_long_side: 896
 square_crop: true
-mask_expand_px: 22
-mask_blur_px: 14
+# Wider head rewrite so less of Picture-1 face bleeds through.
+mask_expand_px: 28
+mask_blur_px: 16
+mask_top_extend: 1.40
+mask_side_extend: 0.70
+mask_bot_extend: 0.50
+stitch_feather_px: 12
+post_color_match_strength: 0.30
 div_by: 16
-post_color_match_strength: 0.4
 force_full_load: true
 
 prompt: >-
-  head_swap: start with Picture 1 as the base image, keeping its lighting,
-  environment, and background. remove the head from Picture 1 completely and
-  replace it with the head from Picture 2, strictly preserving the hair, eye
-  color, nose structure of Picture 2. copy the direction of the eye, head
-  rotation, micro expressions from Picture 1, high quality, sharp details, 4k.
+  head_swap: Picture 1 is the body base — keep ONLY its clothing, lighting,
+  pose, camera angle, and background. completely remove Picture 1's head,
+  face, glasses, hair, skin tone, and facial identity. replace the entire
+  head with Picture 2's head and face — match Picture 2's bone structure,
+  jawline, eyebrows, eyes, nose, mouth, hairline, and skin. keep Picture 1
+  head pose and gaze direction only. natural skin texture, photorealistic,
+  high quality, sharp details, 4k.
 
-negative_prompt: ""
+negative_prompt: >-
+  glasses from picture 1, original face, identity of picture 1, double face,
+  face blend, warped face, plastic skin, wax figure
 
-face_side_pad: 0.40
-face_top_pad: 0.70
-face_bot_pad: 0.30
-include_shoulders: true
+# Tighter face crop (less jersey) → cleaner identity sticker.
+face_side_pad: 0.28
+face_top_pad: 0.55
+face_bot_pad: 0.20
+include_shoulders: false

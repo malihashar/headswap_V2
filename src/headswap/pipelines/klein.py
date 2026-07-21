@@ -21,6 +21,7 @@ from headswap.preprocess import (
     crop_with_mask,
     face_on_white_background,
     feathered_soft_composite,
+    fit_face_on_square,
     head_hair_mask_from_face,
     lab_histogram_match_face,
     pad_to_square,
@@ -210,18 +211,31 @@ class KleinMaskCropPipeline(BasePipeline):
         crop_work = resize_long_side(crop_img, int(self.cfg.get("crop_long_side", 1024)), div_by=div_by)
         face_nat = resize_long_side(face_crop, int(self.cfg.get("crop_long_side", 1024)), div_by=div_by)
         # BFS sticker face is ONLY for ReferenceLatent identity encode.
-        face_ref = (
-            face_on_white_background(face_nat)
-            if bool(self.cfg.get("face_white_bg", False))
-            else face_nat
-        )
+        if bool(self.cfg.get("face_white_bg", False)):
+            face_ref = face_on_white_background(
+                face_nat,
+                cache_dir=self.cache_dir,
+                force_ellipse=bool(self.cfg.get("face_white_ellipse", True)),
+            )
+        else:
+            face_ref = face_nat
 
         square_crop = bool(self.cfg.get("square_crop", True))
         crop_content_box: tuple[int, int, int, int] | None = None
+        face_ref_fill = float(self.cfg.get("face_ref_fill", 0.0) or 0.0)
         if square_crop:
             crop_work, crop_content_box = pad_to_square(crop_work, fill="edge", div_by=div_by)
             face_nat, _ = pad_to_square(face_nat, fill="edge", div_by=div_by)
-            face_ref, _ = pad_to_square(face_ref, fill=(255, 255, 255), div_by=div_by)
+            if face_ref_fill > 0:
+                face_ref = fit_face_on_square(
+                    face_ref,
+                    crop_work.size[0],
+                    fill_frac=face_ref_fill,
+                    bg=(255, 255, 255),
+                    div_by=div_by,
+                )
+            else:
+                face_ref, _ = pad_to_square(face_ref, fill=(255, 255, 255), div_by=div_by)
             if face_nat.size != crop_work.size:
                 face_nat = face_nat.resize(crop_work.size, Image.Resampling.LANCZOS)
             if face_ref.size != crop_work.size:
@@ -289,35 +303,41 @@ class KleinMaskCropPipeline(BasePipeline):
             if rt.has("ReferenceLatent"):
                 body_latent = get_value_at_index(body_lat, 0)
                 face_latent = get_value_at_index(face_lat, 0)
+                # Order / repeats bias identity toward Picture 2 without paste-refine.
+                # face_body_face = body layout + stronger face ID (recommended for quality).
+                ref_order = str(self.cfg.get("reference_order", "body_face") or "body_face")
+                face_repeats = max(1, int(self.cfg.get("face_ref_repeats", 1) or 1))
 
-                ref1 = rt.call(
-                    "ReferenceLatent", conditioning=conditioning, latent=body_latent
-                )
-                ref2 = rt.call(
-                    "ReferenceLatent",
-                    conditioning=get_value_at_index(ref1, 0),
-                    latent=face_latent,
-                )
+                def _chain_refs(cond, order: str, repeats: int):
+                    cur = cond
+                    seq = []
+                    if order == "face_body_face":
+                        seq = ["face"] + ["body"] + (["face"] * max(0, repeats - 1))
+                    elif order == "face_body":
+                        seq = ["face"] + ["body"]
+                    elif order == "face_face_body":
+                        seq = (["face"] * repeats) + ["body"]
+                    else:
+                        # body_face (default) — optional extra face repeats after body
+                        seq = ["body"] + (["face"] * repeats)
+                    for kind in seq:
+                        lat = face_latent if kind == "face" else body_latent
+                        cur = get_value_at_index(
+                            rt.call("ReferenceLatent", conditioning=cur, latent=lat),
+                            0,
+                        )
+                    return cur, seq
+
+                positive, pos_seq = _chain_refs(conditioning, ref_order, face_repeats)
                 # Body + face refs only. Do NOT attach composite as a 3rd
                 # ReferenceLatent — that reinjected the paste sticker into
                 # conditioning and fought the refine.
-                positive = get_value_at_index(ref2, 0)
                 reference_latent_used = True
 
                 neg_c = rt.call("CLIPTextEncode", text=neg, clip=bundle["clip"])
                 neg_conditioning = get_value_at_index(neg_c, 0)
-                neg_ref1 = rt.call(
-                    "ReferenceLatent",
-                    conditioning=neg_conditioning,
-                    latent=body_latent,
-                )
-                neg_ref2 = rt.call(
-                    "ReferenceLatent",
-                    conditioning=get_value_at_index(neg_ref1, 0),
-                    latent=face_latent,
-                )
-                negative = get_value_at_index(neg_ref2, 0)
-                negative_mode = "clip_text_reference_latent_body_face"
+                negative, _ = _chain_refs(neg_conditioning, ref_order, face_repeats)
+                negative_mode = f"clip_text_reference_latent_{'_'.join(pos_seq)}"
             else:
                 positive = conditioning
                 fallbacks.append("reference_latent_missing_text_only")
@@ -454,6 +474,9 @@ class KleinMaskCropPipeline(BasePipeline):
             "composite_paste": bool(paste_info.get("composite_paste")),
             "face_alignment": bool(align_info.get("face_alignment")),
             "face_alignment_backend": align_info.get("face_alignment_backend"),
+            "reference_order": str(self.cfg.get("reference_order", "body_face") or "body_face"),
+            "face_ref_fill": float(self.cfg.get("face_ref_fill", 0) or 0),
+            "face_ref_repeats": int(self.cfg.get("face_ref_repeats", 1) or 1),
             "denoise": denoise,
             "steps": steps,
             "reference_latent_used": reference_latent_used,
