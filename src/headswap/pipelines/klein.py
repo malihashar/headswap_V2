@@ -186,6 +186,8 @@ class KleinMaskCropPipeline(BasePipeline):
         body_full = resize_max_keep_ar(
             body.convert("RGB"), int(self.cfg.get("max_body_dim", 1280)), div_by=div_by
         )
+        # Natural face crop for paste / geometry. Never bake white-bg into paste
+        # (that produced the oval sticker failure).
         face_crop = crop_face_reference(
             face,
             self.cache_dir,
@@ -194,8 +196,6 @@ class KleinMaskCropPipeline(BasePipeline):
             side=float(self.cfg.get("face_side_pad", 0.35)),
             include_shoulders=bool(self.cfg.get("include_shoulders", True)),
         )
-        if bool(self.cfg.get("face_white_bg", False)):
-            face_crop = face_on_white_background(face_crop)
 
         mask = head_hair_mask_from_face(
             body_full,
@@ -208,26 +208,36 @@ class KleinMaskCropPipeline(BasePipeline):
         )
         crop_img, crop_mask, box = crop_with_mask(body_full, mask, pad=12, div_by=div_by)
         crop_work = resize_long_side(crop_img, int(self.cfg.get("crop_long_side", 1024)), div_by=div_by)
-        face_ref = resize_long_side(face_crop, int(self.cfg.get("crop_long_side", 1024)), div_by=div_by)
+        face_nat = resize_long_side(face_crop, int(self.cfg.get("crop_long_side", 1024)), div_by=div_by)
+        # BFS sticker face is ONLY for ReferenceLatent identity encode.
+        face_ref = (
+            face_on_white_background(face_nat)
+            if bool(self.cfg.get("face_white_bg", False))
+            else face_nat
+        )
 
         square_crop = bool(self.cfg.get("square_crop", True))
         crop_content_box: tuple[int, int, int, int] | None = None
         if square_crop:
-            crop_work, crop_content_box = pad_to_square(crop_work, div_by=div_by)
-            face_ref, _ = pad_to_square(face_ref, div_by=div_by)
+            crop_work, crop_content_box = pad_to_square(crop_work, fill="edge", div_by=div_by)
+            face_nat, _ = pad_to_square(face_nat, fill="edge", div_by=div_by)
+            face_ref, _ = pad_to_square(face_ref, fill=(255, 255, 255), div_by=div_by)
+            if face_nat.size != crop_work.size:
+                face_nat = face_nat.resize(crop_work.size, Image.Resampling.LANCZOS)
             if face_ref.size != crop_work.size:
                 face_ref = face_ref.resize(crop_work.size, Image.Resampling.LANCZOS)
 
         composite = crop_work
         paste_info: dict = {"composite_paste": False}
         align_info: dict = {}
+        # Paste uses natural face (no white canvas). Soft alpha + higher denoise blend.
         if align_paste_refine:
             aligned_rgba, align_info = align_face_to_destination(
-                face_ref,
+                face_nat,
                 crop_work,
                 self.cache_dir,
-                core_min_alpha=float(self.cfg.get("paste_core_min_alpha", 0.92)),
-                feather_px=int(self.cfg.get("paste_feather_px", 21)),
+                core_min_alpha=float(self.cfg.get("paste_core_min_alpha", 0.78)),
+                feather_px=int(self.cfg.get("paste_feather_px", 31)),
             )
             pre_match = float(self.cfg.get("pre_color_match_strength", 0.5) or 0.0)
             if aligned_rgba is not None:
@@ -279,7 +289,6 @@ class KleinMaskCropPipeline(BasePipeline):
             if rt.has("ReferenceLatent"):
                 body_latent = get_value_at_index(body_lat, 0)
                 face_latent = get_value_at_index(face_lat, 0)
-                comp_latent = get_value_at_index(comp_lat, 0)
 
                 ref1 = rt.call(
                     "ReferenceLatent", conditioning=conditioning, latent=body_latent
@@ -289,16 +298,10 @@ class KleinMaskCropPipeline(BasePipeline):
                     conditioning=get_value_at_index(ref1, 0),
                     latent=face_latent,
                 )
+                # Body + face refs only. Do NOT attach composite as a 3rd
+                # ReferenceLatent — that reinjected the paste sticker into
+                # conditioning and fought the refine.
                 positive = get_value_at_index(ref2, 0)
-                if align_paste_refine and bool(paste_info.get("composite_paste")):
-                    positive = get_value_at_index(
-                        rt.call(
-                            "ReferenceLatent",
-                            conditioning=positive,
-                            latent=comp_latent,
-                        ),
-                        0,
-                    )
                 reference_latent_used = True
 
                 neg_c = rt.call("CLIPTextEncode", text=neg, clip=bundle["clip"])
@@ -424,6 +427,7 @@ class KleinMaskCropPipeline(BasePipeline):
             for k, v in {
                 "debug_body": self._save_debug(out_dir, "debug_body.png", body_full),
                 "debug_face_crop": self._save_debug(out_dir, "debug_face_crop.png", face_crop),
+                "debug_face_ref": self._save_debug(out_dir, "debug_face_ref.png", face_ref),
                 "debug_mask": self._save_debug(out_dir, "debug_mask.png", mask),
                 "debug_crop": self._save_debug(out_dir, "debug_crop.png", crop_work),
                 "debug_composite": self._save_debug(out_dir, "debug_composite.png", composite),

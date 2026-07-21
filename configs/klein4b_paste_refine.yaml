@@ -1,12 +1,8 @@
-name: klein4b_realism
+name: klein4b_paste_refine
 pipeline: klein
 
-# Safe realism preset for FLUX.2 Klein 4B (distilled ~4 steps).
-# After sticker/seam failures, default is classic empty-latent swap with:
-#   - white-bg face ONLY for ReferenceLatent (never for paste)
-#   - square crop with edge-color pad (no black/white halos)
-#   - wider mask + feathered stitch + light post color match
-# Align→Paste→Refine is OFF by default (set align_paste_refine: true to try).
+# Experimental Align→Paste→Refine for Klein 4B.
+# Soft paste + high denoise; white-bg face is ref-only (not pasted).
 unet_name: flux-2-klein-4b-fp8.safetensors
 unet_name_fallback: flux-2-klein-4b.safetensors
 
@@ -17,21 +13,17 @@ vae_name: flux2-vae.safetensors
 bfs_lora_name: bfs_head_v1.1_optional_flux-klein_4b.safetensors
 bfs_lora_strength: 1.0
 
-# Distilled sweet spot — do NOT raise to 20+.
 steps: 4
 cfg: 1.2
 sampler: euler
 scheduler: simple
 seed: 46
-denoise: 1.0
 
-# Classic empty-latent (safe). Paste-refine is opt-in below.
-align_paste_refine: false
-# If you turn align_paste_refine on, use soft paste + high denoise:
-# denoise: 0.90
-# paste_core_min_alpha: 0.78
-# paste_feather_px: 31
-# pre_color_match_strength: 0.45
+align_paste_refine: true
+denoise: 0.90
+paste_core_min_alpha: 0.78
+paste_feather_px: 31
+pre_color_match_strength: 0.45
 face_white_bg: true
 
 max_body_dim: 1024

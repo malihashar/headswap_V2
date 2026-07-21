@@ -263,12 +263,14 @@ def expand_box(
 def pad_to_square(
     im: Image.Image,
     *,
-    fill: tuple[int, int, int] = (0, 0, 0),
+    fill: tuple[int, int, int] | str = "edge",
     div_by: int = 16,
 ) -> tuple[Image.Image, tuple[int, int, int, int]]:
     """
     Pad RGB image to a square (divisible by div_by). Returns (square, content_box).
     content_box = (ox, oy, w, h) of the original pixels inside the square.
+
+    fill="edge" uses the median border color (avoids black/white pad halos).
     """
     im = im.convert("RGB")
     w, h = im.size
@@ -276,7 +278,15 @@ def pad_to_square(
     side = max(w, h)
     if div_by > 1:
         side = max(div_by, ((side + div_by - 1) // div_by) * div_by)
-    out = Image.new("RGB", (side, side), fill)
+    if fill == "edge":
+        arr = np.asarray(im)
+        border = np.concatenate(
+            [arr[0, :, :], arr[-1, :, :], arr[:, 0, :], arr[:, -1, :]], axis=0
+        )
+        fill_rgb = tuple(int(x) for x in np.median(border, axis=0))
+    else:
+        fill_rgb = fill  # type: ignore[assignment]
+    out = Image.new("RGB", (side, side), fill_rgb)
     ox, oy = (side - w) // 2, (side - h) // 2
     out.paste(im, (ox, oy))
     return out, (ox, oy, w, h)

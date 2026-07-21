@@ -22,6 +22,10 @@ scheduler: simple
 seed: 46
 denoise: 1.0
 
+# White-bg sticker is ReferenceLatent-only (never pasted onto the body).
+face_white_bg: true
+align_paste_refine: false
+
 # Working resolution: quality lever that barely affects step count.
 # 896 is a T4-friendly compromise vs 1024.
 max_body_dim: 1024
