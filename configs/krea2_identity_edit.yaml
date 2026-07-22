@@ -36,7 +36,16 @@ timestep_base_shift: 0.5
 # REQUIRED for T4 speed — without this, expect ~10–30s per denoising step.
 force_full_load: true
 
+# Software speed knobs (quality-preserving). Expected impact on T4:
+#   silence krea2edit flush prints + no progress bar: ~1–5% sample (sync removal)
+#   inference_mode + TF32/SDPA prefs: small, free
+#   shared runtime / model cache (2nd image same kernel): ~25s bootstrap + ~7s load → ~0
+#   debug_count_unet_forwards: leave false (Python wrap per forward)
+#   torch_compile: false on cold single-image; true on A100 multi-image after warm compile
 skip_negative_grounding: true
+debug_count_unet_forwards: false
+torch_compile: false
+torch_compile_mode: reduce-overhead
 save_debug: true
 
 ref_boost: 4.0

@@ -227,5 +227,7 @@ else
   fi
   if [[ "$DOWNLOAD_KREA2" -eq 1 ]]; then
     echo "  python scripts/run_pipeline.py --config configs/krea2_identity_edit.yaml --pair-id custom_001 --limit 1"
+    echo "  # Warm 2nd pass (skips ~25s bootstrap + ~7s load in-process):"
+    echo "  python scripts/run_krea2_warm.py --pair-id custom_001"
   fi
 fi

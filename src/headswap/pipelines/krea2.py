@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from PIL import Image
 
@@ -107,6 +107,144 @@ def _attention_backend_info() -> dict:
             info["backend"] = "pytorch_default"
     except Exception as exc:
         info["error"] = str(exc)
+    return info
+
+
+def _configure_fast_kernels(*, prefer_flash: bool = True) -> dict:
+    """
+    Prefer Flash / mem-efficient SDPA over math SDPA. Does not change weights.
+
+    Expected: lower attention latency on Ampere+ (A100) and often on T4 when
+    flash/mem-efficient paths are available. Quality unchanged.
+    """
+    info: dict = {"ok": False, "actions": []}
+    try:
+        import torch
+
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        try:
+            torch.set_float32_matmul_precision("high")
+            info["actions"].append("matmul_precision_high")
+        except Exception:
+            pass
+
+        if prefer_flash and hasattr(torch.backends.cuda, "enable_flash_sdp"):
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            # Keep math as last-resort fallback so exotic shapes still run.
+            torch.backends.cuda.enable_math_sdp(True)
+            info["actions"].append("sdpa_flash+mem_efficient_preferred")
+        info["ok"] = True
+        info["attention_after"] = _attention_backend_info()
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
+
+
+@contextmanager
+def _silence_krea2edit_step_prints() -> Iterator[None]:
+    """
+    Identity-edit wrapper prints `[krea2edit] STRIDE1-POS...` with flush=True on
+    EVERY UNet forward. That forces host sync and can add material overhead.
+
+    Filter builtins.print once for the whole sample (not per-forward wrap).
+    Also disable Comfy's progress bar (tqdm can sync each step). Quality unchanged.
+    """
+    import builtins
+
+    oprint = builtins.print
+
+    def filtered(*a, **k):
+        if a and isinstance(a[0], str) and a[0].startswith("[krea2edit]"):
+            return None
+        return oprint(*a, **k)
+
+    builtins.print = filtered
+
+    # Disable Comfy progress bar during sample (tqdm can sync each step).
+    prog_restores: list[Any] = []
+    try:
+        import comfy.utils as cu
+
+        if hasattr(cu, "set_progress_bar_enabled"):
+            cu.set_progress_bar_enabled(False)
+            prog_restores.append(("set_progress_bar_enabled", cu))
+        elif hasattr(cu, "PROGRESS_BAR_ENABLED"):
+            prev = cu.PROGRESS_BAR_ENABLED
+            cu.PROGRESS_BAR_ENABLED = False
+            prog_restores.append(("PROGRESS_BAR_ENABLED", cu, prev))
+    except Exception:
+        pass
+
+    try:
+        yield
+    finally:
+        builtins.print = oprint
+        for item in prog_restores:
+            if item[0] == "set_progress_bar_enabled":
+                try:
+                    item[1].set_progress_bar_enabled(True)
+                except Exception:
+                    pass
+            elif item[0] == "PROGRESS_BAR_ENABLED":
+                try:
+                    item[1].PROGRESS_BAR_ENABLED = item[2]
+                except Exception:
+                    pass
+
+
+# Process-wide Comfy runtime — survives multiple pipeline instances in one kernel.
+_SHARED_RUNTIME: NodeRuntime | None = None
+
+
+def get_shared_krea2_runtime(*, init_custom_nodes: bool = True) -> NodeRuntime:
+    global _SHARED_RUNTIME
+    if _SHARED_RUNTIME is None:
+        _SHARED_RUNTIME = NodeRuntime(init_custom_nodes=init_custom_nodes)
+    return _SHARED_RUNTIME
+
+
+def reset_shared_krea2_runtime() -> None:
+    global _SHARED_RUNTIME
+    _SHARED_RUNTIME = None
+
+
+def _maybe_torch_compile_diffusion(model, *, enabled: bool, mode: str = "reduce-overhead") -> dict:
+    """
+    Optional torch.compile on the DiT. First call pays compile cost; later steps /
+    images benefit. Off by default — enable on A100 multi-image sessions.
+    """
+    info: dict = {"enabled": False, "compiled": False}
+    if not enabled:
+        return info
+    info["enabled"] = True
+    try:
+        import torch
+
+        base = getattr(model, "model", None)
+        dm = getattr(base, "diffusion_model", None) if base is not None else None
+        if dm is None:
+            info["error"] = "diffusion_model_missing"
+            return info
+        if getattr(dm, "_headswap_compiled", False):
+            info["compiled"] = True
+            info["cache_hit"] = True
+            return info
+        compiled = torch.compile(dm, mode=mode, fullgraph=False)
+        base.diffusion_model = compiled
+        # Mark the compiled module if possible
+        try:
+            compiled._headswap_compiled = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        info["compiled"] = True
+        info["mode"] = mode
+        print(f"[krea2] torch.compile applied mode={mode}")
+    except Exception as exc:
+        info["error"] = str(exc)
+        print(f"[krea2] torch.compile skipped: {exc}")
     return info
 
 
@@ -250,8 +388,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
     def _ensure_runtime(self, timings: dict[str, float]) -> NodeRuntime:
         if self.runtime is None:
             with _stage(timings, "bootstrap"):
-                # Identity Edit nodes live in custom_nodes/comfyui-krea2edit.
-                self.runtime = NodeRuntime(init_custom_nodes=True)
+                # Process-wide singleton: second image in the same kernel skips
+                # Comfy/custom-node init (~25s saved).
+                self.runtime = get_shared_krea2_runtime(init_custom_nodes=True)
         else:
             timings.setdefault("bootstrap", 0.0)
         return self.runtime
@@ -404,7 +543,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
         save_debug = bool(self.cfg.get("save_debug", True))
 
         negative_mode = "grounded_vlm"
-        with torch.no_grad():
+        kernel_info = _configure_fast_kernels(prefer_flash=True)
+        count_forwards = bool(self.cfg.get("debug_count_unet_forwards", False))
+        torch_compile = bool(self.cfg.get("torch_compile", False))
+        compile_mode = str(self.cfg.get("torch_compile_mode", "reduce-overhead"))
+
+        # inference_mode disables autograd + version counters (faster than no_grad).
+        with torch.inference_mode():
             scene_t = pil_to_comfy_tensor(scene, torch)
             person_t = pil_to_comfy_tensor(person, torch)
 
@@ -426,6 +571,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     source_image_b=person_t,
                 )
                 model = get_value_at_index(patched, 0)
+
+            compile_info = _maybe_torch_compile_diffusion(
+                model, enabled=torch_compile, mode=compile_mode
+            )
 
             with _stage(timings, "grounded_encode_positive"):
                 pos = rt.call(
@@ -503,46 +652,63 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 height=h,
                 mu_shift=mu_shift if apply_shift else None,
             )
+            sampling_diag["kernels"] = kernel_info
+            sampling_diag["torch_compile"] = compile_info
+            sampling_diag["debug_count_unet_forwards"] = count_forwards
+            print(
+                f"[krea2 kernels] actions={kernel_info.get('actions')} "
+                f"attention={kernel_info.get('attention_after', {}).get('backend')}"
+            )
 
-            fwd_counter, restore_fwd = _count_unet_forwards(model, enabled=True)
+            fwd_counter, restore_fwd = _count_unet_forwards(
+                model, enabled=count_forwards
+            )
+            # Snapshot outside the timed KSampler wall — mem_get_info syncs the device.
+            cuda_mid = _cuda_util_snapshot()
+            print(
+                f"[krea2 sampling] pre-sample gpu alloc_mb="
+                f"{cuda_mid.get('allocated_mb')} reserved_mb="
+                f"{cuda_mid.get('reserved_mb')} free_mb={cuda_mid.get('free_mb')}"
+            )
             sample_t0 = time.perf_counter()
             with _stage(timings, "diffusion_sampling"):
-                with force_sampling_full_load(models=(model,), enabled=use_full_load):
-                    cuda_mid = _cuda_util_snapshot()
-                    print(
-                        f"[krea2 sampling] mid-sample gpu alloc_mb="
-                        f"{cuda_mid.get('allocated_mb')} reserved_mb="
-                        f"{cuda_mid.get('reserved_mb')} free_mb={cuda_mid.get('free_mb')}"
-                    )
-                    samples = rt.call(
-                        "KSampler",
-                        model=model,
-                        seed=seed,
-                        steps=steps,
-                        cfg=cfg,
-                        sampler_name=sampler_name,
-                        scheduler=scheduler_name,
-                        positive=positive,
-                        negative=negative,
-                        latent_image=latent,
-                        denoise=denoise,
-                    )
+                with force_sampling_full_load(
+                    models=(model,), enabled=use_full_load
+                ):
+                    # Silence only the denoising loop — not offload bookkeeping.
+                    with _silence_krea2edit_step_prints():
+                        samples = rt.call(
+                            "KSampler",
+                            model=model,
+                            seed=seed,
+                            steps=steps,
+                            cfg=cfg,
+                            sampler_name=sampler_name,
+                            scheduler=scheduler_name,
+                            positive=positive,
+                            negative=negative,
+                            latent_image=latent,
+                            denoise=denoise,
+                        )
             sample_s = time.perf_counter() - sample_t0
             if restore_fwd is not None:
                 restore_fwd()
 
             actual_forwards = int(fwd_counter.get("n") or 0)
             sec_per_step = (sample_s / steps) if steps > 0 else None
-            sec_per_fwd = (sample_s / actual_forwards) if actual_forwards > 0 else None
+            sec_per_fwd = (
+                (sample_s / actual_forwards) if actual_forwards > 0 else None
+            )
             sps = f"{sec_per_step:.2f}" if sec_per_step is not None else "n/a"
             spf = f"{sec_per_fwd:.2f}" if sec_per_fwd is not None else "n/a"
             print(
                 f"[krea2 sampling result] wall={sample_s:.2f}s  "
-                f"configured_steps={steps}  actual_unet_forwards={actual_forwards}  "
+                f"configured_steps={steps}  actual_unet_forwards="
+                f"{actual_forwards if count_forwards else 'skipped'}  "
                 f"sec/step≈{sps}  sec/forward≈{spf}  "
                 f"fwd_wrap_ok={fwd_counter.get('wrapped')}"
             )
-            if actual_forwards > 0 and steps > 0 and actual_forwards >= steps * 2 - 1:
+            if count_forwards and actual_forwards > 0 and steps > 0 and actual_forwards >= steps * 2 - 1:
                 print(
                     "[krea2 sampling] WARNING: UNet forwards ≈ 2× steps → CFG is "
                     "likely dual-evaluating each step. Try cfg=1.0 (or 0) to keep "
@@ -554,7 +720,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     "strongly suggests CPU↔GPU weight streaming. Set force_full_load: true."
                 )
             cuda_after = _cuda_util_snapshot()
-            sampling_diag["actual_unet_forwards"] = actual_forwards
+            sampling_diag["actual_unet_forwards"] = (
+                actual_forwards if count_forwards else None
+            )
             sampling_diag["sample_wall_s"] = round(sample_s, 4)
             sampling_diag["sec_per_step"] = (
                 round(sec_per_step, 4) if sec_per_step is not None else None
