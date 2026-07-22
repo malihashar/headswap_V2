@@ -281,10 +281,10 @@ def _comfy_vram_state() -> dict:
 
         state = getattr(mm, "vram_state", None)
         info["vram_state"] = str(state)
-        # NORMAL_VRAM / LOW_VRAM / HIGH_VRAM enum-ish
         name = str(state)
         info["lowvram"] = "LOW" in name or "NO_VRAM" in name
-        info["cpu_offload_likely"] = info["lowvram"] or "NORMAL" in name
+        # NORMAL_VRAM alone does NOT mean streaming when force_full_load is on.
+        info["cpu_offload_likely"] = bool(info["lowvram"])
     except Exception as exc:
         info["error"] = str(exc)
     return info
@@ -302,12 +302,12 @@ def _print_sampling_diagnostics(
     height: int,
     mu_shift: float | None,
 ) -> dict:
-    """Print the sampling knobs the user asked for before KSampler runs."""
+    """Print the sampling knobs before KSampler runs."""
     attn = _attention_backend_info()
     cuda = _cuda_util_snapshot()
     vram = _comfy_vram_state()
-    # At cfg<=1 Comfy's optimized path should be ~1 UNet eval/step; cfg>1 ≈ 2×.
     unet_evals_est = steps if cfg <= 1.0 + 1e-6 else steps * 2
+    streaming = (not force_full_load) or bool(vram.get("lowvram"))
     diag = {
         "configured_steps": steps,
         "scheduler": scheduler,
@@ -315,25 +315,39 @@ def _print_sampling_diagnostics(
         "cfg": cfg,
         "denoise": denoise,
         "force_full_load": force_full_load,
-        "cpu_offload_likely_without_full_load": (not force_full_load),
+        "layer_streaming_expected": streaming,
         "estimated_unet_evals": unet_evals_est,
         "attention": attn,
         "cuda_before_sample": cuda,
         "comfy_vram": vram,
         "resolution": [width, height],
         "timestep_shift_mu": mu_shift,
+        "note_ref_boost_attn_bias": (
+            "ref_boost!=1 builds attn logit bias → masked SDPA path "
+            "(may skip pure flash); required for identity fidelity"
+        ),
+        "note_dual_ref_seq": (
+            "two-image Identity Edit prepends 2 ref latent token blocks → "
+            "~3× image tokens vs T2I; attention ~O(n²) dominates on T4"
+        ),
     }
     print("[krea2 sampling diagnostics]")
-    print(f"  configured_steps={steps}  (verify progress bar ends at {steps}/{steps})")
+    print(f"  configured_steps={steps}")
     print(f"  sampler={sampler}  scheduler={scheduler}")
-    print(f"  cfg={cfg}  denoise={denoise}  estimated_unet_evals/step_budget≈{unet_evals_est}")
+    print(f"  cfg={cfg}  denoise={denoise}  estimated_unet_evals≈{unet_evals_est}")
     print(
         f"  force_full_load={force_full_load}  "
-        f"(False ⇒ Comfy may stream UNet layers CPU↔GPU every step — classic ~10–30s/step)"
+        f"layer_streaming_expected={streaming}  "
+        f"(streaming only if full_load=false or LOW_VRAM)"
     )
-    print(f"  attention_backend={attn.get('backend')}  xformers={attn.get('xformers')}  "
-          f"flash_sdp={attn.get('flash_sdp')}  mem_efficient_sdp={attn.get('mem_efficient_sdp')}")
-    print(f"  comfy_vram_state={vram.get('vram_state')}  cpu_offload_likely={vram.get('cpu_offload_likely')}")
+    print(
+        f"  attention_backend={attn.get('backend')}  xformers={attn.get('xformers')}  "
+        f"flash_sdp={attn.get('flash_sdp')}  mem_efficient_sdp={attn.get('mem_efficient_sdp')}"
+    )
+    print(
+        f"  comfy_vram_state={vram.get('vram_state')}  "
+        f"(ignore older cpu_offload_likely=NORMAL noise — full_load overrides)"
+    )
     print(
         f"  gpu={cuda.get('device_name')}  free_mb={cuda.get('free_mb')}/"
         f"{cuda.get('total_mb')}  alloc_mb={cuda.get('allocated_mb')}  "
@@ -341,6 +355,10 @@ def _print_sampling_diagnostics(
     )
     if mu_shift is not None:
         print(f"  timestep_shift_mu={mu_shift}  (Turbo author rec: 1.15)")
+    print(
+        "  cost drivers: dual-ref token sequence + ref_boost attn bias + 12B DiT "
+        "(not CPU↔GPU weight streaming when force_full_load=true)"
+    )
     try:
         import sys
 
@@ -510,6 +528,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
         timings: dict[str, float] = {}
 
         rt = self._ensure_runtime(timings)
+        # Install once after custom nodes are imported (quality-preserving).
+        from headswap.comfy.krea2_edit_fast import (
+            clear_krea2_edit_static_cache,
+            install_krea2_edit_static_cache,
+        )
+
+        edit_cache_info = install_krea2_edit_static_cache()
+        clear_krea2_edit_static_cache()  # fresh cache per image
         bundle = self._load_models(rt, timings)
         div_by = int(self.cfg.get("div_by", 16))
         max_dim = int(self.cfg.get("max_dim", 768))
@@ -658,9 +684,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             sampling_diag["kernels"] = kernel_info
             sampling_diag["torch_compile"] = compile_info
             sampling_diag["debug_count_unet_forwards"] = count_forwards
+            sampling_diag["edit_forward_cache"] = edit_cache_info
             print(
                 f"[krea2 kernels] actions={kernel_info.get('actions')} "
-                f"attention={kernel_info.get('attention_after', {}).get('backend')}"
+                f"attention={kernel_info.get('attention_after', {}).get('backend')} "
+                f"edit_cache={edit_cache_info.get('installed')}"
             )
 
             fwd_counter, restore_fwd = _count_unet_forwards(

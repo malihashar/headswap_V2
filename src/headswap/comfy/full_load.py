@@ -375,6 +375,7 @@ def force_sampling_full_load(
         return
 
     orig = sh.prepare_sampling
+    partial_hits = {"n": 0}
 
     def prepare_sampling_full(
         model,
@@ -394,6 +395,47 @@ def force_sampling_full_load(
             force_offload=force_offload,
         )
 
+    # Belt-and-suspenders: any load_models_gpu during sample must full-load,
+    # and partially_load must not run (that is the CPU↔GPU stream path).
+    mm = None
+    orig_load = None
+    orig_partial = None
+    patcher_cls = None
+    prev_vram_state = None
+    try:
+        import comfy.model_management as mm
+        import comfy.model_patcher as model_patcher
+
+        orig_load = mm.load_models_gpu
+
+        def load_models_gpu_full(*args, **kwargs):
+            kwargs["force_full_load"] = True
+            return orig_load(*args, **kwargs)
+
+        mm.load_models_gpu = load_models_gpu_full
+
+        patcher_cls = model_patcher.ModelPatcher
+        orig_partial = patcher_cls.partially_load
+
+        def partially_load_blocked(self, *args, **kwargs):
+            partial_hits["n"] += 1
+            raise RuntimeError(
+                "ModelPatcher.partially_load called during force_full_load sample — "
+                "refusing CPU↔GPU layer streaming"
+            )
+
+        patcher_cls.partially_load = partially_load_blocked
+
+        # Prefer HIGH_VRAM for the sample window so Comfy's heuristics do not
+        # budget for partial loads even before our prepare_sampling patch.
+        if hasattr(mm, "VRAMState") and hasattr(mm, "vram_state"):
+            prev_vram_state = mm.vram_state
+            high = getattr(mm.VRAMState, "HIGH_VRAM", None)
+            if high is not None:
+                mm.vram_state = high
+    except Exception as exc:
+        print(f"[full_load] extra residency guards skipped: {exc}")
+
     sh.prepare_sampling = prepare_sampling_full
     info["enabled"] = True
     info["force_full_load"] = True
@@ -405,7 +447,22 @@ def force_sampling_full_load(
     try:
         yield info
     finally:
+        info["partial_load_blocked_hits"] = int(partial_hits["n"])
+        if info["partial_load_blocked_hits"]:
+            print(
+                f"[full_load] WARNING: partially_load was attempted "
+                f"{info['partial_load_blocked_hits']}× during sample "
+                f"(blocked — would have been CPU↔GPU streaming)"
+            )
+        else:
+            print("[full_load] residency OK: no partially_load during sample")
         sh.prepare_sampling = orig
+        if mm is not None and orig_load is not None:
+            mm.load_models_gpu = orig_load
+        if patcher_cls is not None and orig_partial is not None:
+            patcher_cls.partially_load = orig_partial
+        if mm is not None and prev_vram_state is not None:
+            mm.vram_state = prev_vram_state
         print("[full_load] prepare_sampling patch restored")
         try:
             sys.stdout.flush()
