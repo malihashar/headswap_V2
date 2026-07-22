@@ -39,6 +39,65 @@ def _ensure_event_loop() -> asyncio.AbstractEventLoop:
     return loop
 
 
+def _allow_nested_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Jupyter/Colab already runs an event loop; nest_asyncio lets Comfy bootstrap."""
+    if not loop.is_running():
+        return
+    try:
+        import nest_asyncio
+
+        nest_asyncio.apply(loop)
+    except ImportError as exc:
+        raise RuntimeError(
+            "ComfyUI bootstrap needs nest_asyncio inside Jupyter/Colab "
+            "(event loop is already running). Install with: pip install nest_asyncio"
+        ) from exc
+
+
+def _run_until_complete(coro: Any) -> Any:
+    """
+    Run an async Comfy helper sync-style.
+
+    Plain ``loop.run_until_complete`` raises ``This event loop is already running``
+    in Colab/Jupyter. Prefer nest_asyncio; fall back to a dedicated thread loop.
+    """
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+
+    if running is not None and running.is_running():
+        try:
+            import nest_asyncio
+
+            nest_asyncio.apply(running)
+            return running.run_until_complete(coro)
+        except ImportError:
+            pass
+
+        # No nest_asyncio — isolate on a fresh loop in a worker thread.
+        import concurrent.futures
+
+        def _worker() -> Any:
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                return loop.run_until_complete(coro)
+            finally:
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:
+                    pass
+                loop.close()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_worker).result()
+
+    loop = _ensure_event_loop()
+    _allow_nested_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
 def _ensure_prompt_server(loop: asyncio.AbstractEventLoop) -> Any:
     """
     Instantiate PromptServer exactly as ComfyUI main.start_comfyui does.
@@ -91,11 +150,12 @@ def bootstrap_comfy(init_custom_nodes: bool | None = None) -> dict[str, Any]:
     os.chdir(path)
 
     loop = _ensure_event_loop()
+    _allow_nested_event_loop(loop)
     _ensure_prompt_server(loop)
 
     import nodes
 
-    loop.run_until_complete(
+    _run_until_complete(
         nodes.init_extra_nodes(init_custom_nodes=init_custom_nodes, init_api_nodes=False)
     )
     return nodes.NODE_CLASS_MAPPINGS
@@ -150,15 +210,13 @@ def invoke_node(node_cls: type, **kwargs: Any) -> Any:
         if hasattr(node_cls, "VALIDATE_CLASS"):
             node_cls.VALIDATE_CLASS()
         coro = node_cls.EXECUTE_NORMALIZED_ASYNC(**kwargs)
-        loop = _ensure_event_loop()
-        return loop.run_until_complete(coro)
+        return _run_until_complete(coro)
 
     # V1: FUNCTION is the instance method name (encode, zero_out, load_unet, ...)
     instance = node_cls()
     method = getattr(instance, func_name)
     if inspect.iscoroutinefunction(method):
-        loop = _ensure_event_loop()
-        return loop.run_until_complete(method(**kwargs))
+        return _run_until_complete(method(**kwargs))
     return method(**kwargs)
 
 

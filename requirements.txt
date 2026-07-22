@@ -9,4 +9,6 @@ huggingface_hub>=0.24.0
 # Identity scoring (ArcFace) used by the Colab quality gate
 insightface>=0.7
 onnxruntime>=1.16
+# Jupyter/Colab already has a running asyncio loop; Comfy bootstrap needs this
+nest_asyncio>=1.6
 pytest>=7.4
