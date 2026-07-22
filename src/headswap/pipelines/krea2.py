@@ -30,7 +30,16 @@ from headswap.comfy.runtime import (
 )
 from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
-from headswap.preprocess import crop_face_reference, resize_max_keep_ar
+from headswap.preprocess import (
+    crop_face_reference,
+    crop_with_mask,
+    feathered_soft_composite,
+    head_hair_mask_from_face,
+    lab_histogram_match_face,
+    pad_to_square,
+    resize_long_side,
+    resize_max_keep_ar,
+)
 
 
 @contextmanager
@@ -42,7 +51,11 @@ def _stage(timings: dict[str, float], name: str) -> Iterator[None]:
         timings[name] = timings.get(name, 0.0) + (time.perf_counter() - t0)
 
 
-def _print_timing_breakdown(timings: dict[str, float], total_s: float) -> None:
+def _print_timing_breakdown(
+    timings: dict[str, float], total_s: float, *, verbose: bool = True
+) -> None:
+    if not verbose:
+        return
     order = [
         "bootstrap",
         "model_loading",
@@ -301,8 +314,9 @@ def _print_sampling_diagnostics(
     width: int,
     height: int,
     mu_shift: float | None,
+    verbose: bool = True,
 ) -> dict:
-    """Print the sampling knobs before KSampler runs."""
+    """Collect sampling knobs before KSampler; print only when verbose."""
     attn = _attention_backend_info()
     cuda = _cuda_util_snapshot()
     vram = _comfy_vram_state()
@@ -331,6 +345,8 @@ def _print_sampling_diagnostics(
             "~3× image tokens vs T2I; attention ~O(n²) dominates on T4"
         ),
     }
+    if not verbose:
+        return diag
     print("[krea2 sampling diagnostics]")
     print(f"  configured_steps={steps}")
     print(f"  sampler={sampler}  scheduler={scheduler}")
@@ -539,10 +555,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
         bundle = self._load_models(rt, timings)
         div_by = int(self.cfg.get("div_by", 16))
         max_dim = int(self.cfg.get("max_dim", 768))
+        mask_crop_stitch = bool(self.cfg.get("mask_crop_stitch", True))
+
+        body_full: Image.Image | None = None
+        mask = None
+        box = None
+        crop_content_box: tuple[int, int, int, int] | None = None
 
         with _stage(timings, "preprocessing"):
-            # Scene = body (image 1). Person = face crop (image 2).
-            scene = resize_max_keep_ar(body.convert("RGB"), max_dim, div_by=div_by)
             face_crop = crop_face_reference(
                 face,
                 self.cache_dir,
@@ -551,7 +571,43 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 side=float(self.cfg.get("face_side_pad", 0.28)),
                 include_shoulders=bool(self.cfg.get("include_shoulders", False)),
             )
-            person = resize_max_keep_ar(face_crop.convert("RGB"), max_dim, div_by=div_by)
+            if mask_crop_stitch:
+                # Locality shell (Klein/Qwen-improved): edit head crop, stitch back.
+                # Picture 1 = body crop, Picture 2 = face — never swap order.
+                body_full = resize_max_keep_ar(
+                    body.convert("RGB"),
+                    int(self.cfg.get("max_body_dim", max_dim)),
+                    div_by=div_by,
+                )
+                mask = head_hair_mask_from_face(
+                    body_full,
+                    self.cache_dir,
+                    expand_px=int(self.cfg.get("mask_expand_px", 18)),
+                    blur_px=int(self.cfg.get("mask_blur_px", 12)),
+                    top_extend=float(self.cfg.get("mask_top_extend", 1.25)),
+                    side_extend=float(self.cfg.get("mask_side_extend", 0.60)),
+                    bot_extend=float(self.cfg.get("mask_bot_extend", 0.40)),
+                )
+                crop_img, _, box = crop_with_mask(
+                    body_full, mask, pad=12, div_by=div_by
+                )
+                crop_long = int(self.cfg.get("crop_long_side", 768))
+                scene = resize_long_side(crop_img, crop_long, div_by=div_by)
+                person = resize_long_side(
+                    face_crop.convert("RGB"), crop_long, div_by=div_by
+                )
+                if bool(self.cfg.get("square_crop", False)):
+                    scene, crop_content_box = pad_to_square(
+                        scene, fill="edge", div_by=div_by
+                    )
+            else:
+                # Full-frame path (legacy A/B). Scene = body, person = face.
+                scene = resize_max_keep_ar(
+                    body.convert("RGB"), max_dim, div_by=div_by
+                )
+                person = resize_max_keep_ar(
+                    face_crop.convert("RGB"), max_dim, div_by=div_by
+                )
 
         w, h = scene.size
         prompt = str(self.cfg.get("prompt", "") or "").strip()
@@ -566,7 +622,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
         denoise = float(self.cfg.get("denoise", 1.0))
         # Default ON: skip expensive VLM negative when CFG won't use it.
         skip_neg_vlm = bool(self.cfg.get("skip_negative_grounding", True)) and cfg <= 1.0 + 1e-6
-        save_debug = bool(self.cfg.get("save_debug", True))
+        save_debug = bool(self.cfg.get("save_debug", False))
+        verbose = bool(self.cfg.get("verbose", False))
 
         negative_mode = "grounded_vlm"
         kernel_info = _configure_fast_kernels(prefer_flash=True)
@@ -680,27 +737,30 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 width=w,
                 height=h,
                 mu_shift=mu_shift if apply_shift else None,
+                verbose=verbose,
             )
             sampling_diag["kernels"] = kernel_info
             sampling_diag["torch_compile"] = compile_info
             sampling_diag["debug_count_unet_forwards"] = count_forwards
             sampling_diag["edit_forward_cache"] = edit_cache_info
-            print(
-                f"[krea2 kernels] actions={kernel_info.get('actions')} "
-                f"attention={kernel_info.get('attention_after', {}).get('backend')} "
-                f"edit_cache={edit_cache_info.get('installed')}"
-            )
+            if verbose:
+                print(
+                    f"[krea2 kernels] actions={kernel_info.get('actions')} "
+                    f"attention={kernel_info.get('attention_after', {}).get('backend')} "
+                    f"edit_cache={edit_cache_info.get('installed')}"
+                )
 
             fwd_counter, restore_fwd = _count_unet_forwards(
                 model, enabled=count_forwards
             )
             # Snapshot outside the timed KSampler wall — mem_get_info syncs the device.
             cuda_mid = _cuda_util_snapshot()
-            print(
-                f"[krea2 sampling] pre-sample gpu alloc_mb="
-                f"{cuda_mid.get('allocated_mb')} reserved_mb="
-                f"{cuda_mid.get('reserved_mb')} free_mb={cuda_mid.get('free_mb')}"
-            )
+            if verbose:
+                print(
+                    f"[krea2 sampling] pre-sample gpu alloc_mb="
+                    f"{cuda_mid.get('allocated_mb')} reserved_mb="
+                    f"{cuda_mid.get('reserved_mb')} free_mb={cuda_mid.get('free_mb')}"
+                )
             sample_t0 = time.perf_counter()
             with _stage(timings, "diffusion_sampling"):
                 with force_sampling_full_load(
@@ -732,20 +792,32 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
             sps = f"{sec_per_step:.2f}" if sec_per_step is not None else "n/a"
             spf = f"{sec_per_fwd:.2f}" if sec_per_fwd is not None else "n/a"
-            print(
-                f"[krea2 sampling result] wall={sample_s:.2f}s  "
-                f"configured_steps={steps}  actual_unet_forwards="
-                f"{actual_forwards if count_forwards else 'skipped'}  "
-                f"sec/step≈{sps}  sec/forward≈{spf}  "
-                f"fwd_wrap_ok={fwd_counter.get('wrapped')}"
-            )
-            if count_forwards and actual_forwards > 0 and steps > 0 and actual_forwards >= steps * 2 - 1:
+            if verbose:
+                print(
+                    f"[krea2 sampling result] wall={sample_s:.2f}s  "
+                    f"configured_steps={steps}  actual_unet_forwards="
+                    f"{actual_forwards if count_forwards else 'skipped'}  "
+                    f"sec/step≈{sps}  sec/forward≈{spf}  "
+                    f"fwd_wrap_ok={fwd_counter.get('wrapped')}"
+                )
+            if (
+                verbose
+                and count_forwards
+                and actual_forwards > 0
+                and steps > 0
+                and actual_forwards >= steps * 2 - 1
+            ):
                 print(
                     "[krea2 sampling] WARNING: UNet forwards ≈ 2× steps → CFG is "
                     "likely dual-evaluating each step. Try cfg=1.0 (or 0) to keep "
                     "one forward/step."
                 )
-            if sec_per_step is not None and sec_per_step > 5.0 and not use_full_load:
+            if (
+                verbose
+                and sec_per_step is not None
+                and sec_per_step > 5.0
+                and not use_full_load
+            ):
                 print(
                     "[krea2 sampling] WARNING: >5s/step with force_full_load=false "
                     "strongly suggests CPU↔GPU weight streaming. Set force_full_load: true."
@@ -759,10 +831,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 round(sec_per_step, 4) if sec_per_step is not None else None
             )
             sampling_diag["cuda_after_sample"] = cuda_after
-            print(
-                f"[krea2 sampling] after gpu alloc_mb={cuda_after.get('allocated_mb')} "
-                f"free_mb={cuda_after.get('free_mb')}"
-            )
+            if verbose:
+                print(
+                    f"[krea2 sampling] after gpu alloc_mb={cuda_after.get('allocated_mb')} "
+                    f"free_mb={cuda_after.get('free_mb')}"
+                )
 
             with _stage(timings, "vae_decode"):
                 decoded = rt.call(
@@ -770,25 +843,54 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     samples=get_value_at_index(samples, 0),
                     vae=bundle["vae"],
                 )
-                out = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
+                edited = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
 
         with _stage(timings, "postprocessing"):
-            # No heavy post-process today; stage kept for profile completeness.
-            pass
+            out = edited
+            if (
+                mask_crop_stitch
+                and body_full is not None
+                and mask is not None
+                and box is not None
+            ):
+                edited_crop = edited
+                if crop_content_box is not None:
+                    ox, oy, cw, ch = crop_content_box
+                    edited_crop = edited_crop.crop((ox, oy, ox + cw, oy + ch))
+                stitched = feathered_soft_composite(
+                    body_full,
+                    edited_crop,
+                    mask,
+                    box,
+                    extra_blur_px=int(self.cfg.get("stitch_feather_px", 10)),
+                )
+                post_match = float(
+                    self.cfg.get("post_color_match_strength", 0.35) or 0.0
+                )
+                out = lab_histogram_match_face(
+                    stitched, body_full, mask, strength=post_match
+                )
 
         dbg = {}
         if out_dir is not None and save_debug:
             with _stage(timings, "image_saving"):
+                debug_imgs = {
+                    "debug_scene": scene,
+                    "debug_person": person,
+                    "debug_face_crop": face_crop,
+                }
+                if body_full is not None:
+                    debug_imgs["debug_body"] = body_full
+                if mask is not None:
+                    debug_imgs["debug_mask"] = mask
+                if mask_crop_stitch:
+                    debug_imgs["debug_crop"] = scene
+                    debug_imgs["debug_edited_crop"] = edited
                 dbg = {
                     k: v
                     for k, v in {
-                        "debug_scene": self._save_debug(out_dir, "debug_scene.png", scene),
-                        "debug_person": self._save_debug(
-                            out_dir, "debug_person.png", person
-                        ),
-                        "debug_face_crop": self._save_debug(
-                            out_dir, "debug_face_crop.png", face_crop
-                        ),
+                        key: self._save_debug(out_dir, f"{key}.png", img)
+                        for key, img in debug_imgs.items()
                     }.items()
                     if v
                 }
@@ -796,7 +898,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             timings.setdefault("image_saving", 0.0)
 
         total_s = time.perf_counter() - t0
-        _print_timing_breakdown(timings, total_s)
+        _print_timing_breakdown(timings, total_s, verbose=verbose)
 
         timing_rounded = {
             k: round(float(v), 4) for k, v in timings.items() if not k.startswith("_")
@@ -809,6 +911,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "prompt": prompt,
             "scene_size": list(scene.size),
             "person_size": list(person.size),
+            "body_size": list(body_full.size) if body_full is not None else list(scene.size),
+            "crop_size": list(scene.size) if mask_crop_stitch else None,
+            "mask_crop_stitch": mask_crop_stitch,
+            "square_crop": bool(self.cfg.get("square_crop", False)),
+            "stitch_feather_px": int(self.cfg.get("stitch_feather_px", 10)),
+            "post_color_match_strength": float(
+                self.cfg.get("post_color_match_strength", 0.35) or 0.0
+            ),
+            "box": list(box) if box is not None else None,
             "steps": steps,
             "cfg": cfg,
             "seed": seed,
@@ -821,15 +932,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "skip_negative_grounding": skip_neg_vlm,
             "negative_mode": negative_mode,
             "model_cache_hit": bool(timings.get("_model_cache_hit")),
+            "verbose": verbose,
             "timing_s": timing_rounded,
             "sampling_diagnostics": sampling_diag,
         }
-        print(
-            f"[krea2] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
-            f"scene={meta['scene_size']} person={meta['person_size']} "
-            f"steps={steps} cfg={cfg} ref_boost={ref_boost} "
-            f"neg={negative_mode} cache_hit={meta['model_cache_hit']}"
-        )
+        if verbose:
+            print(
+                f"[krea2] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
+                f"scene={meta['scene_size']} person={meta['person_size']} "
+                f"mask_crop={mask_crop_stitch} steps={steps} cfg={cfg} "
+                f"ref_boost={ref_boost} neg={negative_mode} "
+                f"cache_hit={meta['model_cache_hit']}"
+            )
         return PipelineResult(
             image=out,
             latency_s=total_s,

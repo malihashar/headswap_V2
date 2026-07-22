@@ -46,7 +46,8 @@ skip_negative_grounding: true
 debug_count_unet_forwards: false
 torch_compile: false
 torch_compile_mode: reduce-overhead
-save_debug: true
+save_debug: false
+verbose: false
 
 ref_boost: 4.0
 ref_boost_a: 1.0
@@ -54,6 +55,21 @@ grounding_px: 768
 fit_mode: fit
 max_dim: 768
 div_by: 16
+
+# --- Locality (mask → crop → edit → soft stitch → LAB) ---
+# Same shell as Klein promote / Qwen improved. Diffusion still Krea2 dual-ref
+# on the crop (Picture 1 = body crop, Picture 2 = face). Set false for full-frame A/B.
+mask_crop_stitch: true
+max_body_dim: 1024
+crop_long_side: 768
+square_crop: false
+mask_expand_px: 18
+mask_blur_px: 12
+mask_top_extend: 1.25
+mask_side_extend: 0.60
+mask_bot_extend: 0.40
+stitch_feather_px: 10
+post_color_match_strength: 0.35
 
 prompt: >-
   Replace the person's head and face in the first image with the person from
