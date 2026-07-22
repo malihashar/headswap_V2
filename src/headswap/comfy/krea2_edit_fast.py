@@ -18,10 +18,42 @@ which is expected for identity fidelity — we do **not** disable ref_boost.
 from __future__ import annotations
 
 import sys
+import types
 from typing import Any, Callable
 
 
 _INSTALLED = False
+_PATCHED_MODULE: Any = None
+# Explicit cache holder — never introspect __closure__ (that trips torch._classes).
+_STATIC_CACHE: dict[str, Any] = {"key": None, "payload": None}
+
+
+def _is_real_edit_module(mod: Any) -> bool:
+    if mod is None or not isinstance(mod, types.ModuleType):
+        return False
+    name = getattr(mod, "__name__", "") or ""
+    if "krea2" not in name.lower() and "krea2edit" not in name.lower():
+        # Still allow flat custom-node packages loaded as __init__ under a path.
+        file = getattr(mod, "__file__", "") or ""
+        if "krea2edit" not in file.lower() and "krea2_edit" not in file.lower():
+            return False
+    if not callable(getattr(mod, "krea2_edit_forward", None)):
+        return False
+    if not callable(getattr(mod, "_fit_src", None)):
+        return False
+    if not hasattr(mod, "Krea2EditModelPatch"):
+        return False
+    return True
+
+
+def _find_krea2edit_module() -> Any | None:
+    for mod in list(sys.modules.values()):
+        try:
+            if _is_real_edit_module(mod):
+                return mod
+        except Exception:
+            continue
+    return None
 
 
 def install_krea2_edit_static_cache() -> dict[str, Any]:
@@ -30,56 +62,37 @@ def install_krea2_edit_static_cache() -> dict[str, Any]:
 
     Safe to call multiple times. Returns status dict.
     """
-    global _INSTALLED
+    global _INSTALLED, _PATCHED_MODULE
     info: dict[str, Any] = {"installed": False, "module": None}
-    if _INSTALLED:
+    if _INSTALLED and _PATCHED_MODULE is not None:
         info["installed"] = True
         info["already"] = True
+        info["module"] = getattr(_PATCHED_MODULE, "__name__", None)
         return info
 
-    target_mod = None
-    for mod in list(sys.modules.values()):
-        fn = getattr(mod, "krea2_edit_forward", None)
-        if fn is None:
-            continue
-        if getattr(mod, "_headswap_edit_cache", False):
-            target_mod = mod
-            break
-        # Prefer the real custom-node module (has _fit_src + ModelPatch class).
-        if hasattr(mod, "_fit_src") and hasattr(mod, "Krea2EditModelPatch"):
-            target_mod = mod
-            break
-        if target_mod is None:
-            target_mod = mod
-
-    if target_mod is None or not hasattr(target_mod, "krea2_edit_forward"):
+    target_mod = _find_krea2edit_module()
+    if target_mod is None:
         info["error"] = "krea2_edit_forward_not_loaded"
         return info
 
     if getattr(target_mod, "_headswap_edit_cache", False):
         _INSTALLED = True
+        _PATCHED_MODULE = target_mod
         info["installed"] = True
         info["already"] = True
         info["module"] = getattr(target_mod, "__name__", None)
         return info
 
     orig: Callable = target_mod.krea2_edit_forward
+    if not isinstance(orig, types.FunctionType) and not callable(orig):
+        info["error"] = f"krea2_edit_forward_not_callable:{type(orig)}"
+        return info
+
     _to_4d = target_mod._to_4d
     _fit_src = target_mod._fit_src
     _imgids = target_mod._imgids
     _imgids_offset = target_mod._imgids_offset
     _ref_attn_bias = target_mod._ref_attn_bias
-
-    # Cache keyed by geometry + conditioning identity; cleared when H/W or src ids change.
-    cache: dict[str, Any] = {"key": None, "payload": None}
-
-    def _src_key(src_latent) -> tuple:
-        src_list = src_latent if isinstance(src_latent, (list, tuple)) else [src_latent]
-        keys = []
-        for sl in src_list:
-            t = _to_4d(sl)
-            keys.append((id(t), tuple(t.shape), str(t.dtype), str(t.device)))
-        return tuple(keys)
 
     def cached_forward(
         m,
@@ -112,16 +125,23 @@ def install_krea2_edit_static_cache() -> dict[str, Any]:
         H, W = x.shape[-2], x.shape[-1]
         h_, w_ = H // patch, W // patch
 
-        # Timestep-invariant cache key (conditioning + refs + geometry + boosts).
         try:
             ctx_ptr = int(context.data_ptr())
         except Exception:
             ctx_ptr = id(context)
-        ctx_id = (
-            id(context),
-            tuple(context.shape) if hasattr(context, "shape") else None,
-            ctx_ptr,
-        )
+
+        def _src_key(src_latent_inner) -> tuple:
+            src_list = (
+                src_latent_inner
+                if isinstance(src_latent_inner, (list, tuple))
+                else [src_latent_inner]
+            )
+            keys = []
+            for sl in src_list:
+                t = _to_4d(sl)
+                keys.append((id(t), tuple(t.shape), str(t.dtype), str(t.device)))
+            return tuple(keys)
+
         key = (
             id(m),
             H,
@@ -134,10 +154,12 @@ def install_krea2_edit_static_cache() -> dict[str, Any]:
             float(ref_boost_a),
             id(ref_boost_mask) if ref_boost_mask is not None else None,
             _src_key(src_latent),
-            ctx_id,
+            (id(context), tuple(context.shape) if hasattr(context, "shape") else None, ctx_ptr),
         )
 
-        payload = cache["payload"] if cache["key"] == key else None
+        payload = (
+            _STATIC_CACHE["payload"] if _STATIC_CACHE["key"] == key else None
+        )
         if payload is None:
             src_list = (
                 src_latent if isinstance(src_latent, (list, tuple)) else [src_latent]
@@ -172,9 +194,7 @@ def install_krea2_edit_static_cache() -> dict[str, Any]:
             ctx = m.txtmlp(ctx)
 
             txtlen = ctx.shape[1]
-            # tgtlen depends on current x grid — known from h_,w_
             tgtlen = h_ * w_
-            srclen = sum(si.shape[1] for si in src_imgs)
 
             if pos_mode == "stride1" and ref_native:
                 ref_ids = [
@@ -197,7 +217,6 @@ def install_krea2_edit_static_cache() -> dict[str, Any]:
             attn_bias = None
             if ref_boost != 1.0 or ref_boost_a != 1.0:
                 boosts = [ref_boost_a] * (len(src_imgs) - 1) + [ref_boost]
-                # dtype follows activations; use x.dtype as stand-in until combined exists
                 attn_bias = _ref_attn_bias(
                     boosts,
                     ref_boost_mask,
@@ -212,14 +231,13 @@ def install_krea2_edit_static_cache() -> dict[str, Any]:
             payload = {
                 "context": ctx,
                 "src_imgs": src_imgs,
-                "src_grids": src_grids,
                 "txtlen": txtlen,
-                "srclen": srclen,
+                "srclen": sum(si.shape[1] for si in src_imgs),
                 "freqs": freqs,
                 "attn_bias": attn_bias,
             }
-            cache["key"] = key
-            cache["payload"] = payload
+            _STATIC_CACHE["key"] = key
+            _STATIC_CACHE["payload"] = payload
 
         context_c = payload["context"]
         src_imgs = payload["src_imgs"]
@@ -239,7 +257,6 @@ def install_krea2_edit_static_cache() -> dict[str, Any]:
         tvec = m.tproj(t)
 
         combined = torch.cat([context_c] + src_imgs + [tgt_img], dim=1)
-        # If bias was built with a different dtype than combined, cast once (rare).
         if attn_bias is not None and attn_bias.dtype != combined.dtype:
             attn_bias = attn_bias.to(dtype=combined.dtype)
             payload["attn_bias"] = attn_bias
@@ -272,7 +289,10 @@ def install_krea2_edit_static_cache() -> dict[str, Any]:
     cached_forward._headswap_orig = orig  # type: ignore[attr-defined]
     target_mod.krea2_edit_forward = cached_forward
     target_mod._headswap_edit_cache = True
+    _PATCHED_MODULE = target_mod
     _INSTALLED = True
+    _STATIC_CACHE["key"] = None
+    _STATIC_CACHE["payload"] = None
     info["installed"] = True
     info["module"] = getattr(target_mod, "__name__", None)
     print(f"[krea2] static edit-forward cache installed on {info['module']}")
@@ -281,19 +301,5 @@ def install_krea2_edit_static_cache() -> dict[str, Any]:
 
 def clear_krea2_edit_static_cache() -> None:
     """Drop cached tensors (e.g. between images). Patch stays installed."""
-    for mod in list(sys.modules.values()):
-        fn = getattr(mod, "krea2_edit_forward", None)
-        if fn is None:
-            continue
-        # Reach into closure cache if present
-        cell = getattr(fn, "__closure__", None)
-        if not cell:
-            continue
-        for c in cell:
-            try:
-                obj = c.cell_contents
-            except ValueError:
-                continue
-            if isinstance(obj, dict) and "payload" in obj and "key" in obj:
-                obj["key"] = None
-                obj["payload"] = None
+    _STATIC_CACHE["key"] = None
+    _STATIC_CACHE["payload"] = None
