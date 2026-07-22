@@ -6,4 +6,7 @@ tqdm>=4.66
 requests>=2.31
 # Colab setup forces HF_HUB_DISABLE_XET=1; do not install hf_xet for large downloads there.
 huggingface_hub>=0.24.0
+# Identity scoring (ArcFace) used by the Colab quality gate
+insightface>=0.7
+onnxruntime>=1.16
 pytest>=7.4
