@@ -39,62 +39,53 @@ def _ensure_event_loop() -> asyncio.AbstractEventLoop:
     return loop
 
 
-def _allow_nested_event_loop(loop: asyncio.AbstractEventLoop) -> None:
-    """Jupyter/Colab already runs an event loop; nest_asyncio lets Comfy bootstrap."""
-    if not loop.is_running():
-        return
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    """Return the active loop if one is already running (Jupyter/Colab)."""
     try:
-        import nest_asyncio
-
-        nest_asyncio.apply(loop)
-    except ImportError as exc:
-        raise RuntimeError(
-            "ComfyUI bootstrap needs nest_asyncio inside Jupyter/Colab "
-            "(event loop is already running). Install with: pip install nest_asyncio"
-        ) from exc
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    return loop if loop.is_running() else None
 
 
 def _run_until_complete(coro: Any) -> Any:
     """
     Run an async Comfy helper sync-style.
 
-    Plain ``loop.run_until_complete`` raises ``This event loop is already running``
-    in Colab/Jupyter. Prefer nest_asyncio; fall back to a dedicated thread loop.
+    Colab/Jupyter already has a running event loop, so
+    ``loop.run_until_complete`` raises ``This event loop is already running``.
+    nest_asyncio is unreliable across ipykernel versions, so when a loop is
+    already running we always execute the coroutine on a fresh loop in a
+    dedicated worker thread.
     """
-    try:
-        running = asyncio.get_running_loop()
-    except RuntimeError:
-        running = None
-
-    if running is not None and running.is_running():
-        try:
-            import nest_asyncio
-
-            nest_asyncio.apply(running)
-            return running.run_until_complete(coro)
-        except ImportError:
-            pass
-
-        # No nest_asyncio — isolate on a fresh loop in a worker thread.
+    if _running_loop() is not None:
         import concurrent.futures
 
-        def _worker() -> Any:
+        result: dict[str, Any] = {}
+        error: dict[str, BaseException] = {}
+
+        def _worker() -> None:
             loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                asyncio.set_event_loop(loop)
-                return loop.run_until_complete(coro)
+                result["value"] = loop.run_until_complete(coro)
+            except BaseException as exc:  # noqa: BLE001 — re-raise on main thread
+                error["exc"] = exc
             finally:
                 try:
                     loop.run_until_complete(loop.shutdown_asyncgens())
                 except Exception:
                     pass
+                asyncio.set_event_loop(None)
                 loop.close()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(_worker).result()
+            pool.submit(_worker).result()
+        if "exc" in error:
+            raise error["exc"]
+        return result["value"]
 
     loop = _ensure_event_loop()
-    _allow_nested_event_loop(loop)
     return loop.run_until_complete(coro)
 
 
@@ -149,16 +140,41 @@ def bootstrap_comfy(init_custom_nodes: bool | None = None) -> dict[str, Any]:
     sys.path.insert(0, str(path))
     os.chdir(path)
 
+    def _boot_on_loop(loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
+        _ensure_prompt_server(loop)
+        import nodes
+
+        loop.run_until_complete(
+            nodes.init_extra_nodes(
+                init_custom_nodes=init_custom_nodes, init_api_nodes=False
+            )
+        )
+        return nodes.NODE_CLASS_MAPPINGS
+
+    # Jupyter/Colab: never touch the running kernel loop.
+    if _running_loop() is not None:
+        import concurrent.futures
+
+        result: dict[str, Any] = {}
+        error: dict[str, BaseException] = {}
+
+        def _worker() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result["mappings"] = _boot_on_loop(loop)
+            except BaseException as exc:  # noqa: BLE001
+                error["exc"] = exc
+            # Leave loop open — PromptServer keeps a reference to it.
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_worker).result()
+        if "exc" in error:
+            raise error["exc"]
+        return result["mappings"]
+
     loop = _ensure_event_loop()
-    _allow_nested_event_loop(loop)
-    _ensure_prompt_server(loop)
-
-    import nodes
-
-    _run_until_complete(
-        nodes.init_extra_nodes(init_custom_nodes=init_custom_nodes, init_api_nodes=False)
-    )
-    return nodes.NODE_CLASS_MAPPINGS
+    return _boot_on_loop(loop)
 
 
 def invoke_node(node_cls: type, **kwargs: Any) -> Any:
