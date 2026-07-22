@@ -5,23 +5,22 @@ pipeline: krea2
 # Scene = body (Picture 1), person = face (Picture 2) — fixed training order.
 # Requires: comfyui-krea2edit custom nodes + recent ComfyUI (CLIP type krea2).
 #
-# Latency notes (Kaggle T4):
-#   - Official Turbo sweet spot is 8 steps (was 10).
-#   - At cfg=1.0 the negative VLM encode is skipped (unused by CFG) — big win.
-#   - First call pays Comfy bootstrap + weight load; reuse the same Python process
-#     for a second image to measure warm latency (models stay in rt.models).
-#   - T4 may still OOM at 768 — then try max_dim 640.
+# === Sampling latency (T4) ===
+# Profile showed ~160s in diffusion alone with force_full_load=false — that is
+# Comfy NORMAL_VRAM streaming UNet weights CPU↔GPU every step (~20s/step).
+# force_full_load=true keeps the UNet fully on GPU during KSampler (CLIP is
+# unloaded first). Quality unchanged; residency only.
+#
+# Author Turbo rec: 8 steps, CFG disabled (0) for pure T2I.
+# Identity-Edit LoRA rec: Turbo 8–12 steps, CFG 1.0 — we keep cfg=1.0.
 unet_name: krea2_turbo_fp8_scaled.safetensors
 clip_name: qwen3vl_4b_fp8_scaled.safetensors
 clip_type: krea2
 vae_name: qwen_image_vae.safetensors
 
-# Rank-64 LoRA (~0.4 GiB) for T4; swap to full v1_2 via --include-optional download.
 identity_lora_name: krea2_identity_edit_v1_2_r64.safetensors
 identity_lora_strength: 1.0
 
-# Turbo distilled: 8 steps is the official / workflow-recommended fast path.
-# (10 was "balanced"; 12 = more face detail. Quality priority keeps cfg=1.0.)
 steps: 8
 cfg: 1.0
 sampler: euler
@@ -29,18 +28,23 @@ scheduler: simple
 seed: 46
 denoise: 1.0
 
-# Skip Qwen3-VL grounded negative when cfg<=1 (KSampler ignores it).
+# Match Turbo distilled timestep shift (mu=1.15) when ModelSamplingFlux exists.
+apply_timestep_shift: true
+timestep_shift_mu: 1.15
+timestep_base_shift: 0.5
+
+# REQUIRED for T4 speed — without this, expect ~10–30s per denoising step.
+force_full_load: true
+
 skip_negative_grounding: true
 save_debug: true
 
-# Two-image identity edit knobs (see comfyui-krea2edit README).
 ref_boost: 4.0
 ref_boost_a: 1.0
 grounding_px: 768
 fit_mode: fit
 max_dim: 768
 div_by: 16
-force_full_load: false
 
 prompt: >-
   Replace the person's head and face in the first image with the person from

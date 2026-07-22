@@ -71,6 +71,179 @@ def _print_timing_breakdown(timings: dict[str, float], total_s: float) -> None:
         print(f"  {'other':<28} {other:7.2f}s  ({pct:5.1f}%)")
 
 
+def _attention_backend_info() -> dict:
+    """Detect which PyTorch SDPA / xFormers path is active."""
+    info: dict = {
+        "xformers": False,
+        "flash_sdp": None,
+        "mem_efficient_sdp": None,
+        "math_sdp": None,
+        "backend": "unknown",
+    }
+    try:
+        import torch
+
+        if hasattr(torch.backends.cuda, "flash_sdp_enabled"):
+            info["flash_sdp"] = bool(torch.backends.cuda.flash_sdp_enabled())
+            info["mem_efficient_sdp"] = bool(torch.backends.cuda.mem_efficient_sdp_enabled())
+            info["math_sdp"] = bool(torch.backends.cuda.math_sdp_enabled())
+        try:
+            import xformers  # type: ignore
+
+            info["xformers"] = True
+            info["xformers_version"] = getattr(xformers, "__version__", "?")
+        except Exception:
+            info["xformers"] = False
+
+        if info["xformers"]:
+            info["backend"] = "xformers"
+        elif info["flash_sdp"]:
+            info["backend"] = "flash_sdp"
+        elif info["mem_efficient_sdp"]:
+            info["backend"] = "mem_efficient_sdp"
+        elif info["math_sdp"]:
+            info["backend"] = "math_sdp"
+        else:
+            info["backend"] = "pytorch_default"
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
+
+
+def _cuda_util_snapshot() -> dict:
+    out: dict = {
+        "cuda_available": False,
+        "device_name": None,
+        "free_mb": None,
+        "total_mb": None,
+        "allocated_mb": None,
+        "reserved_mb": None,
+    }
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return out
+        out["cuda_available"] = True
+        out["device_name"] = torch.cuda.get_device_name(0)
+        free_b, total_b = torch.cuda.mem_get_info()
+        out["free_mb"] = round(free_b / (1024**2), 1)
+        out["total_mb"] = round(total_b / (1024**2), 1)
+        out["allocated_mb"] = round(torch.cuda.memory_allocated() / (1024**2), 1)
+        out["reserved_mb"] = round(torch.cuda.memory_reserved() / (1024**2), 1)
+    except Exception as exc:
+        out["error"] = str(exc)
+    return out
+
+
+def _comfy_vram_state() -> dict:
+    info: dict = {"vram_state": None, "lowvram": None, "cpu_offload_likely": None}
+    try:
+        import comfy.model_management as mm
+
+        state = getattr(mm, "vram_state", None)
+        info["vram_state"] = str(state)
+        # NORMAL_VRAM / LOW_VRAM / HIGH_VRAM enum-ish
+        name = str(state)
+        info["lowvram"] = "LOW" in name or "NO_VRAM" in name
+        info["cpu_offload_likely"] = info["lowvram"] or "NORMAL" in name
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
+
+
+def _print_sampling_diagnostics(
+    *,
+    steps: int,
+    cfg: float,
+    sampler: str,
+    scheduler: str,
+    force_full_load: bool,
+    denoise: float,
+    width: int,
+    height: int,
+    mu_shift: float | None,
+) -> dict:
+    """Print the sampling knobs the user asked for before KSampler runs."""
+    attn = _attention_backend_info()
+    cuda = _cuda_util_snapshot()
+    vram = _comfy_vram_state()
+    # At cfg<=1 Comfy's optimized path should be ~1 UNet eval/step; cfg>1 ≈ 2×.
+    unet_evals_est = steps if cfg <= 1.0 + 1e-6 else steps * 2
+    diag = {
+        "configured_steps": steps,
+        "scheduler": scheduler,
+        "sampler": sampler,
+        "cfg": cfg,
+        "denoise": denoise,
+        "force_full_load": force_full_load,
+        "cpu_offload_likely_without_full_load": (not force_full_load),
+        "estimated_unet_evals": unet_evals_est,
+        "attention": attn,
+        "cuda_before_sample": cuda,
+        "comfy_vram": vram,
+        "resolution": [width, height],
+        "timestep_shift_mu": mu_shift,
+    }
+    print("[krea2 sampling diagnostics]")
+    print(f"  configured_steps={steps}  (verify progress bar ends at {steps}/{steps})")
+    print(f"  sampler={sampler}  scheduler={scheduler}")
+    print(f"  cfg={cfg}  denoise={denoise}  estimated_unet_evals/step_budget≈{unet_evals_est}")
+    print(
+        f"  force_full_load={force_full_load}  "
+        f"(False ⇒ Comfy may stream UNet layers CPU↔GPU every step — classic ~10–30s/step)"
+    )
+    print(f"  attention_backend={attn.get('backend')}  xformers={attn.get('xformers')}  "
+          f"flash_sdp={attn.get('flash_sdp')}  mem_efficient_sdp={attn.get('mem_efficient_sdp')}")
+    print(f"  comfy_vram_state={vram.get('vram_state')}  cpu_offload_likely={vram.get('cpu_offload_likely')}")
+    print(
+        f"  gpu={cuda.get('device_name')}  free_mb={cuda.get('free_mb')}/"
+        f"{cuda.get('total_mb')}  alloc_mb={cuda.get('allocated_mb')}  "
+        f"reserved_mb={cuda.get('reserved_mb')}"
+    )
+    if mu_shift is not None:
+        print(f"  timestep_shift_mu={mu_shift}  (Turbo author rec: 1.15)")
+    try:
+        import sys
+
+        sys.stdout.flush()
+    except Exception:
+        pass
+    return diag
+
+
+def _count_unet_forwards(model, enabled: bool = True):
+    """Wrap diffusion forward to count real UNet evaluations during KSampler."""
+    counter = {"n": 0, "wrapped": False}
+    if not enabled:
+        return counter, None
+
+    # ModelPatcher → .model (BaseModel) → .diffusion_model (nn.Module)
+    try:
+        inner = model
+        dm = None
+        if hasattr(inner, "model"):
+            base = inner.model
+            dm = getattr(base, "diffusion_model", None) or getattr(base, "model", None)
+        if dm is None or not hasattr(dm, "forward"):
+            return counter, None
+        orig = dm.forward
+
+        def counted_forward(*args, **kwargs):
+            counter["n"] += 1
+            return orig(*args, **kwargs)
+
+        dm.forward = counted_forward
+        counter["wrapped"] = True
+
+        def restore():
+            dm.forward = orig
+
+        return counter, restore
+    except Exception:
+        return counter, None
+
+
 class Krea2IdentityEditPipeline(BasePipeline):
     name = "krea2_identity_edit"
 
@@ -292,22 +465,105 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 latent = get_value_at_index(scene_lat, 0)
                 empty_node = "scene_latent_fallback"
 
-            use_full_load = bool(self.cfg.get("force_full_load", False))
+            # Turbo author rec: mu=1.15. Apply Flux-style shift when available so
+            # the 8-step schedule matches distilled training (quality, not speed).
+            mu_shift = float(self.cfg.get("timestep_shift_mu", 1.15) or 1.15)
+            apply_shift = bool(self.cfg.get("apply_timestep_shift", True))
+            if apply_shift and rt.has("ModelSamplingFlux"):
+                model = get_value_at_index(
+                    rt.call(
+                        "ModelSamplingFlux",
+                        model=model,
+                        max_shift=mu_shift,
+                        base_shift=float(self.cfg.get("timestep_base_shift", 0.5) or 0.5),
+                        width=w,
+                        height=h,
+                    ),
+                    0,
+                )
+            elif apply_shift:
+                mu_shift = None  # node missing — report in diagnostics
+
+            # CRITICAL: without force_full_load, NORMAL_VRAM partially loads the
+            # ~12GB UNet and streams layers CPU↔GPU every denoising step
+            # (~10–30s/step on T4 → ~160s for 8 steps). Full residency keeps
+            # weights on GPU for the sample only (CLIP already freed).
+            use_full_load = bool(self.cfg.get("force_full_load", True))
+            sampler_name = str(self.cfg.get("sampler", "euler"))
+            scheduler_name = str(self.cfg.get("scheduler", "simple"))
+
+            sampling_diag = _print_sampling_diagnostics(
+                steps=steps,
+                cfg=cfg,
+                sampler=sampler_name,
+                scheduler=scheduler_name,
+                force_full_load=use_full_load,
+                denoise=denoise,
+                width=w,
+                height=h,
+                mu_shift=mu_shift if apply_shift else None,
+            )
+
+            fwd_counter, restore_fwd = _count_unet_forwards(model, enabled=True)
+            sample_t0 = time.perf_counter()
             with _stage(timings, "diffusion_sampling"):
                 with force_sampling_full_load(models=(model,), enabled=use_full_load):
+                    cuda_mid = _cuda_util_snapshot()
+                    print(
+                        f"[krea2 sampling] mid-sample gpu alloc_mb="
+                        f"{cuda_mid.get('allocated_mb')} reserved_mb="
+                        f"{cuda_mid.get('reserved_mb')} free_mb={cuda_mid.get('free_mb')}"
+                    )
                     samples = rt.call(
                         "KSampler",
                         model=model,
                         seed=seed,
                         steps=steps,
                         cfg=cfg,
-                        sampler_name=str(self.cfg.get("sampler", "euler")),
-                        scheduler=str(self.cfg.get("scheduler", "simple")),
+                        sampler_name=sampler_name,
+                        scheduler=scheduler_name,
                         positive=positive,
                         negative=negative,
                         latent_image=latent,
                         denoise=denoise,
                     )
+            sample_s = time.perf_counter() - sample_t0
+            if restore_fwd is not None:
+                restore_fwd()
+
+            actual_forwards = int(fwd_counter.get("n") or 0)
+            sec_per_step = (sample_s / steps) if steps > 0 else None
+            sec_per_fwd = (sample_s / actual_forwards) if actual_forwards > 0 else None
+            sps = f"{sec_per_step:.2f}" if sec_per_step is not None else "n/a"
+            spf = f"{sec_per_fwd:.2f}" if sec_per_fwd is not None else "n/a"
+            print(
+                f"[krea2 sampling result] wall={sample_s:.2f}s  "
+                f"configured_steps={steps}  actual_unet_forwards={actual_forwards}  "
+                f"sec/step≈{sps}  sec/forward≈{spf}  "
+                f"fwd_wrap_ok={fwd_counter.get('wrapped')}"
+            )
+            if actual_forwards > 0 and steps > 0 and actual_forwards >= steps * 2 - 1:
+                print(
+                    "[krea2 sampling] WARNING: UNet forwards ≈ 2× steps → CFG is "
+                    "likely dual-evaluating each step. Try cfg=1.0 (or 0) to keep "
+                    "one forward/step."
+                )
+            if sec_per_step is not None and sec_per_step > 5.0 and not use_full_load:
+                print(
+                    "[krea2 sampling] WARNING: >5s/step with force_full_load=false "
+                    "strongly suggests CPU↔GPU weight streaming. Set force_full_load: true."
+                )
+            cuda_after = _cuda_util_snapshot()
+            sampling_diag["actual_unet_forwards"] = actual_forwards
+            sampling_diag["sample_wall_s"] = round(sample_s, 4)
+            sampling_diag["sec_per_step"] = (
+                round(sec_per_step, 4) if sec_per_step is not None else None
+            )
+            sampling_diag["cuda_after_sample"] = cuda_after
+            print(
+                f"[krea2 sampling] after gpu alloc_mb={cuda_after.get('allocated_mb')} "
+                f"free_mb={cuda_after.get('free_mb')}"
+            )
 
             with _stage(timings, "vae_decode"):
                 decoded = rt.call(
@@ -367,6 +623,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "negative_mode": negative_mode,
             "model_cache_hit": bool(timings.get("_model_cache_hit")),
             "timing_s": timing_rounded,
+            "sampling_diagnostics": sampling_diag,
         }
         print(
             f"[krea2] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
