@@ -111,6 +111,33 @@ def _detach_patcher(patcher: Any) -> str:
     return "no_detach_api"
 
 
+def _scrub_broken_loaded_models(mm: Any) -> int:
+    """
+    Drop LoadedModel entries whose weakref/real_model is already gone.
+
+    After a failed detach under torch.inference_mode, Comfy can leave entries
+    where ``real_model`` is None (not a weakref). Later ``cleanup_models_gc``
+    then crashes with ``'NoneType' object is not callable``.
+    """
+    kept: list[Any] = []
+    dropped = 0
+    for lm in list(getattr(mm, "current_loaded_models", []) or []):
+        try:
+            rm = getattr(lm, "real_model", None)
+            if rm is None or not callable(rm):
+                dropped += 1
+                continue
+            # Touch is_dead so we detect half-detached entries early.
+            if hasattr(lm, "is_dead") and lm.is_dead():
+                dropped += 1
+                continue
+            kept.append(lm)
+        except Exception:
+            dropped += 1
+    mm.current_loaded_models[:] = kept
+    return dropped
+
+
 def _force_unload_matching_loaded_models(mm: Any, patchers: list[Any]) -> int:
     """
     Fully unload LoadedModel entries that wrap our patchers.
@@ -195,48 +222,61 @@ def offload_gpu_models(
         return info
 
     try:
+        import gc
+
+        import torch
+
         device = mm.get_torch_device()
         info["comfy_free_mb_before"] = _free_mb(mm, device)
+        info["n_scrubbed_before"] = _scrub_broken_loaded_models(mm)
         info["loaded_before"] = _loaded_models_snapshot(mm)
 
-        # 1) Registry-aware unload of the specific sampling patchers / clones.
-        if patcher_list and hasattr(mm, "unload_model_and_clones"):
+        # Detach/unload must NOT run under inference_mode (version_counter).
+        # Exit any ambient inference_mode for the duration of this cleanup.
+        with torch.inference_mode(False):
+            # 1) Registry-aware unload of the specific sampling patchers / clones.
+            if patcher_list and hasattr(mm, "unload_model_and_clones"):
+                for p in patcher_list:
+                    try:
+                        mm.unload_model_and_clones(p)
+                    except Exception as exc:
+                        print(f"[full_load] unload_model_and_clones warning: {exc}")
+                info["api"] = "unload_model_and_clones+detach"
+
+            # 2) Force full LoadedModel.model_unload() for matching registry entries.
+            info["n_forced_loadedmodel_unloads"] = _force_unload_matching_loaded_models(
+                mm, patcher_list
+            )
+
+            # 3) Always detach the patchers we own — covers the case where the UNet
+            #    is no longer in current_loaded_models but weights remain on GPU.
             for p in patcher_list:
                 try:
-                    mm.unload_model_and_clones(p)
+                    info["patcher_detach"].append(
+                        {"patcher_id": id(p), "method": _detach_patcher(p)}
+                    )
                 except Exception as exc:
-                    print(f"[full_load] unload_model_and_clones warning: {exc}")
-            info["api"] = "unload_model_and_clones+detach"
+                    info["patcher_detach"].append(
+                        {"patcher_id": id(p), "error": str(exc)}
+                    )
 
-        # 2) Force full LoadedModel.model_unload() for matching registry entries.
-        info["n_forced_loadedmodel_unloads"] = _force_unload_matching_loaded_models(
-            mm, patcher_list
-        )
+            # 4) Mop up anything else still registered (CLIP/VAE leftovers, etc.).
+            if hasattr(mm, "unload_all_models"):
+                mm.unload_all_models()
+                info["api"] = (info.get("api") or "unload_all_models") + "+unload_all_models"
+            else:
+                mm.free_memory(1e30, device)
+                info["api"] = (info.get("api") or "free_memory") + "+free_memory"
 
-        # 3) Always detach the patchers we own — covers the case where the UNet
-        #    is no longer in current_loaded_models but weights remain on GPU.
-        for p in patcher_list:
-            try:
-                info["patcher_detach"].append(
-                    {"patcher_id": id(p), "method": _detach_patcher(p)}
-                )
-            except Exception as exc:
-                info["patcher_detach"].append(
-                    {"patcher_id": id(p), "error": str(exc)}
-                )
+            info["n_scrubbed_after"] = _scrub_broken_loaded_models(mm)
 
-        # 4) Mop up anything else still registered (CLIP/VAE leftovers, etc.).
-        if hasattr(mm, "unload_all_models"):
-            mm.unload_all_models()
-            info["api"] = (info.get("api") or "unload_all_models") + "+unload_all_models"
-        else:
-            mm.free_memory(1e30, device)
-            info["api"] = (info.get("api") or "free_memory") + "+free_memory"
-
-        # soft_empty_cache is what free_memory runs after a real unload — needed
-        # so reserved CUDA blocks from the fully-resident UNet return to the driver.
-        if hasattr(mm, "soft_empty_cache"):
-            mm.soft_empty_cache()
+            # soft_empty_cache is what free_memory runs after a real unload — needed
+            # so reserved CUDA blocks from the fully-resident UNet return to the driver.
+            if hasattr(mm, "soft_empty_cache"):
+                mm.soft_empty_cache()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         info["comfy_free_mb_after"] = _free_mb(mm, device)
         info["loaded_after"] = _loaded_models_snapshot(mm)
@@ -252,6 +292,7 @@ def offload_gpu_models(
             f"cuda_reserved_mb {info.get('before_cuda_reserved_mb')} → {info.get('after_cuda_reserved_mb')} | "
             f"loaded_models {len(info['loaded_before'])} → {len(info['loaded_after'])} | "
             f"forced_unloads={info['n_forced_loadedmodel_unloads']} "
+            f"scrubbed={info.get('n_scrubbed_before', 0)}+{info.get('n_scrubbed_after', 0)} "
             f"detach={info['patcher_detach']}"
         )
         try:
@@ -261,6 +302,16 @@ def offload_gpu_models(
     except Exception as exc:
         info["error"] = str(exc)
         print(f"[full_load] offload warning ({reason}): {exc}")
+        # Last-ditch: drop broken registry entries so VAEDecode's cleanup_models_gc
+        # does not crash on None real_model.
+        try:
+            n = _scrub_broken_loaded_models(mm)
+            if n:
+                print(f"[full_load] scrubbed {n} broken LoadedModel entries after failure")
+            if hasattr(mm, "soft_empty_cache"):
+                mm.soft_empty_cache()
+        except Exception as scrub_exc:
+            print(f"[full_load] scrub fallback failed: {scrub_exc}")
     return info
 
 

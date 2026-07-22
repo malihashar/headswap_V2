@@ -548,8 +548,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
         torch_compile = bool(self.cfg.get("torch_compile", False))
         compile_mode = str(self.cfg.get("torch_compile_mode", "reduce-overhead"))
 
-        # inference_mode disables autograd + version counters (faster than no_grad).
-        with torch.inference_mode():
+        # Use no_grad — NOT inference_mode. Comfy ModelPatcher.detach / unload
+        # mutates tensor version counters; inference tensors raise
+        # "Cannot set version_counter for inference tensor", leave the UNet on
+        # GPU, then VAEDecode dies with broken LoadedModel.real_model.
+        with torch.no_grad():
             scene_t = pil_to_comfy_tensor(scene, torch)
             person_t = pil_to_comfy_tensor(person, torch)
 
