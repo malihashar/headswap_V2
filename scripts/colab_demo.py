@@ -443,6 +443,10 @@ def environment_summary(
     paths: dict[str, Path] | None = None,
     versions: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
+    # Back-compat kwargs from earlier notebook cells
+    seed: int | None = None,
+    stitch: bool | None = None,
+    debug: bool | None = None,
 ) -> dict[str, Any]:
     if versions is None:
         versions = collect_versions(
@@ -450,8 +454,16 @@ def environment_summary(
             comfyui=(paths or {}).get("comfyui"),
         )
     print_versions(versions)
-    if params:
-        print_run_parameters(params)
+    # Merge legacy kwargs into params if the notebook still passes seed=/stitch=/debug=
+    merged = dict(params or {})
+    if seed is not None:
+        merged.setdefault("seed", seed)
+    if stitch is not None:
+        merged.setdefault("stitch", stitch)
+    if debug is not None:
+        merged.setdefault("debug", debug)
+    if merged:
+        print_run_parameters(merged)
     store = Path(
         (paths or {}).get("model_store")
         or os.environ.get("HEADSWAP_MODEL_STORE", "/content/models")
@@ -460,7 +472,7 @@ def environment_summary(
     present = sum(1 for p in models if p.is_file())
     print(f"  model_store       {store}")
     print(f"  models_present    {present}/{len(models)}")
-    return {"versions": versions, "params": params or {}, "model_store": str(store)}
+    return {"versions": versions, "params": merged, "model_store": str(store)}
 
 
 def preflight(
