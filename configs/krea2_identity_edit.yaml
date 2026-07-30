@@ -49,8 +49,8 @@ torch_compile_mode: reduce-overhead
 save_debug: false
 verbose: false
 
-ref_boost: 4.0
-ref_boost_a: 1.0
+ref_boost: 3.5
+ref_boost_a: 1.6
 grounding_px: 768
 fit_mode: fit
 max_dim: 768
@@ -91,15 +91,17 @@ prompt: >-
   Replace the person's head and face in the first image with the person from
   the second image. Preserve the exact facial identity of the second person —
   bone structure, jawline, eyebrows, eyes, nose, mouth, hairline, and skin.
-  Keep the facial expression, mouth shape, smile/no-smile, eye gaze direction,
-  and micro-expressions from the first image — do not copy the second person's
-  expression. Keep the body, clothing, pose, head rotation, camera angle,
-  lighting, and background from the first image. Match the original head size
-  and neck seam — do not enlarge the head. Use face identity only from the
-  second image; do not copy clothing, collar, bowtie, or shoulders from the
-  second image. If other people are visible, leave them completely unchanged.
-  Remove the original face and glasses from the first person. Photorealistic,
-  natural skin texture, sharp details.
+  CRITICAL: copy the facial expression from the first image exactly — if they
+  are smiling, the result must smile the same way; if they are not smiling,
+  do not add a smile. Keep mouth shape, smile/no-smile, eye gaze, and
+  micro-expressions from the first image only — never from the second image.
+  Keep the body, clothing, pose, head rotation, camera angle, lighting, and
+  background from the first image. Match the original head size and neck seam —
+  do not enlarge the head. Use face identity only from the second image; do not
+  copy clothing, collar, bowtie, or shoulders from the second image. If other
+  people are visible, leave them completely unchanged. Remove the original face
+  and glasses from the first person. Photorealistic, natural skin texture,
+  sharp details, lighting matched to the first image.
 
 negative_prompt: ""
 
