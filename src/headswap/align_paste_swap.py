@@ -214,10 +214,16 @@ def run_align_paste_swap(
             )
 
     refined_crop = composite_crop
+    raw_refined_crop: Image.Image | None = None
     refine_meta: dict[str, Any] = {"refine_applied": False}
     if refine_fn is not None and bool(paste_info.get("composite_paste")):
         try:
-            refined_crop = refine_fn(composite_crop, id_matte, face_mask_crop)
+            refined_out = refine_fn(composite_crop, id_matte, face_mask_crop)
+            # refine_fn may return (blended, raw_edited) for debug, or a single image.
+            if isinstance(refined_out, tuple) and len(refined_out) == 2:
+                refined_crop, raw_refined_crop = refined_out
+            else:
+                refined_crop = refined_out
             refine_meta["refine_applied"] = True
         except Exception as exc:  # noqa: BLE001 — fall back to paste
             refine_meta["refine_error"] = str(exc)
@@ -225,6 +231,7 @@ def run_align_paste_swap(
 
     # Lock looking direction / head yaw back onto the original crop landmarks.
     # Generative refine often front-faces the identity; re-align fixes that.
+    pose_before = refined_crop
     pose_meta: dict[str, Any] = {"pose_relock": False}
     if bool(cfg.get("align_paste_pose_relock", True)) and bool(
         paste_info.get("composite_paste")
@@ -242,21 +249,24 @@ def run_align_paste_swap(
             stitch_feather_px=int(cfg.get("align_paste_stitch_feather_px", 10)),
         )
 
-    # Soft-stitch refined crop into full body; outside mask = exact body pixels.
-    feather = int(cfg.get("align_paste_stitch_feather_px", 10))
-    out = feathered_soft_composite(
-        body_full,
-        refined_crop,
-        face_mask_crop,
-        box,
-        extra_blur_px=feather,
-    )
-    # Full-body mask for metrics / debug.
+    # Full-body mask BEFORE stitch. soft_composite does mask.crop(box) and
+    # requires a full-canvas mask; passing crop-local alpha mis-extracts the
+    # region and leaks the original face (RC4 identity regression).
     full_mask = Image.new("L", body_full.size, 0)
     mw, mh = box[2] - box[0], box[3] - box[1]
     full_mask.paste(
         face_mask_crop.convert("L").resize((mw, mh), Image.Resampling.BILINEAR),
         (box[0], box[1]),
+    )
+
+    # Soft-stitch refined crop into full body; outside mask = exact body pixels.
+    feather = int(cfg.get("align_paste_stitch_feather_px", 10))
+    out = feathered_soft_composite(
+        body_full,
+        refined_crop,
+        full_mask,
+        box,
+        extra_blur_px=feather,
     )
     post_match = float(cfg.get("align_paste_post_color_match", 0.40) or 0.0)
     if post_match > 0:
@@ -276,6 +286,9 @@ def run_align_paste_swap(
         "work_crop": work,
         "composite_crop": composite_crop,
         "refined_crop": refined_crop,
+        "raw_refined_crop": raw_refined_crop,
+        "pose_before_relock": pose_before,
+        "aligned_rgba": aligned_rgba,
         "face_mask": full_mask,
         "face_mask_crop": face_mask_crop,
         "box": box,

@@ -73,10 +73,12 @@ mask_bot_extend: 0.40
 stitch_feather_px: 10
 post_color_match_strength: 0.35
 
-# Architecture B (multi-person): geometry-locked align → paste → optional
-# masked Krea2 refine. Single-person keeps classic Krea2 crop path.
-# Set multi_person_swap_mode: krea2_crop to force legacy SPP-CC crop→Krea2.
-multi_person_swap_mode: align_paste
+# Multi-person identity path (hybrid restore):
+#   krea2_crop (default) — SPP-CC crop→full Krea2 dual-ref→stitch + neighbor freeze
+#   align_paste — legacy Architecture B geometry lock (weak ID; A/B only)
+multi_person_swap_mode: krea2_crop
+multi_crop_hard_freeze_neighbors: true
+# Architecture B knobs (only when multi_person_swap_mode: align_paste)
 align_paste_krea2_refine: true
 align_paste_refine_steps: 6
 # Full 6-DOF affine + post-refine pose relock keep looking direction on target.
@@ -93,14 +95,14 @@ align_paste_post_color_match: 0.40
 pre_color_match_strength: 0.55
 paste_core_min_alpha: 0.90
 paste_feather_px: 21
-# Clothing-free identity matte (no collar/suit/jersey in ID ref).
+# Clothing-free identity matte (align_paste path only).
 face_matte_top_pad: 0.35
 face_matte_bot_pad: 0.08
 face_matte_side_pad: 0.12
 face_matte_force_ellipse: true
 
-# Multi-person (>1 detected face) legacy Krea2 modes (only if swap_mode=krea2_crop):
-#   crop_stitch — SPP-CC single-person crop recipe
+# Multi-person (>1 detected face) modes when swap_mode=krea2_crop:
+#   crop_stitch — SPP-CC single-person crop recipe (default)
 #   full_frame  — debug/A/B only
 multi_person_edit_mode: crop_stitch
 single_person_parity: true

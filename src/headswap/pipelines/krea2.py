@@ -1681,13 +1681,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 if edited.size != scene.size:
                     edited = edited.resize(scene.size, Image.Resampling.LANCZOS)
                 # Keep geometry lock: only blend refined pixels inside face mask.
-                return feathered_soft_composite(
+                # Return (blended, raw) so debug can fork model ID vs soft-lock.
+                blended = feathered_soft_composite(
                     scene,
                     edited,
                     face_mask_crop,
                     (0, 0, scene.size[0], scene.size[1]),
                     extra_blur_px=int(self.cfg.get("align_paste_stitch_feather_px", 10)),
                 )
+                return blended, edited
 
         with _stage(timings, "align_paste"):
             ap = run_align_paste_swap(
@@ -1726,7 +1728,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     "debug_align_composite": ap["composite_crop"],
                     "debug_align_refined": ap["refined_crop"],
                     "debug_align_mask": ap["face_mask"],
+                    "debug_align_mask_crop": ap.get("face_mask_crop"),
+                    "debug_pose_before_relock": ap.get("pose_before_relock"),
+                    "debug_krea2_raw_edited": ap.get("raw_refined_crop"),
+                    "debug_aligned_rgba": ap.get("aligned_rgba"),
+                    "debug_final": out,
                 }
+                debug_imgs = {k: v for k, v in debug_imgs.items() if v is not None}
                 dbg = {
                     k: v
                     for k, v in {
@@ -1769,6 +1777,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "align_info": ap["align_info"],
                 "paste_info": ap["paste_info"],
                 "refine_meta": ap["refine_meta"],
+                "pose_meta": ap.get("pose_meta") or {},
                 "gates": ap["gates"],
                 "box": list(ap["box"]),
             },
@@ -1862,9 +1871,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
                 ).strip().lower()
                 multi_swap_mode = str(
-                    self.cfg.get("multi_person_swap_mode", "align_paste") or "align_paste"
+                    self.cfg.get("multi_person_swap_mode", "krea2_crop") or "krea2_crop"
                 ).strip().lower()
-                # Architecture B: multi-person → geometry-locked align-paste (default).
+                # Architecture B (legacy): explicit align-paste. Default multi path
+                # is SPP-CC crop→Krea2 (krea2_crop) for strong identity transfer.
                 if (
                     len(all_faces) > 1
                     and not swap_all
@@ -2212,6 +2222,38 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         multi_person=multi_person,
                         original_scene=scene,
                     )
+                    # Hybrid restore: after SPP-CC crop→Krea2→stitch, hard-freeze
+                    # neighbor faces so locality matches Arch B without killing ID.
+                    if (
+                        multi_person
+                        and selected_face is not None
+                        and bool(
+                            self.cfg.get("multi_crop_hard_freeze_neighbors", True)
+                        )
+                    ):
+                        out = hard_freeze_neighbor_faces(
+                            out,
+                            body_full,
+                            selected_face,
+                            all_faces,
+                            pad_frac=float(
+                                self.cfg.get("full_frame_neighbor_pad_frac", 0.22)
+                            ),
+                            expand_top_frac=float(
+                                self.cfg.get("full_frame_neighbor_top_frac", 0.35)
+                            ),
+                            protect_expand=float(
+                                self.cfg.get("full_frame_protect_expand", 1.20)
+                            ),
+                        )
+                        timings["_multi_crop_hard_freeze"] = 1.0
+                        import sys as _sys
+
+                        print(
+                            "[krea2] multi crop_stitch hard_freeze_neighbors applied",
+                            file=_sys.__stdout__,
+                            flush=True,
+                        )
                 elif edit_mode == "full_frame" and body_full is not None:
                     # Model output is already full-frame; resize to body_full if needed.
                     if out.size != body_full.size:
@@ -2335,6 +2377,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "crop_size": list(scene.size) if mask_crop_stitch else None,
             "mask_crop_stitch": mask_crop_stitch,
             "edit_mode": edit_mode,
+            "multi_person_swap_mode": str(
+                self.cfg.get("multi_person_swap_mode", "krea2_crop") or "krea2_crop"
+            ),
+            "multi_crop_hard_freeze_neighbors": bool(
+                timings.get("_multi_crop_hard_freeze")
+            ),
             "multi_person_edit_mode": str(
                 self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
             ),
