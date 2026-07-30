@@ -65,7 +65,9 @@ crop_long_side: 768
 square_crop: false
 mask_expand_px: 18
 mask_blur_px: 12
-mask_top_extend: 1.25
+# Tall top_extend so original hair is inside the edit/stitch region (otherwise
+# body hair survives outside the mask while only the face is replaced).
+mask_top_extend: 1.55
 mask_side_extend: 0.60
 mask_bot_extend: 0.40
 stitch_feather_px: 10
@@ -108,7 +110,7 @@ tight_on_small_face: false
 # Keep prompt identical to single-person unless debugging.
 multi_extra_prompt: false
 # Multi-person / small-face profile retained for opt-in (force_tight_head_crop).
-multi_mask_top_extend: 1.20
+multi_mask_top_extend: 1.65
 multi_mask_side_extend: 0.48
 multi_mask_bot_extend: 0.48
 multi_mask_expand_px: 16
@@ -120,29 +122,37 @@ multi_min_crop_long: 448
 multi_boost_crop_long: false
 multi_crop_long_side: 896
 isolate_mask_side_extend: 0.50
+# Extra upward pad so group-shot messy hair is inside the crop+mask.
+isolate_mask_top_extend: 1.70
 isolate_crop_pad: 12
 multi_stitch_feather_px: 18
 multi_post_color_match_strength: 0.55
 # Group-shot head scale: identity ref height tracks the body face (not full-bleed),
 # then clamp the edited head if the model still enlarges it.
 identity_scale_match: true
-identity_scale_factor: 0.90
+identity_scale_factor: 0.95
+identity_hair_height_boost: 1.30
 clamp_edited_head_scale: true
 max_edited_head_height_ratio: 1.08
 target_edited_head_height_ratio: 0.98
 multi_head_scale_prompt: true
+# Force hairstyle transfer (body hair often survives without this).
+multi_hair_replace_prompt: true
 
 prompt: >-
-  Replace the person's head and face in the first image with the person from
-  the second image. Preserve the exact facial identity of the second person —
-  bone structure, jawline, eyebrows, eyes, nose, mouth, hairline, and skin.
+  Replace the person's head, face, and hair in the first image with the person
+  from the second image. Preserve the exact facial identity of the second person —
+  bone structure, jawline, eyebrows, eyes, nose, mouth, and skin.
+  CRITICAL: use the hairstyle, hairline, hair length, and hair color from the
+  second image — completely remove and replace the original hair from the first
+  image (do not keep the first person's hair on top of the new face).
   CRITICAL: copy the facial expression from the first image exactly — if they
   are smiling, the result must smile the same way; if they are not smiling,
   do not add a smile. Keep mouth shape, smile/no-smile, eye gaze, and
   micro-expressions from the first image only — never from the second image.
   Keep the body, clothing, pose, head rotation, camera angle, lighting, and
   background from the first image. Match the original head size and neck seam —
-  do not enlarge the head. Use face identity only from the second image; do not
+  do not enlarge the head. Use face and hair identity from the second image; do not
   copy clothing, collar, bowtie, or shoulders from the second image. If other
   people are visible, leave them completely unchanged. Remove the original face
   and glasses from the first person. Photorealistic, natural skin texture,
@@ -150,8 +160,8 @@ prompt: >-
 
 negative_prompt: ""
 
-# Tight face ref — avoid donor shoulders/collar bleeding into the swap.
+# Tight face ref — include enough donor hair above the face.
 face_side_pad: 0.22
-face_top_pad: 0.50
+face_top_pad: 0.70
 face_bot_pad: 0.12
 include_shoulders: false

@@ -593,9 +593,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
             expand_px = int(self.cfg.get("multi_mask_expand_px", 16))
             crop_pad = int(self.cfg.get("multi_crop_pad", 14))
         elif isolate_selected:
-            # Slightly tighter sides only — same vertical coverage as single.
+            # Slightly tighter sides only — same vertical coverage as single,
+            # with extra top so original hair is inside the edit mask.
             side_ext = float(
                 self.cfg.get("isolate_mask_side_extend", min(side_ext, 0.50))
+            )
+            top_ext = float(
+                self.cfg.get("isolate_mask_top_extend", max(top_ext, 1.70))
             )
             crop_pad = int(self.cfg.get("isolate_crop_pad", crop_pad))
         return {
@@ -681,11 +685,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
         scene = resize_long_side(crop_img, crop_long, div_by=div_by)
         # Face height in the *scene* tensor (after resize) — drive identity scale.
+        # Boost slightly so the identity sticker includes donor hair above the face
+        # box (otherwise only the face transfers and body hair remains).
         face_h_frac_scene = 0.55
+        hair_boost = float(self.cfg.get("identity_hair_height_boost", 1.30))
         if selected_face is not None and box is not None:
             crop_h = max(1, box[3] - box[1])
             face_h_frac_native = float(selected_face.height) / float(crop_h)
-            face_h_frac_scene = face_h_frac_native  # AR preserved by resize_long_side
+            face_h_frac_scene = min(0.70, face_h_frac_native * hair_boost)
 
         scale_match = bool(self.cfg.get("identity_scale_match", True)) and (
             multi_person or isolate_selected
@@ -825,6 +832,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "head must not be larger than the original head or the heads of "
                 "nearby people. Keep neck placement and shoulder line unchanged."
             )
+        # Hair often survives from the body crop unless we force replacement.
+        if bool(self.cfg.get("multi_hair_replace_prompt", True)) and (
+            multi_person or use_tight
+        ):
+            prompt = (
+                prompt
+                + " Replace the hair completely with the hairstyle from the second "
+                "image — hairline, length, color, and parting. Do not leave any of "
+                "the first person's original hair."
+            )
         if bool(self.cfg.get("multi_extra_prompt", False)) and (use_tight or multi_person):
             prompt = (
                 prompt
@@ -873,8 +890,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
         n = len(all_faces)
         return (
             base
-            + f" There are {n} people in the first image. Replace ONLY the head and "
-            f"face of the {pos} person with the identity from the second image. "
+            + f" There are {n} people in the first image. Replace ONLY the head, "
+            f"face, and hair of the {pos} person with the identity from the second "
+            "image — including that person's hairstyle from image 2. Completely "
+            "remove the original hair. "
             "CRITICAL: the new head must be the SAME SIZE as the original head of "
             f"that {pos} person — do not enlarge it relative to the neighbors. "
             "Leave every other person completely unchanged — same faces, hair, "
