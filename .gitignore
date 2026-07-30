@@ -18,3 +18,13 @@ results/_test_mock/
 *.pt
 .ipynb_checkpoints/
 _refs/
+
+# Colab uploads — never track; git reset --hard was restoring demo
+# body.png/face.png (suit selfie + Ronaldo) and wiping user uploads.
+data/custom/body.png
+data/custom/face.png
+data/custom/*.jpg
+data/custom/*.jpeg
+data/custom/*.webp
+data/eval/bodies/custom_001.png
+data/eval/faces/custom_001.png
