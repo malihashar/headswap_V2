@@ -32,6 +32,7 @@ from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 from headswap.preprocess import (
     FaceBox,
+    clamp_edited_head_scale,
     crop_face_reference,
     crop_with_mask,
     expand_crop_box_for_face_fill,
@@ -40,6 +41,7 @@ from headswap.preprocess import (
     lab_histogram_match_face,
     pad_to_square,
     pil_to_rgb_np,
+    place_face_at_height_frac,
     resize_contain,
     resize_long_side,
     resize_max_keep_ar,
@@ -678,10 +680,30 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 crop_long, int(self.cfg.get("multi_crop_long_side", 896))
             )
         scene = resize_long_side(crop_img, crop_long, div_by=div_by)
+        # Face height in the *scene* tensor (after resize) — drive identity scale.
+        face_h_frac_scene = 0.55
+        if selected_face is not None and box is not None:
+            crop_h = max(1, box[3] - box[1])
+            face_h_frac_native = float(selected_face.height) / float(crop_h)
+            face_h_frac_scene = face_h_frac_native  # AR preserved by resize_long_side
+
+        scale_match = bool(self.cfg.get("identity_scale_match", True)) and (
+            multi_person or isolate_selected
+        )
+        scale_factor = float(self.cfg.get("identity_scale_factor", 0.90))
         if bool(self.cfg.get("person_match_crop_size", True)):
-            # Preserve identity aspect ratio (letterbox). Stretching to scene.size
-            # warps faces whenever multi isolate crops are wider than single crops.
-            person = resize_contain(face_crop.convert("RGB"), scene.size, fill=(0, 0, 0))
+            if scale_match:
+                # Group-shot fix: full-bleed identity refs make heads too big.
+                person = place_face_at_height_frac(
+                    face_crop.convert("RGB"),
+                    scene.size,
+                    height_frac=face_h_frac_scene * scale_factor,
+                    fill=(0, 0, 0),
+                )
+            else:
+                person = resize_contain(
+                    face_crop.convert("RGB"), scene.size, fill=(0, 0, 0)
+                )
         else:
             person = resize_long_side(
                 face_crop.convert("RGB"), crop_long, div_by=div_by
@@ -709,7 +731,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 scene, fill="edge", div_by=div_by
             )
             if bool(self.cfg.get("person_match_crop_size", True)):
-                person = resize_contain(person, scene.size, fill=(0, 0, 0))
+                if scale_match:
+                    person = place_face_at_height_frac(
+                        face_crop.convert("RGB"),
+                        scene.size,
+                        height_frac=face_h_frac_scene * scale_factor,
+                        fill=(0, 0, 0),
+                    )
+                else:
+                    person = resize_contain(person, scene.size, fill=(0, 0, 0))
 
         face_in_crop = 0.0
         if selected_face is not None:
@@ -733,6 +763,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 4,
             ),
             "face_area_frac_crop": round(face_in_crop, 4),
+            "face_height_frac_scene": round(float(face_h_frac_scene), 4),
+            "identity_scale_match": bool(scale_match),
+            "identity_scale_factor": float(scale_factor) if scale_match else 1.0,
             "crop_box": list(box),
             "crop_native_size": [box[2] - box[0], box[3] - box[1]],
             "crop_long_native": int(max(box[2] - box[0], box[3] - box[1])),
@@ -784,8 +817,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
     def _prompt_for_edit(self, *, use_tight: bool, multi_person: bool) -> str:
         prompt = str(self.cfg.get("prompt", "") or "").strip()
-        # Keep prompt identical to single-person unless explicitly enabled.
-        # Extra multi prompt was a second conditioning fork in the compare report.
+        # Head-scale reminder for group shots (oversized heads are the main fail).
+        if multi_person and bool(self.cfg.get("multi_head_scale_prompt", True)):
+            prompt = (
+                prompt
+                + " CRITICAL: match the original head size exactly — the swapped "
+                "head must not be larger than the original head or the heads of "
+                "nearby people. Keep neck placement and shoulder line unchanged."
+            )
         if bool(self.cfg.get("multi_extra_prompt", False)) and (use_tight or multi_person):
             prompt = (
                 prompt
@@ -836,6 +875,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
             base
             + f" There are {n} people in the first image. Replace ONLY the head and "
             f"face of the {pos} person with the identity from the second image. "
+            "CRITICAL: the new head must be the SAME SIZE as the original head of "
+            f"that {pos} person — do not enlarge it relative to the neighbors. "
             "Leave every other person completely unchanged — same faces, hair, "
             "expression, and clothing. Do not add a visible seam or paste line at "
             "the neck. Match lighting and skin tone to the first image. Keep pose, "
@@ -859,7 +900,23 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
         )
         scene = resize_max_keep_ar(body_full.convert("RGB"), max_ff, div_by=div_by)
-        person = resize_contain(face_crop.convert("RGB"), scene.size, fill=(0, 0, 0))
+        # Match identity head height to the selected face in the full frame.
+        face_h_frac = 0.22
+        if selected_face is not None and body_full.size[1] > 0:
+            # Scale coords if body_full was resized into scene.
+            sy = scene.size[1] / float(body_full.size[1])
+            face_h_frac = (selected_face.height * sy) / float(max(1, scene.size[1]))
+        scale_factor = float(self.cfg.get("identity_scale_factor", 0.90))
+        if bool(self.cfg.get("identity_scale_match", True)):
+            person = place_face_at_height_frac(
+                face_crop.convert("RGB"),
+                scene.size,
+                height_frac=face_h_frac * scale_factor,
+                fill=(0, 0, 0),
+                max_height_frac=0.45,
+            )
+        else:
+            person = resize_contain(face_crop.convert("RGB"), scene.size, fill=(0, 0, 0))
         diag = {
             "faces_detected": len(all_faces),
             "selected_box": (
@@ -877,6 +934,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "person_size": list(person.size),
             "body_size": list(body_full.size),
             "face_position": self._face_position_label(selected_face, all_faces),
+            "face_height_frac_scene": round(float(face_h_frac), 4),
+            "identity_scale_match": bool(self.cfg.get("identity_scale_match", True)),
             "multi_person": True,
             "use_tight": False,
             "isolate_selected": False,
@@ -1122,11 +1181,42 @@ class Krea2IdentityEditPipeline(BasePipeline):
         *,
         color_ref: Image.Image,
         multi_person: bool = False,
+        original_scene: Image.Image | None = None,
     ) -> Image.Image:
         edited_crop = edited
         if crop_content_box is not None:
             ox, oy, cw, ch = crop_content_box
             edited_crop = edited_crop.crop((ox, oy, ox + cw, oy + ch))
+        # Clamp oversized heads before composite (group-shot failure mode).
+        if multi_person and bool(self.cfg.get("clamp_edited_head_scale", True)):
+            ref_scene = original_scene
+            if ref_scene is None:
+                ref_scene = canvas.crop(box).resize(
+                    edited_crop.size, Image.Resampling.LANCZOS
+                )
+            elif ref_scene.size != edited_crop.size:
+                ref_scene = ref_scene.resize(
+                    edited_crop.size, Image.Resampling.LANCZOS
+                )
+            edited_crop, clamp_info = clamp_edited_head_scale(
+                ref_scene,
+                edited_crop,
+                self.cache_dir,
+                max_height_ratio=float(
+                    self.cfg.get("max_edited_head_height_ratio", 1.08)
+                ),
+                target_ratio=float(self.cfg.get("target_edited_head_height_ratio", 0.98)),
+            )
+            import sys
+
+            if clamp_info.get("clamped"):
+                print(
+                    f"[krea2] clamped oversized head "
+                    f"ratio {clamp_info['ratio_before']:.2f}→{clamp_info['ratio_after']:.2f} "
+                    f"shrink={clamp_info['shrink']:.3f}",
+                    file=sys.__stdout__,
+                    flush=True,
+                )
         # Multi-person: stronger feather + LAB match — jaw/neck seams are the
         # dominant failure mode when the donor face lighting ≠ body flash.
         if multi_person:
@@ -1428,6 +1518,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             built["crop_content_box"],
                             color_ref=color_ref,
                             multi_person=True,
+                            original_scene=built["scene"],
                         )
                     faces_succeeded.append(face_i)
                     last_sample = sample
@@ -1493,11 +1584,36 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         crop_content_box,
                         color_ref=body_full,
                         multi_person=multi_person,
+                        original_scene=scene,
                     )
                 elif edit_mode == "full_frame" and body_full is not None:
                     # Model output is already full-frame; resize to body_full if needed.
                     if out.size != body_full.size:
                         out = out.resize(body_full.size, Image.Resampling.LANCZOS)
+                    if multi_person and bool(
+                        self.cfg.get("clamp_edited_head_scale", True)
+                    ):
+                        out, clamp_info = clamp_edited_head_scale(
+                            body_full,
+                            out,
+                            self.cache_dir,
+                            max_height_ratio=float(
+                                self.cfg.get("max_edited_head_height_ratio", 1.08)
+                            ),
+                            target_ratio=float(
+                                self.cfg.get("target_edited_head_height_ratio", 0.98)
+                            ),
+                        )
+                        if clamp_info.get("clamped"):
+                            import sys
+
+                            print(
+                                f"[krea2] full_frame clamped oversized head "
+                                f"ratio {clamp_info['ratio_before']:.2f}→"
+                                f"{clamp_info['ratio_after']:.2f}",
+                                file=sys.__stdout__,
+                                flush=True,
+                            )
             faces_succeeded = [0] if do_stitch or edit_mode == "full_frame" else []
 
         dbg = {}

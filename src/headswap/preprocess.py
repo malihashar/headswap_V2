@@ -68,6 +68,94 @@ def resize_contain(
     return out
 
 
+def place_face_at_height_frac(
+    face: Image.Image,
+    canvas_size: tuple[int, int],
+    *,
+    height_frac: float,
+    fill: tuple[int, int, int] = (0, 0, 0),
+    max_height_frac: float = 0.72,
+    min_height_frac: float = 0.18,
+) -> Image.Image:
+    """
+    Place an identity face on a canvas so its height is ``height_frac`` of the
+    canvas height. Used so the identity ref matches body-head scale in group
+    shots (full-bleed identity refs make Krea2 enlarge the swapped head).
+    """
+    face = face.convert("RGB")
+    tw, th = int(canvas_size[0]), int(canvas_size[1])
+    frac = float(min(max_height_frac, max(min_height_frac, height_frac)))
+    target_h = max(8, int(round(th * frac)))
+    w, h = face.size
+    scale = target_h / max(1, h)
+    # Also keep width inside canvas.
+    if w * scale > tw * 0.95:
+        scale = (tw * 0.95) / max(1, w)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    resized = face.resize((nw, nh), Image.Resampling.LANCZOS)
+    out = Image.new("RGB", (tw, th), fill)
+    out.paste(resized, ((tw - nw) // 2, (th - nh) // 2))
+    return out
+
+
+def clamp_edited_head_scale(
+    original_scene: Image.Image,
+    edited: Image.Image,
+    cache_dir,
+    *,
+    max_height_ratio: float = 1.08,
+    target_ratio: float = 0.98,
+) -> tuple[Image.Image, dict[str, float]]:
+    """
+    If the face in ``edited`` is larger than in ``original_scene``, shrink the
+    edited crop (aligned on face centers) so head scale matches the body crop.
+    """
+    info = {
+        "clamped": 0.0,
+        "ratio_before": 1.0,
+        "ratio_after": 1.0,
+        "shrink": 1.0,
+    }
+    if original_scene.size != edited.size:
+        edited = edited.resize(original_scene.size, Image.Resampling.LANCZOS)
+    fo = detect_best_face(pil_to_rgb_np(original_scene), cache_dir)
+    fe = detect_best_face(pil_to_rgb_np(edited), cache_dir)
+    if fo is None or fe is None or fo.height < 8 or fe.height < 8:
+        return edited, info
+    ratio = float(fe.height) / float(fo.height)
+    info["ratio_before"] = ratio
+    if ratio <= float(max_height_ratio):
+        info["ratio_after"] = ratio
+        return edited, info
+
+    shrink = (float(fo.height) * float(target_ratio)) / float(fe.height)
+    shrink = float(min(1.0, max(0.55, shrink)))
+    info["shrink"] = shrink
+    info["clamped"] = 1.0
+
+    w, h = edited.size
+    nw, nh = max(1, int(round(w * shrink))), max(1, int(round(h * shrink)))
+    shrunk = edited.resize((nw, nh), Image.Resampling.LANCZOS)
+    # Align face centers between original and shrunk edit.
+    ocx = 0.5 * (fo.x0 + fo.x1)
+    ocy = 0.5 * (fo.y0 + fo.y1)
+    ecx = 0.5 * (fe.x0 + fe.x1) * shrink
+    ecy = 0.5 * (fe.y0 + fe.y1) * shrink
+    paste_x = int(round(ocx - ecx))
+    paste_y = int(round(ocy - ecy))
+
+    # Start from original scene so shrunk-away borders keep body geometry.
+    out = original_scene.convert("RGB").copy()
+    out.paste(shrunk, (paste_x, paste_y))
+    fe2 = detect_best_face(pil_to_rgb_np(out), cache_dir)
+    if fe2 is not None and fo.height > 0:
+        info["ratio_after"] = float(fe2.height) / float(fo.height)
+    else:
+        info["ratio_after"] = ratio * shrink
+    return out, info
+
+
 def resize_long_side(im: Image.Image, long_side: int, div_by: int = 16) -> Image.Image:
     im = im.convert("RGB")
     w, h = im.size

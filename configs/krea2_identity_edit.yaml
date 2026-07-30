@@ -123,6 +123,14 @@ isolate_mask_side_extend: 0.50
 isolate_crop_pad: 12
 multi_stitch_feather_px: 18
 multi_post_color_match_strength: 0.55
+# Group-shot head scale: identity ref height tracks the body face (not full-bleed),
+# then clamp the edited head if the model still enlarges it.
+identity_scale_match: true
+identity_scale_factor: 0.90
+clamp_edited_head_scale: true
+max_edited_head_height_ratio: 1.08
+target_edited_head_height_ratio: 0.98
+multi_head_scale_prompt: true
 
 prompt: >-
   Replace the person's head and face in the first image with the person from
