@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 from headswap.align_paste_swap import run_align_paste_swap
 from headswap.comfy.full_load import force_sampling_full_load
@@ -1523,6 +1523,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         color_ref: Image.Image,
         multi_person: bool = False,
         original_scene: Image.Image | None = None,
+        debug_stages: dict[str, Image.Image] | None = None,
     ) -> Image.Image:
         edited_crop = edited
         if crop_content_box is not None:
@@ -1592,9 +1593,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
             box,
             extra_blur_px=feather,
         )
+        if debug_stages is not None:
+            debug_stages["stitch_mask"] = stitch_mask.convert("L").copy()
+            debug_stages["composite_before_lab"] = stitched.copy()
         stitched = lab_histogram_match_face(
             stitched, color_ref, stitch_mask, strength=post_match
         )
+        if debug_stages is not None:
+            debug_stages["composite_after_lab"] = stitched.copy()
         # Stage E: optional narrow-band seam refine (face interior locked).
         if bool(self.cfg.get("seam_refine", False)):
             # stitch_mask is crop-local; paste onto full-canvas mask for refine.
@@ -1837,6 +1843,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         face_failures: list[dict[str, Any]] = []
         faces_succeeded: list[int] = []
         face_prep_diag: dict[str, Any] = {}
+        stitch_debug: dict[str, Image.Image] = {}
         edit_mode = "crop_stitch"  # crop_stitch | full_frame | legacy_full
         do_stitch = bool(mask_crop_stitch)
 
@@ -2134,6 +2141,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             color_ref=color_ref,
                             multi_person=True,
                             original_scene=built["scene"],
+                            debug_stages=stitch_debug,
                         )
                     faces_succeeded.append(face_i)
                     last_sample = sample
@@ -2221,6 +2229,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         color_ref=body_full,
                         multi_person=multi_person,
                         original_scene=scene,
+                        debug_stages=stitch_debug,
                     )
                     # Hybrid restore: after SPP-CC crop→Krea2→stitch, hard-freeze
                     # neighbor faces so locality matches Arch B without killing ID.
@@ -2231,6 +2240,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             self.cfg.get("multi_crop_hard_freeze_neighbors", True)
                         )
                     ):
+                        before_neighbor_freeze = out.copy()
                         out = hard_freeze_neighbor_faces(
                             out,
                             body_full,
@@ -2246,6 +2256,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 self.cfg.get("full_frame_protect_expand", 1.20)
                             ),
                         )
+                        if save_debug:
+                            stitch_debug["neighbor_freeze_delta"] = (
+                                ImageChops.difference(before_neighbor_freeze, out)
+                            )
+                            stitch_debug["after_neighbor_freeze"] = out.copy()
                         timings["_multi_crop_hard_freeze"] = 1.0
                         import sys as _sys
 
@@ -2336,6 +2351,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 if do_stitch:
                     debug_imgs["debug_crop"] = scene
                     debug_imgs["debug_edited_crop"] = sample_meta["edited"]
+                    debug_imgs.update(
+                        {
+                            f"debug_{stage}": image
+                            for stage, image in stitch_debug.items()
+                        }
+                    )
                 if edit_mode == "full_frame":
                     debug_imgs["debug_full_frame_scene"] = scene
                     debug_imgs["debug_full_frame_person"] = person
@@ -2348,6 +2369,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         debug_imgs["debug_ref_boost_mask"] = ref_boost_mask_img
                 if swap_all and body_full is not None and out is not None:
                     debug_imgs["debug_swap_all_result"] = out
+                if out is not None:
+                    debug_imgs["debug_final"] = out
                 dbg = {
                     k: v
                     for k, v in {

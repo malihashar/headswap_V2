@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Frozen multi-person face-swap benchmark",
+  "description": "Consented-image benchmark. Each body/donor hash and explicit selected target make results comparable across pipeline revisions.",
+  "type": "object",
+  "required": ["version", "pairs"],
+  "properties": {
+    "version": { "const": 1 },
+    "pairs": {
+      "type": "array",
+      "minItems": 30,
+      "items": {
+        "type": "object",
+        "required": ["id", "body", "face", "target_index", "tags"],
+        "properties": {
+          "id": { "type": "string" },
+          "body": { "type": "string" },
+          "face": { "type": "string" },
+          "target_index": { "type": "integer", "minimum": 0 },
+          "tags": {
+            "type": "array",
+            "items": {
+              "enum": ["occlusion", "yaw", "expression", "crowded", "low_light", "glasses", "long_hair", "small_face"]
+            }
+          },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  }
+}

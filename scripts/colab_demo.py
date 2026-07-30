@@ -261,6 +261,86 @@ def save_upload(data: bytes, dest: Path) -> Image.Image:
     return im
 
 
+def build_run_manifest(
+    *,
+    repo: Path | str,
+    body_path: Path | str,
+    face_path: Path | str,
+    body: Image.Image,
+    face: Image.Image,
+    config: dict[str, Any],
+    cache_dir: Path | str,
+    runtime: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], Image.Image]:
+    """
+    Freeze input/config/target-selection provenance before a sampler is called.
+
+    Returns the manifest and an annotated body preview. This is deliberately
+    strict: a run can be reproduced only when the decoded image hashes match.
+    """
+    sys.path.insert(0, str(ROOT / "src"))
+    from headswap.preprocess import select_face_box, pil_to_rgb_np  # noqa: WPS433
+    from headswap.profiling.run_manifest import build_manifest  # noqa: WPS433
+
+    selected, faces = select_face_box(
+        pil_to_rgb_np(body),
+        cache_dir,
+        policy=str(config.get("body_face_policy", "largest") or "largest"),
+        index=int(config.get("body_face_index", 0) or 0),
+    )
+    detections = [
+        {
+            "index": i,
+            "box": [int(f.x0), int(f.y0), int(f.x1), int(f.y1)],
+            "confidence": float(f.conf),
+            "area": int(f.width * f.height),
+        }
+        for i, f in enumerate(faces)
+    ]
+    selected_index = next(
+        (
+            i
+            for i, f in enumerate(faces)
+            if selected is not None
+            and (f.x0, f.y0, f.x1, f.y1)
+            == (selected.x0, selected.y0, selected.x1, selected.y1)
+        ),
+        None,
+    )
+    selected_box = (
+        [int(selected.x0), int(selected.y0), int(selected.x1), int(selected.y1)]
+        if selected is not None
+        else None
+    )
+    manifest = build_manifest(
+        repo=repo,
+        body_path=body_path,
+        face_path=face_path,
+        body=body,
+        face=face,
+        config=config,
+        detections=detections,
+        selected_index=selected_index,
+        selected_box=selected_box,
+        runtime=runtime,
+    )
+    preview = body.convert("RGB").copy()
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(preview)
+    for item in detections:
+        x0, y0, x1, y1 = item["box"]
+        active = item["index"] == selected_index
+        draw.rectangle(
+            (x0, y0, x1, y1),
+            outline=(0, 220, 90) if active else (255, 190, 0),
+            width=4 if active else 2,
+        )
+        label = f"{item['index']}: {'TARGET' if active else 'candidate'}"
+        draw.text((x0 + 3, max(0, y0 - 14)), label, fill=(0, 220, 90) if active else (255, 190, 0))
+    return manifest, preview
+
+
 def require_path(path: Path | str, label: str) -> Path:
     p = Path(path)
     if not p.is_file():
@@ -518,6 +598,51 @@ def preflight(
 # to re-expose the Colab radio widget and allow face_swap_mode=all.
 # Do not delete annotate_faces / parse_face_swap_choice / show_face_swap_selector.
 ENABLE_MULTI_FACE_UI = False
+
+
+def show_target_face_selector(
+    body_image: Image.Image,
+    cache_dir: Path | str,
+    *,
+    face_count: int | None = None,
+):
+    """
+    Require an explicit target selection for ambiguous multi-person images.
+
+    This deliberately offers only one target face. Swap-all remains a separate,
+    gated product feature because it requires a distinct source-to-target map.
+    """
+    faces = _detect_faces_strict(body_image, cache_dir)
+    n = int(face_count if face_count is not None else len(faces))
+    if n <= 1:
+        return None
+    try:
+        import ipywidgets as widgets
+        from IPython.display import display, Markdown
+    except Exception as exc:
+        raise DemoError(
+            "Multiple body faces require explicit target selection, but "
+            f"ipywidgets is unavailable ({exc})."
+        ) from exc
+
+    options = [(f"Target face {i + 1}", i) for i in range(n)]
+    widget = widgets.RadioButtons(
+        options=options,
+        value=0,
+        description="Swap target:",
+        layout=widgets.Layout(width="max-content"),
+        style={"description_width": "initial"},
+    )
+    display(Markdown("### Select the face to replace"))
+    display(annotate_faces(body_image, faces))
+    display(
+        Markdown(
+            "Face numbers use detection order (largest first). The selected "
+            "target is recorded in the immutable run manifest."
+        )
+    )
+    display(widget)
+    return widget
 
 
 def annotate_faces(
