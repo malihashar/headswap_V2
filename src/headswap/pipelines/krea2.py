@@ -594,24 +594,49 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     policy=body_face_policy,
                 )
                 multi_person = len(all_faces) > 1
+                # Group shots often only register 1 OpenCV face — still tighten when
+                # the selected face is a small fraction of the frame.
+                bw, bh = body_full.size
+                face_frac = 0.0
+                if selected_face is not None and bw * bh > 0:
+                    face_frac = (selected_face.width * selected_face.height) / float(bw * bh)
+                wide_group = (bw / max(1, bh)) >= float(
+                    self.cfg.get("group_aspect_thresh", 1.25)
+                )
+                small_face = face_frac > 0 and face_frac < float(
+                    self.cfg.get("group_face_area_frac", 0.12)
+                )
+                force_tight = bool(self.cfg.get("force_tight_head_crop", False))
+                use_tight = (
+                    multi_person
+                    or force_tight
+                    or (wide_group and small_face)
+                    or small_face
+                )
                 top_ext = float(self.cfg.get("mask_top_extend", 1.25))
                 side_ext = float(self.cfg.get("mask_side_extend", 0.60))
                 bot_ext = float(self.cfg.get("mask_bot_extend", 0.40))
                 expand_px = int(self.cfg.get("mask_expand_px", 18))
                 crop_pad = 12
-                if multi_person:
+                if use_tight:
                     # Tighter mask so crop is head-only, not half the group.
                     top_ext = float(self.cfg.get("multi_mask_top_extend", 1.05))
                     side_ext = float(self.cfg.get("multi_mask_side_extend", 0.35))
                     bot_ext = float(self.cfg.get("multi_mask_bot_extend", 0.22))
                     expand_px = int(self.cfg.get("multi_mask_expand_px", 10))
                     crop_pad = int(self.cfg.get("multi_crop_pad", 6))
-                    print(
-                        f"[krea2] multi-person: {len(all_faces)} faces, "
-                        f"policy={body_face_policy} index={body_face_index} "
-                        f"selected_box="
-                        f"{None if selected_face is None else [selected_face.x0, selected_face.y0, selected_face.x1, selected_face.y1]}"
-                    )
+                # Always print (even under quiet_logs consumers can check meta).
+                import sys
+
+                print(
+                    f"[krea2] faces_detected={len(all_faces)} "
+                    f"policy={body_face_policy} index={body_face_index} "
+                    f"face_frac={face_frac:.3f} tight_crop={use_tight} "
+                    f"selected_box="
+                    f"{None if selected_face is None else [selected_face.x0, selected_face.y0, selected_face.x1, selected_face.y1]}",
+                    file=sys.__stdout__,
+                    flush=True,
+                )
                 mask = head_hair_mask_from_face(
                     body_full,
                     self.cache_dir,
@@ -637,6 +662,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     person = resize_long_side(
                         face_crop.convert("RGB"), crop_long, div_by=div_by
                     )
+                # Strip donor clothing/collar (bowtie bleed) on group / tight crops.
+                if use_tight and bool(self.cfg.get("face_white_bg", True)):
+                    from headswap.preprocess import face_on_white_background
+
+                    person = face_on_white_background(
+                        person,
+                        cache_dir=self.cache_dir,
+                        force_ellipse=True,
+                    )
                 if bool(self.cfg.get("square_crop", False)):
                     scene, crop_content_box = pad_to_square(
                         scene, fill="edge", div_by=div_by
@@ -645,7 +679,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         person = person.resize(scene.size, Image.Resampling.LANCZOS)
                 # Stash for meta / prompt hint
                 timings["_multi_person"] = 1.0 if multi_person else 0.0
+                timings["_tight_crop"] = 1.0 if use_tight else 0.0
                 timings["_body_face_count"] = float(len(all_faces))
+                timings["_face_frac"] = float(face_frac)
             else:
                 # Full-frame path (legacy A/B). Scene = body, person = face.
                 scene = resize_max_keep_ar(
@@ -660,7 +696,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
         w, h = scene.size
         prompt = str(self.cfg.get("prompt", "") or "").strip()
-        if bool(timings.get("_multi_person")):
+        if bool(timings.get("_tight_crop")) or bool(timings.get("_multi_person")):
             prompt = (
                 prompt
                 + " The first image crop shows ONE person only — replace only that "
@@ -973,7 +1009,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "crop_size": list(scene.size) if mask_crop_stitch else None,
             "mask_crop_stitch": mask_crop_stitch,
             "multi_person": bool(timings.get("_multi_person")),
+            "tight_crop": bool(timings.get("_tight_crop")),
             "body_face_count": int(timings.get("_body_face_count") or 0),
+            "face_frac": round(float(timings.get("_face_frac") or 0.0), 4),
             "body_face_policy": str(self.cfg.get("body_face_policy", "largest") or "largest"),
             "body_face_index": int(self.cfg.get("body_face_index", 0) or 0),
             "person_match_crop_size": bool(self.cfg.get("person_match_crop_size", True)),

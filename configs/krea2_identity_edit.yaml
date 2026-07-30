@@ -77,6 +77,10 @@ post_color_match_strength: 0.35
 body_face_policy: largest
 body_face_index: 0
 person_match_crop_size: true
+force_tight_head_crop: false
+group_aspect_thresh: 1.25
+group_face_area_frac: 0.12
+face_white_bg: true
 multi_mask_top_extend: 1.05
 multi_mask_side_extend: 0.35
 multi_mask_bot_extend: 0.22
