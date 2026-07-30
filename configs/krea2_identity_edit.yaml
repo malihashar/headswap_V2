@@ -92,11 +92,23 @@ force_tight_head_crop: false
 group_aspect_thresh: 1.25
 group_face_area_frac: 0.12
 face_white_bg: true
-multi_mask_top_extend: 1.05
-multi_mask_side_extend: 0.35
-multi_mask_bot_extend: 0.22
-multi_mask_expand_px: 10
-multi_crop_pad: 6
+# Multi-person / small-face profile (vs single-person mask_* above).
+# Prior bot_extend≈0.22 cut the jaw/neck → pasted look + lighting seam.
+# Sides stay slightly tighter than single to limit neighbor bleed; neck/hair
+# restored. Crop is then expanded toward ~16% face fill + min long side
+# before the 768/896 upscale (see expand_crop_box_for_face_fill).
+multi_mask_top_extend: 1.20
+multi_mask_side_extend: 0.48
+multi_mask_bot_extend: 0.48
+multi_mask_expand_px: 16
+multi_mask_blur_px: 14
+multi_crop_pad: 14
+multi_target_face_fill: 0.16
+multi_min_crop_long: 448
+multi_boost_crop_long: true
+multi_crop_long_side: 896
+multi_stitch_feather_px: 18
+multi_post_color_match_strength: 0.55
 
 prompt: >-
   Replace the person's head and face in the first image with the person from

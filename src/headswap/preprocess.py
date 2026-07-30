@@ -487,6 +487,142 @@ def crop_with_mask(
     return image.crop(box), mask.crop(box), box
 
 
+def suppress_neighbor_faces_in_mask(
+    mask: Image.Image,
+    selected: FaceBox | None,
+    other_faces: list[FaceBox],
+    *,
+    shrink: float = 0.92,
+) -> Image.Image:
+    """
+    Zero mask coverage over other detected faces so an expanded group-shot crop
+    does not stitch neighbor heads when the edit canvas includes them.
+    """
+    if selected is None or not other_faces:
+        return mask
+    arr = np.asarray(mask.convert("L")).copy()
+    sx0, sy0, sx1, sy1 = selected.x0, selected.y0, selected.x1, selected.y1
+    for face in other_faces:
+        if (
+            face.x0 == selected.x0
+            and face.y0 == selected.y0
+            and face.x1 == selected.x1
+            and face.y1 == selected.y1
+        ):
+            continue
+        # Skip near-duplicates of the selected box.
+        ix0, iy0 = max(sx0, face.x0), max(sy0, face.y0)
+        ix1, iy1 = min(sx1, face.x1), min(sy1, face.y1)
+        inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+        if inter > 0.5 * face.width * face.height:
+            continue
+        fw, fh = max(1, face.width), max(1, face.height)
+        cx = (face.x0 + face.x1) // 2
+        cy = (face.y0 + face.y1) // 2
+        axes = (
+            max(4, int(0.5 * shrink * fw)),
+            max(4, int(0.55 * shrink * fh)),
+        )
+        cv2.ellipse(arr, (cx, cy), axes, 0, 0, 360, 0, -1)
+    return Image.fromarray(arr)
+
+
+def expand_crop_box_for_face_fill(
+    image_size: tuple[int, int],
+    box: tuple[int, int, int, int],
+    face: FaceBox | None,
+    *,
+    target_face_area_frac: float = 0.16,
+    min_long_side: int = 448,
+    other_faces: list[FaceBox] | None = None,
+    div_by: int = 16,
+) -> tuple[tuple[int, int, int, int], dict[str, float]]:
+    """
+    Enlarge a head crop so the selected face occupies ~target_face_area_frac of
+    the crop (similar to single-person crops) and the crop long side is at least
+    min_long_side before the 768 upscale — avoids soft, over-upscaled group faces.
+
+    Prefers vertical expansion (hair/neck) when other faces sit to the sides.
+    """
+    iw, ih = image_size
+    x0, y0, x1, y1 = [int(v) for v in box]
+    info: dict[str, float] = {
+        "expanded": 0.0,
+        "face_fill_before": 0.0,
+        "face_fill_after": 0.0,
+        "crop_long_before": float(max(x1 - x0, y1 - y0)),
+        "crop_long_after": float(max(x1 - x0, y1 - y0)),
+    }
+    if face is None:
+        return (x0, y0, x1, y1), info
+
+    def _face_fill(a: int, b: int, c: int, d: int) -> float:
+        area = max(1, (c - a) * (d - b))
+        return float(face.width * face.height) / float(area)
+
+    fill0 = _face_fill(x0, y0, x1, y1)
+    info["face_fill_before"] = fill0
+    long0 = max(x1 - x0, y1 - y0)
+    need_fill = fill0 > float(target_face_area_frac) * 1.05
+    need_size = long0 < int(min_long_side)
+    if not need_fill and not need_size:
+        info["face_fill_after"] = fill0
+        return (x0, y0, x1, y1), info
+
+    # Directional room: if another face is close on a side, expand less that way.
+    left_block = right_block = 0.0
+    if other_faces:
+        fcx = 0.5 * (face.x0 + face.x1)
+        for o in other_faces:
+            if (
+                o.x0 == face.x0
+                and o.y0 == face.y0
+                and o.x1 == face.x1
+                and o.y1 == face.y1
+            ):
+                continue
+            ocx = 0.5 * (o.x0 + o.x1)
+            gap = abs(ocx - fcx) / max(1.0, float(face.width))
+            if gap < 2.5:
+                if ocx < fcx:
+                    left_block = max(left_block, 1.0 - gap / 2.5)
+                else:
+                    right_block = max(right_block, 1.0 - gap / 2.5)
+
+    # Grow until fill ≈ target and long side ≥ min (or image bounds).
+    for _ in range(48):
+        cw, ch = x1 - x0, y1 - y0
+        fill = _face_fill(x0, y0, x1, y1)
+        long_side = max(cw, ch)
+        if fill <= target_face_area_frac and long_side >= min_long_side:
+            break
+        # Step size ~3% of current crop; bias vertical for neck/hair context.
+        step_x = max(2, int(0.03 * cw))
+        step_y = max(2, int(0.04 * ch))
+        grow_l = int(step_x * (1.0 - 0.75 * left_block))
+        grow_r = int(step_x * (1.0 - 0.75 * right_block))
+        grow_t = step_y
+        grow_b = int(step_y * 1.25)  # prefer neck room for lighting match
+        nx0 = max(0, x0 - grow_l)
+        nx1 = min(iw, x1 + grow_r)
+        ny0 = max(0, y0 - grow_t)
+        ny1 = min(ih, y1 + grow_b)
+        if (nx0, ny0, nx1, ny1) == (x0, y0, x1, y1):
+            break
+        x0, y0, x1, y1 = nx0, ny0, nx1, ny1
+
+    # Enforce divisibility like crop_with_mask.
+    cw, ch = x1 - x0, y1 - y0
+    x1 = min(iw, x0 + evenify(cw, div_by))
+    y1 = min(ih, y0 + evenify(ch, div_by))
+    x0 = max(0, x1 - evenify(x1 - x0, div_by))
+    y0 = max(0, y1 - evenify(y1 - y0, div_by))
+    info["expanded"] = 1.0
+    info["face_fill_after"] = _face_fill(x0, y0, x1, y1)
+    info["crop_long_after"] = float(max(x1 - x0, y1 - y0))
+    return (x0, y0, x1, y1), info
+
+
 def soft_composite(
     base: Image.Image,
     edit: Image.Image,
