@@ -109,7 +109,10 @@ def clamp_edited_head_scale(
 ) -> tuple[Image.Image, dict[str, float]]:
     """
     If the face in ``edited`` is larger than in ``original_scene``, shrink the
-    edited crop (aligned on face centers) so head scale matches the body crop.
+    *edited* image about the face center (cv2 warp, border replicate).
+
+    IMPORTANT: never paste onto ``original_scene`` — that re-exposes the old
+    face around a shrunk swap (double-face / ghosting in group shots).
     """
     info = {
         "clamped": 0.0,
@@ -134,26 +137,42 @@ def clamp_edited_head_scale(
     info["shrink"] = shrink
     info["clamped"] = 1.0
 
-    w, h = edited.size
-    nw, nh = max(1, int(round(w * shrink))), max(1, int(round(h * shrink)))
-    shrunk = edited.resize((nw, nh), Image.Resampling.LANCZOS)
-    # Align face centers between original and shrunk edit.
+    arr = pil_to_rgb_np(edited)
+    h, w = arr.shape[:2]
+    # Scale about the *edited* face center, then translate so that center
+    # lands on the original face center (keeps neck alignment).
+    ecx = 0.5 * (fe.x0 + fe.x1)
+    ecy = 0.5 * (fe.y0 + fe.y1)
     ocx = 0.5 * (fo.x0 + fo.x1)
     ocy = 0.5 * (fo.y0 + fo.y1)
-    ecx = 0.5 * (fe.x0 + fe.x1) * shrink
-    ecy = 0.5 * (fe.y0 + fe.y1) * shrink
-    paste_x = int(round(ocx - ecx))
-    paste_y = int(round(ocy - ecy))
-
-    # Start from original scene so shrunk-away borders keep body geometry.
-    out = original_scene.convert("RGB").copy()
-    out.paste(shrunk, (paste_x, paste_y))
+    m = cv2.getRotationMatrix2D((ecx, ecy), 0.0, shrink)
+    # After scale about (ecx,ecy), that point stays fixed; shift to (ocx,ocy).
+    m[0, 2] += ocx - ecx
+    m[1, 2] += ocy - ecy
+    warped = cv2.warpAffine(
+        arr,
+        m,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    out = np_to_pil(warped)
     fe2 = detect_best_face(pil_to_rgb_np(out), cache_dir)
     if fe2 is not None and fo.height > 0:
         info["ratio_after"] = float(fe2.height) / float(fo.height)
     else:
         info["ratio_after"] = ratio * shrink
     return out, info
+
+
+def dilate_mask(mask: Image.Image, px: int) -> Image.Image:
+    """Expand an L/RGBA mask so the opaque region covers more of the old head."""
+    if px <= 0:
+        return mask
+    arr = np.asarray(mask.convert("L"))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (px * 2 + 1, px * 2 + 1))
+    arr = cv2.dilate(arr, k)
+    return Image.fromarray(arr)
 
 
 def resize_long_side(im: Image.Image, long_side: int, div_by: int = 16) -> Image.Image:

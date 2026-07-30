@@ -121,11 +121,13 @@ multi_min_crop_long: 448
 # Keep inference long-side identical to single-person (768) by default.
 multi_boost_crop_long: false
 multi_crop_long_side: 896
-isolate_mask_side_extend: 0.50
+isolate_mask_side_extend: 0.70
 # Extra upward pad so group-shot messy hair is inside the crop+mask.
 isolate_mask_top_extend: 1.70
-isolate_crop_pad: 12
-multi_stitch_feather_px: 18
+isolate_mask_expand_px: 22
+isolate_crop_pad: 14
+multi_stitch_feather_px: 14
+multi_stitch_mask_dilate_px: 14
 multi_post_color_match_strength: 0.55
 # Group-shot head scale: identity ref height tracks the body face (not full-bleed),
 # then clamp the edited head if the model still enlarges it.

@@ -35,6 +35,7 @@ from headswap.preprocess import (
     clamp_edited_head_scale,
     crop_face_reference,
     crop_with_mask,
+    dilate_mask,
     expand_crop_box_for_face_fill,
     feathered_soft_composite,
     head_hair_mask_from_face,
@@ -593,13 +594,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
             expand_px = int(self.cfg.get("multi_mask_expand_px", 16))
             crop_pad = int(self.cfg.get("multi_crop_pad", 14))
         elif isolate_selected:
-            # Slightly tighter sides only — same vertical coverage as single,
-            # with extra top so original hair is inside the edit mask.
+            # Cover the full selected head (ears/sides) so the old face cannot
+            # ghost beside the swap; keep top tall for hair replacement.
             side_ext = float(
-                self.cfg.get("isolate_mask_side_extend", min(side_ext, 0.50))
+                self.cfg.get("isolate_mask_side_extend", max(side_ext, 0.70))
             )
             top_ext = float(
                 self.cfg.get("isolate_mask_top_extend", max(top_ext, 1.70))
+            )
+            expand_px = int(
+                self.cfg.get("isolate_mask_expand_px", max(expand_px, 22))
             )
             crop_pad = int(self.cfg.get("isolate_crop_pad", crop_pad))
         return {
@@ -840,7 +844,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 prompt
                 + " Replace the hair completely with the hairstyle from the second "
                 "image — hairline, length, color, and parting. Do not leave any of "
-                "the first person's original hair."
+                "the first person's original hair. Completely cover and remove the "
+                "original face — no ghosting, double face, or leftover ear/cheek "
+                "from the first person beside the new head."
             )
         if bool(self.cfg.get("multi_extra_prompt", False)) and (use_tight or multi_person):
             prompt = (
@@ -1236,13 +1242,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     file=sys.__stdout__,
                     flush=True,
                 )
+        stitch_mask = mask
+        # Dilate before feather so the opaque core fully covers the old head
+        # (stops original face/ear ghosting next to neighbors).
+        if multi_person:
+            dilate_px = int(self.cfg.get("multi_stitch_mask_dilate_px", 14))
+            if dilate_px > 0:
+                stitch_mask = dilate_mask(mask, dilate_px)
         # Multi-person: stronger feather + LAB match — jaw/neck seams are the
         # dominant failure mode when the donor face lighting ≠ body flash.
         if multi_person:
             feather = int(
                 self.cfg.get(
                     "multi_stitch_feather_px",
-                    max(16, int(self.cfg.get("stitch_feather_px", 10)) + 6),
+                    max(14, int(self.cfg.get("stitch_feather_px", 10)) + 4),
                 )
             )
             post_match = float(
@@ -1257,12 +1270,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
         stitched = feathered_soft_composite(
             canvas,
             edited_crop,
-            mask,
+            stitch_mask,
             box,
             extra_blur_px=feather,
         )
         return lab_histogram_match_face(
-            stitched, color_ref, mask, strength=post_match
+            stitched, color_ref, stitch_mask, strength=post_match
         )
 
 
