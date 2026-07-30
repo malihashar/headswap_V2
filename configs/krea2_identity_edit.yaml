@@ -71,6 +71,14 @@ mask_bot_extend: 0.40
 stitch_feather_px: 10
 post_color_match_strength: 0.35
 
+# Temporary A/B for multi-person (>1 detected face):
+#   crop_stitch — existing isolate + mask→crop→edit→stitch (DEFAULT; do not
+#                 switch product default until full_frame wins A/B).
+#   full_frame  — one Krea2 pass on the whole body image; no crop/stitch.
+# Single-person images always use crop_stitch when mask_crop_stitch is true.
+multi_person_edit_mode: crop_stitch
+multi_full_frame_max_dim: 1024
+
 # Multi-person body photos: pick which face to swap, then tighten the crop so
 # neighbors are not in the edit canvas (fixes giant-head / wrong-person fails).
 # policy: largest | rightmost | leftmost | index

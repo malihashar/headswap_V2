@@ -798,6 +798,92 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
         return prompt
 
+    def _face_position_label(
+        self, selected: FaceBox | None, all_faces: list[FaceBox]
+    ) -> str:
+        """Relative horizontal position of the selected face among detections."""
+        if selected is None or len(all_faces) <= 1:
+            return "the primary"
+        ordered = sorted(all_faces, key=lambda f: 0.5 * (f.x0 + f.x1))
+        idx = next(
+            (
+                i
+                for i, f in enumerate(ordered)
+                if f.x0 == selected.x0
+                and f.y0 == selected.y0
+                and f.x1 == selected.x1
+                and f.y1 == selected.y1
+            ),
+            0,
+        )
+        n = len(ordered)
+        if n == 2:
+            return "leftmost" if idx == 0 else "rightmost"
+        if idx == 0:
+            return "leftmost"
+        if idx == n - 1:
+            return "rightmost"
+        return "center"
+
+    def _prompt_for_full_frame_multi(
+        self, selected: FaceBox | None, all_faces: list[FaceBox]
+    ) -> str:
+        """Prompt for full-frame multi-person edit (no crop locality language)."""
+        base = str(self.cfg.get("prompt", "") or "").strip()
+        pos = self._face_position_label(selected, all_faces)
+        n = len(all_faces)
+        return (
+            base
+            + f" There are {n} people in the first image. Replace ONLY the head and "
+            f"face of the {pos} person with the identity from the second image. "
+            "Leave every other person completely unchanged — same faces, hair, "
+            "expression, and clothing. Do not add a visible seam or paste line at "
+            "the neck. Match lighting and skin tone to the first image. Keep pose, "
+            "camera angle, and background identical."
+        )
+
+    def _build_full_frame_inputs(
+        self,
+        body_full: Image.Image,
+        face_crop: Image.Image,
+        *,
+        div_by: int,
+        selected_face: FaceBox | None,
+        all_faces: list[FaceBox],
+    ) -> dict[str, Any]:
+        """Full-body scene + identity ref — no mask/crop/stitch."""
+        max_ff = int(
+            self.cfg.get(
+                "multi_full_frame_max_dim",
+                self.cfg.get("max_body_dim", 1024),
+            )
+        )
+        scene = resize_max_keep_ar(body_full.convert("RGB"), max_ff, div_by=div_by)
+        person = resize_contain(face_crop.convert("RGB"), scene.size, fill=(0, 0, 0))
+        diag = {
+            "faces_detected": len(all_faces),
+            "selected_box": (
+                None
+                if selected_face is None
+                else [
+                    selected_face.x0,
+                    selected_face.y0,
+                    selected_face.x1,
+                    selected_face.y1,
+                ]
+            ),
+            "edit_mode": "full_frame",
+            "scene_size": list(scene.size),
+            "person_size": list(person.size),
+            "body_size": list(body_full.size),
+            "face_position": self._face_position_label(selected_face, all_faces),
+            "multi_person": True,
+            "use_tight": False,
+            "isolate_selected": False,
+            "face_white_bg_applied": False,
+        }
+        return {"scene": scene, "person": person, "diag": diag}
+
     def _sample_edit(
         self,
         rt: NodeRuntime,
@@ -1118,6 +1204,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
         face_failures: list[dict[str, Any]] = []
         faces_succeeded: list[int] = []
         face_prep_diag: dict[str, Any] = {}
+        edit_mode = "crop_stitch"  # crop_stitch | full_frame | legacy_full
+        do_stitch = bool(mask_crop_stitch)
 
         with _stage(timings, "preprocessing"):
             face_crop = crop_face_reference(
@@ -1146,6 +1234,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     index=body_face_index,
                     policy=body_face_policy if not swap_all else "largest",
                 )
+                multi_edit_mode = str(
+                    self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
+                ).strip().lower()
                 # MULTI-FACE: swap every detected face sequentially when requested.
                 if swap_all and len(all_faces) > 1:
                     print(
@@ -1157,8 +1248,45 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     timings["_multi_person"] = 1.0
                     timings["_body_face_count"] = float(len(all_faces))
                     timings["_face_swap_mode_all"] = 1.0
+                    edit_mode = "crop_stitch"
+                    do_stitch = True
+                elif (
+                    len(all_faces) > 1
+                    and multi_edit_mode in ("full_frame", "fullframe", "full")
+                    and not swap_all
+                ):
+                    # Temporary A/B path: whole-image edit, no crop/stitch.
+                    multi_person = True
+                    use_tight = False
+                    built = self._build_full_frame_inputs(
+                        body_full,
+                        face_crop,
+                        div_by=div_by,
+                        selected_face=selected_face,
+                        all_faces=all_faces,
+                    )
+                    scene = built["scene"]
+                    person = built["person"]
+                    mask = None
+                    box = None
+                    crop_content_box = None
+                    face_prep_diag = built.get("diag") or {}
+                    edit_mode = "full_frame"
+                    do_stitch = False
+                    self._log_face_diag(face_prep_diag, label="full_frame")
+                    print(
+                        f"[krea2] edit_mode=full_frame faces={len(all_faces)} "
+                        f"position={face_prep_diag.get('face_position')} "
+                        f"scene={list(scene.size)} person={list(person.size)}",
+                        file=sys.__stdout__,
+                        flush=True,
+                    )
+                    timings["_multi_person"] = 1.0
+                    timings["_tight_crop"] = 0.0
+                    timings["_body_face_count"] = float(len(all_faces))
+                    timings["_edit_mode_full_frame"] = 1.0
                 else:
-                    # Single-face path (unchanged behavior / one inference pass).
+                    # Default / single-face / multi crop_stitch path.
                     if swap_all and len(all_faces) <= 1:
                         print(
                             "[krea2] face_swap_mode=all but only 1 face detected "
@@ -1171,8 +1299,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     use_tight = bool(flags["use_tight"])
                     isolate_selected = bool(flags.get("isolate_selected"))
                     face_frac = float(flags["face_frac"])
+                    edit_mode = "crop_stitch"
+                    do_stitch = True
                     print(
-                        f"[krea2] faces_detected={len(all_faces)} "
+                        f"[krea2] edit_mode=crop_stitch faces_detected={len(all_faces)} "
                         f"policy={body_face_policy} index={body_face_index} "
                         f"face_frac={face_frac:.3f} tight_crop={use_tight} "
                         f"isolate={isolate_selected} "
@@ -1201,7 +1331,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     box = built["box"]
                     crop_content_box = built["crop_content_box"]
                     face_prep_diag = built.get("diag") or {}
-                    self._log_face_diag(face_prep_diag, label="single")
+                    face_prep_diag["edit_mode"] = "crop_stitch"
+                    self._log_face_diag(face_prep_diag, label="crop_stitch")
                     timings["_multi_person"] = 1.0 if multi_person else 0.0
                     timings["_tight_crop"] = 1.0 if use_tight else 0.0
                     timings["_body_face_count"] = float(len(all_faces))
@@ -1217,12 +1348,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 scene = resize_max_keep_ar(
                     body.convert("RGB"), max_dim, div_by=div_by
                 )
-                person = resize_max_keep_ar(
-                    face_crop.convert("RGB"), max_dim, div_by=div_by
+                person = resize_contain(
+                    face_crop.convert("RGB"), scene.size, fill=(0, 0, 0)
                 )
                 multi_person = False
                 all_faces = []
                 selected_face = None
+                edit_mode = "legacy_full"
+                do_stitch = False
 
         save_debug = bool(self.cfg.get("save_debug", False))
         verbose = bool(self.cfg.get("verbose", False))
@@ -1326,10 +1459,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
             use_tight = True
             multi_person = True
         else:
-            # ---------- Single-face / full-frame path (one inference) ----------
-            prompt = self._prompt_for_edit(
-                use_tight=use_tight, multi_person=multi_person
-            )
+            # ---------- Single-pass path (crop_stitch or full_frame) ----------
+            if edit_mode == "full_frame":
+                prompt = self._prompt_for_full_frame_multi(selected_face, all_faces)
+            else:
+                prompt = self._prompt_for_edit(
+                    use_tight=use_tight, multi_person=multi_person
+                )
             sample_meta = self._sample_edit(
                 rt,
                 bundle,
@@ -1344,7 +1480,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             with _stage(timings, "postprocessing"):
                 out = edited
                 if (
-                    mask_crop_stitch
+                    do_stitch
                     and body_full is not None
                     and mask is not None
                     and box is not None
@@ -1358,7 +1494,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         color_ref=body_full,
                         multi_person=multi_person,
                     )
-            faces_succeeded = [0] if mask_crop_stitch else []
+                elif edit_mode == "full_frame" and body_full is not None:
+                    # Model output is already full-frame; resize to body_full if needed.
+                    if out.size != body_full.size:
+                        out = out.resize(body_full.size, Image.Resampling.LANCZOS)
+            faces_succeeded = [0] if do_stitch or edit_mode == "full_frame" else []
 
         dbg = {}
         if out_dir is not None and save_debug:
@@ -1372,9 +1512,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     debug_imgs["debug_body"] = body_full
                 if mask is not None:
                     debug_imgs["debug_mask"] = mask
-                if mask_crop_stitch:
+                if do_stitch:
                     debug_imgs["debug_crop"] = scene
                     debug_imgs["debug_edited_crop"] = sample_meta["edited"]
+                if edit_mode == "full_frame":
+                    debug_imgs["debug_full_frame_scene"] = scene
+                    debug_imgs["debug_full_frame_person"] = person
+                    debug_imgs["debug_full_frame_raw"] = sample_meta["edited"]
                 if swap_all and body_full is not None and out is not None:
                     debug_imgs["debug_swap_all_result"] = out
                 dbg = {
@@ -1405,6 +1549,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "body_size": list(body_full.size) if body_full is not None else list(scene.size),
             "crop_size": list(scene.size) if mask_crop_stitch else None,
             "mask_crop_stitch": mask_crop_stitch,
+            "edit_mode": edit_mode,
+            "multi_person_edit_mode": str(
+                self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
+            ),
             "multi_person": bool(timings.get("_multi_person")),
             "tight_crop": bool(timings.get("_tight_crop")),
             "body_face_count": int(timings.get("_body_face_count") or 0),

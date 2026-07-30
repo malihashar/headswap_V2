@@ -667,6 +667,7 @@ def apply_user_knobs(
     body_face_index: int | None = None,
     face_swap_mode: str | None = None,
     enable_multi_face_features: bool | None = None,
+    multi_person_edit_mode: str | None = None,
 ) -> dict[str, Any]:
     """Map the small user-facing knob set onto pipeline config."""
     out = dict(cfg)
@@ -701,6 +702,15 @@ def apply_user_knobs(
     else:
         # Force single while multi-face product features are disabled.
         out["face_swap_mode"] = "single"
+    if multi_person_edit_mode is not None:
+        mode = str(multi_person_edit_mode).strip().lower() or "crop_stitch"
+        if mode not in ("crop_stitch", "full_frame", "fullframe", "full"):
+            mode = "crop_stitch"
+        out["multi_person_edit_mode"] = (
+            "full_frame" if mode in ("full_frame", "fullframe", "full") else "crop_stitch"
+        )
+    else:
+        out.setdefault("multi_person_edit_mode", "crop_stitch")
     return out
 
 

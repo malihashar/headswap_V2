@@ -32,7 +32,15 @@ Internal **production demo** for Krea 2 Identity Edit (Magic Hour engineers).
 
 ## Multi-face bodies
 
-**Current product:** if the body has multiple faces, the pipeline automatically swaps the **primary** face (`body_face_policy`, default `largest`) in a single pass. No face-picker UI.
+**Current product:** if the body has multiple faces, the pipeline automatically swaps the **primary** face (`body_face_policy`, default `largest`) via **`multi_person_edit_mode: crop_stitch`** (mask → crop → edit → stitch).
+
+**Temporary A/B:** set `multi_person_edit_mode: full_frame` in `configs/krea2_identity_edit.yaml` to try one full-image Krea2 pass with no stitch (targets neck-seam issues). Do **not** flip the default until A/B shows a consistent win:
+
+```bash
+PYTHONPATH=src python scripts/ab_multi_edit_modes.py \
+  --body /path/to/group.png --face /path/to/id.png \
+  --out results/_ab_multi_edit_modes
+```
 
 **Future (implemented, disabled):** face picker + swap-all live behind:
 
