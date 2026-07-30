@@ -666,21 +666,42 @@ def hard_freeze_neighbor_faces(
     selected: FaceBox | None,
     all_faces: list[FaceBox],
     *,
-    pad_frac: float = 0.40,
-    expand_top_frac: float = 0.55,
+    pad_frac: float = 0.25,
+    expand_top_frac: float = 0.40,
+    protect_expand: float = 1.15,
 ) -> Image.Image:
     """
     Pixel-copy neighbor face (+hair) regions from ``original`` onto ``result``.
 
     Used after full-frame Krea2 (which has no latent inpaint mask) so neighboring
     people are restored exactly even if the model rewrote them during denoise.
+
+    Critical: never overwrite the selected face/hair region. On tight group shots
+    expanded neighbor boxes often overlap the swap target; pasting raw rectangles
+    would erase the edit (looks like "no swap happened").
     """
     if selected is None or not all_faces:
         return result
     if result.size != original.size:
         original = original.resize(result.size, Image.Resampling.LANCZOS)
-    out = result.copy()
-    w, h = out.size
+    w, h = result.size
+    out_arr = np.asarray(result.convert("RGB")).copy()
+    orig_arr = np.asarray(original.convert("RGB"))
+
+    # Protect selected head+hair — neighbor restores must not touch this.
+    protect = np.zeros((h, w), dtype=np.uint8)
+    sx0, sy0, sx1, sy1 = selected.x0, selected.y0, selected.x1, selected.y1
+    sw, sh = max(1, selected.width), max(1, selected.height)
+    cx = (sx0 + sx1) // 2
+    cy = (sy0 + sy1) // 2
+    # Shift center slightly up and enlarge vertically to cover hair.
+    cy_p = max(0, cy - int(0.20 * sh))
+    axes = (
+        max(6, int(0.55 * protect_expand * sw)),
+        max(6, int(0.75 * protect_expand * sh)),
+    )
+    cv2.ellipse(protect, (cx, cy_p), axes, 0, 0, 360, 255, -1)
+
     for face in all_faces:
         if (
             face.x0 == selected.x0
@@ -699,8 +720,67 @@ def hard_freeze_neighbor_faces(
         y1 = min(h, face.y1 + pad_y)
         if x1 <= x0 or y1 <= y0:
             continue
-        out.paste(original.crop((x0, y0, x1, y1)), (x0, y0))
-    return out
+        # Skip neighbors that heavily overlap the selected box (near-duplicates).
+        ix0, iy0 = max(sx0, face.x0), max(sy0, face.y0)
+        ix1, iy1 = min(sx1, face.x1), min(sy1, face.y1)
+        inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+        if inter > 0.5 * face.width * face.height:
+            continue
+        keep = protect[y0:y1, x0:x1] == 0
+        if not np.any(keep):
+            continue
+        patch = out_arr[y0:y1, x0:x1]
+        patch[keep] = orig_arr[y0:y1, x0:x1][keep]
+        out_arr[y0:y1, x0:x1] = patch
+    return Image.fromarray(out_arr)
+
+
+def ensure_selected_face_mask_coverage(
+    mask: Image.Image,
+    selected: FaceBox | None,
+    *,
+    min_frac: float = 0.35,
+    top_extend: float = 1.2,
+    side_extend: float = 0.45,
+    bot_extend: float = 0.35,
+) -> Image.Image:
+    """
+    If neighbor carve-outs wiped most of the selected head mask, redraw it.
+
+    Prevents freeze soft-composite from becoming a no-op (original body only).
+    """
+    if selected is None:
+        return mask
+    arr = np.asarray(mask.convert("L")).copy()
+    h, w = arr.shape
+    x0 = max(0, selected.x0)
+    y0 = max(0, selected.y0)
+    x1 = min(w, selected.x1)
+    y1 = min(h, selected.y1)
+    if x1 <= x0 or y1 <= y0:
+        return mask
+    region = arr[y0:y1, x0:x1]
+    frac = float((region > 127).mean()) if region.size else 0.0
+    if frac >= min_frac:
+        return mask
+    fw, fh = max(1, selected.width), max(1, selected.height)
+    ex0 = int(selected.x0 - side_extend * fw)
+    ex1 = int(selected.x1 + side_extend * fw)
+    ey0 = int(selected.y0 - top_extend * fh)
+    ey1 = int(selected.y1 + bot_extend * fh)
+    ex0, ey0 = max(0, ex0), max(0, ey0)
+    ex1, ey1 = min(w, ex1), min(h, ey1)
+    cv2.ellipse(
+        arr,
+        ((ex0 + ex1) // 2, (ey0 + ey1) // 2),
+        (max(1, (ex1 - ex0) // 2), max(1, (ey1 - ey0) // 2)),
+        0,
+        0,
+        360,
+        255,
+        -1,
+    )
+    return Image.fromarray(arr)
 
 
 def identity_face_boost_mask(

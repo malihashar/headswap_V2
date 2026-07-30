@@ -37,6 +37,7 @@ from headswap.preprocess import (
     crop_face_reference,
     crop_with_mask,
     dilate_mask,
+    ensure_selected_face_mask_coverage,
     expand_crop_box_for_face_fill,
     feathered_soft_composite,
     hard_freeze_neighbor_faces,
@@ -939,9 +940,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
             bot_extend=float(self.cfg.get("full_frame_mask_bot_extend", 0.40)),
             face_box=selected_face,
         )
-        shrink = float(self.cfg.get("full_frame_neighbor_suppress_shrink", 1.25))
-        return suppress_neighbor_faces_in_mask(
+        shrink = float(self.cfg.get("full_frame_neighbor_suppress_shrink", 1.05))
+        mask = suppress_neighbor_faces_in_mask(
             mask, selected_face, all_faces, shrink=shrink
+        )
+        return ensure_selected_face_mask_coverage(
+            mask,
+            selected_face,
+            min_frac=float(self.cfg.get("full_frame_min_selected_mask_frac", 0.35)),
+            top_extend=float(
+                self.cfg.get(
+                    "full_frame_mask_top_extend",
+                    self.cfg.get("mask_top_extend", 1.55),
+                )
+            ),
+            side_extend=float(self.cfg.get("full_frame_mask_side_extend", 0.42)),
+            bot_extend=float(self.cfg.get("full_frame_mask_bot_extend", 0.40)),
         )
 
     def _freeze_full_frame_outside_selected(
@@ -971,7 +985,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
             stitch_mask,
             selected_face,
             all_faces,
-            shrink=float(self.cfg.get("full_frame_neighbor_suppress_shrink", 1.25)),
+            shrink=float(self.cfg.get("full_frame_neighbor_suppress_shrink", 1.05)),
+        )
+        # Neighbor carve on tight groups can wipe the selected head — restore it.
+        stitch_mask = ensure_selected_face_mask_coverage(
+            stitch_mask,
+            selected_face,
+            min_frac=float(self.cfg.get("full_frame_min_selected_mask_frac", 0.35)),
+            top_extend=float(
+                self.cfg.get(
+                    "full_frame_mask_top_extend",
+                    self.cfg.get("mask_top_extend", 1.55),
+                )
+            ),
+            side_extend=float(self.cfg.get("full_frame_mask_side_extend", 0.42)),
+            bot_extend=float(self.cfg.get("full_frame_mask_bot_extend", 0.40)),
         )
         w, h = body_full.size
         feather = int(self.cfg.get("full_frame_freeze_feather_px", 12))
@@ -988,8 +1016,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 body_full,
                 selected_face,
                 all_faces,
-                pad_frac=float(self.cfg.get("full_frame_neighbor_pad_frac", 0.42)),
-                expand_top_frac=float(self.cfg.get("full_frame_neighbor_top_frac", 0.60)),
+                pad_frac=float(self.cfg.get("full_frame_neighbor_pad_frac", 0.22)),
+                expand_top_frac=float(self.cfg.get("full_frame_neighbor_top_frac", 0.35)),
+                protect_expand=float(self.cfg.get("full_frame_protect_expand", 1.20)),
             )
         post_match = float(
             self.cfg.get("full_frame_post_color_match_strength", 0.45) or 0.0

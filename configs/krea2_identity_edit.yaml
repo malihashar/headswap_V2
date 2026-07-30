@@ -95,9 +95,14 @@ full_frame_mask_expand_px: 12
 full_frame_mask_blur_px: 12
 full_frame_freeze_dilate_px: 6
 full_frame_freeze_feather_px: 12
-full_frame_neighbor_suppress_shrink: 1.25
-full_frame_neighbor_pad_frac: 0.42
-full_frame_neighbor_top_frac: 0.60
+# Keep neighbor carve moderate — aggressive shrink on tight groups wiped the
+# selected-head mask and made freeze look like a no-op swap.
+full_frame_neighbor_suppress_shrink: 1.05
+full_frame_min_selected_mask_frac: 0.35
+# Tight pads + protect ellipse so neighbor restores cannot overwrite the swap.
+full_frame_neighbor_pad_frac: 0.22
+full_frame_neighbor_top_frac: 0.35
+full_frame_protect_expand: 1.20
 full_frame_post_color_match_strength: 0.45
 # Optional: restrict identity ref_boost to the face ellipse on image-2
 # (attention boost only — does NOT freeze the scene).

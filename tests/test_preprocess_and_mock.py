@@ -79,6 +79,34 @@ def test_hard_freeze_neighbor_faces_restores_pixels():
     assert tuple(arr[25, 72].tolist()) == (0, 255, 0)
 
 
+def test_hard_freeze_does_not_overwrite_selected_on_overlap():
+    """Tight group: oversized neighbor paste must not erase the swap."""
+    from PIL import ImageDraw
+
+    original = Image.new("RGB", (120, 80), (10, 20, 30))
+    ImageDraw.Draw(original).rectangle([20, 15, 55, 50], fill=(255, 0, 0))
+    ImageDraw.Draw(original).rectangle([50, 15, 90, 50], fill=(0, 0, 100))  # orig selected
+
+    edited = original.copy()
+    ImageDraw.Draw(edited).rectangle([50, 15, 90, 50], fill=(0, 255, 0))  # swapped
+
+    selected = FaceBox(50, 15, 90, 50, 0.9)
+    neighbor = FaceBox(20, 15, 55, 50, 0.9)
+    # Large pad would cover selected if unprotected
+    frozen = hard_freeze_neighbor_faces(
+        edited,
+        original,
+        selected,
+        [selected, neighbor],
+        pad_frac=0.8,
+        expand_top_frac=0.5,
+        protect_expand=1.2,
+    )
+    arr = np.asarray(frozen)
+    # Center of selected must stay swapped green, not original blue-ish
+    assert tuple(arr[32, 70].tolist()) == (0, 255, 0)
+
+
 def test_suppress_neighbor_zeros_other_faces():
     mask = Image.new("L", (100, 80), 255)
     selected = FaceBox(60, 10, 85, 40, 0.9)
