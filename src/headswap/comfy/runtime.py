@@ -320,6 +320,14 @@ def pil_to_comfy_tensor(im, torch):
     return torch.from_numpy(arr)[None, ...]
 
 
+def pil_mask_to_comfy_tensor(mask, torch):
+    """Convert a PIL L/RGB mask to ComfyUI MASK tensor shape (1, H, W) float 0–1."""
+    import numpy as np
+
+    arr = np.asarray(mask.convert("L")).astype("float32") / 255.0
+    return torch.from_numpy(arr)[None, ...]
+
+
 def comfy_tensor_to_pil(img_bhwc):
     import numpy as np
     from PIL import Image

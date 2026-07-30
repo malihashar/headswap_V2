@@ -25,6 +25,7 @@ from headswap.comfy.runtime import (
     comfy_tensor_to_pil,
     comfyui_path,
     get_value_at_index,
+    pil_mask_to_comfy_tensor,
     pil_to_comfy_tensor,
     resolve_model_file,
 )
@@ -38,7 +39,9 @@ from headswap.preprocess import (
     dilate_mask,
     expand_crop_box_for_face_fill,
     feathered_soft_composite,
+    hard_freeze_neighbor_faces,
     head_hair_mask_from_face,
+    identity_face_boost_mask,
     lab_histogram_match_face,
     pad_to_square,
     pil_to_rgb_np,
@@ -890,23 +893,125 @@ class Krea2IdentityEditPipeline(BasePipeline):
     def _prompt_for_full_frame_multi(
         self, selected: FaceBox | None, all_faces: list[FaceBox]
     ) -> str:
-        """Prompt for full-frame multi-person edit (no crop locality language)."""
+        """Prompt for full-frame multi-person edit with hard locality language."""
         base = str(self.cfg.get("prompt", "") or "").strip()
         pos = self._face_position_label(selected, all_faces)
         n = len(all_faces)
         return (
             base
-            + f" There are {n} people in the first image. Replace ONLY the head, "
-            f"face, and hair of the {pos} person with the identity from the second "
-            "image — including that person's hairstyle from image 2. Completely "
-            "remove the original hair. "
+            + f" There are {n} people in the first image. "
+            "LOCALITY (mandatory): edit ONLY the selected person's head, face, and "
+            f"hair — the {pos} person. Do not modify, morph, blend, duplicate, or "
+            "ghost any other face. Preserve every other face EXACTLY as in image 1. "
+            "Preserve all clothing, hands, body pose, necklines, accessories, and the "
+            "entire background exactly. Do not invent a second set of eyes/nose/mouth "
+            "on anyone. "
+            f"Replace ONLY the head, face, and hair of the {pos} person with the "
+            "identity from the second image — including that person's hairstyle from "
+            "image 2. Completely remove the original hair of the selected person only. "
             "CRITICAL: the new head must be the SAME SIZE as the original head of "
             f"that {pos} person — do not enlarge it relative to the neighbors. "
             "Leave every other person completely unchanged — same faces, hair, "
-            "expression, and clothing. Do not add a visible seam or paste line at "
-            "the neck. Match lighting and skin tone to the first image. Keep pose, "
+            "expression, clothing, and hands. Do not add a visible seam or paste line "
+            "at the neck. Match lighting and skin tone to the first image. Keep pose, "
             "camera angle, and background identical."
         )
+
+    def _build_full_frame_freeze_mask(
+        self,
+        body_full: Image.Image,
+        selected_face: FaceBox | None,
+        all_faces: list[FaceBox],
+    ) -> Image.Image:
+        """Selected head+hair mask; neighbors carved out aggressively."""
+        mask = head_hair_mask_from_face(
+            body_full,
+            self.cache_dir,
+            expand_px=int(self.cfg.get("full_frame_mask_expand_px", 12)),
+            blur_px=int(self.cfg.get("full_frame_mask_blur_px", 12)),
+            top_extend=float(
+                self.cfg.get(
+                    "full_frame_mask_top_extend",
+                    self.cfg.get("mask_top_extend", 1.55),
+                )
+            ),
+            side_extend=float(self.cfg.get("full_frame_mask_side_extend", 0.42)),
+            bot_extend=float(self.cfg.get("full_frame_mask_bot_extend", 0.40)),
+            face_box=selected_face,
+        )
+        shrink = float(self.cfg.get("full_frame_neighbor_suppress_shrink", 1.25))
+        return suppress_neighbor_faces_in_mask(
+            mask, selected_face, all_faces, shrink=shrink
+        )
+
+    def _freeze_full_frame_outside_selected(
+        self,
+        body_full: Image.Image,
+        edited: Image.Image,
+        freeze_mask: Image.Image,
+        selected_face: FaceBox | None,
+        all_faces: list[FaceBox],
+    ) -> Image.Image:
+        """
+        Soft-composite full-frame edit onto the original body using the selected
+        head mask, then hard-restore neighbor faces from the original.
+
+        Krea2 has no latent region/inpaint mask; this is the strongest available
+        freeze for full-frame generation without reverting to crop-and-stitch.
+        """
+        if edited.size != body_full.size:
+            edited = edited.resize(body_full.size, Image.Resampling.LANCZOS)
+        if freeze_mask.size != body_full.size:
+            freeze_mask = freeze_mask.resize(body_full.size, Image.Resampling.BILINEAR)
+
+        dilate_px = int(self.cfg.get("full_frame_freeze_dilate_px", 6))
+        stitch_mask = dilate_mask(freeze_mask, dilate_px) if dilate_px > 0 else freeze_mask
+        # Dilate can bleed into neighbors — carve them out again.
+        stitch_mask = suppress_neighbor_faces_in_mask(
+            stitch_mask,
+            selected_face,
+            all_faces,
+            shrink=float(self.cfg.get("full_frame_neighbor_suppress_shrink", 1.25)),
+        )
+        w, h = body_full.size
+        feather = int(self.cfg.get("full_frame_freeze_feather_px", 12))
+        out = feathered_soft_composite(
+            body_full,
+            edited,
+            stitch_mask,
+            (0, 0, w, h),
+            extra_blur_px=feather,
+        )
+        if bool(self.cfg.get("full_frame_hard_freeze_neighbors", True)):
+            out = hard_freeze_neighbor_faces(
+                out,
+                body_full,
+                selected_face,
+                all_faces,
+                pad_frac=float(self.cfg.get("full_frame_neighbor_pad_frac", 0.42)),
+                expand_top_frac=float(self.cfg.get("full_frame_neighbor_top_frac", 0.60)),
+            )
+        post_match = float(
+            self.cfg.get("full_frame_post_color_match_strength", 0.45) or 0.0
+        )
+        if post_match > 0:
+            out = lab_histogram_match_face(
+                out, body_full, stitch_mask, strength=post_match
+            )
+        return out
+
+    @staticmethod
+    def _node_accepts_kwarg(rt: NodeRuntime, node_name: str, key: str) -> bool:
+        cls = rt.mappings.get(node_name)
+        if cls is None:
+            return False
+        try:
+            types = cls.INPUT_TYPES()  # type: ignore[attr-defined]
+        except Exception:
+            return False
+        opt = types.get("optional") or {}
+        req = types.get("required") or {}
+        return key in opt or key in req
 
     def _build_full_frame_inputs(
         self,
@@ -917,7 +1022,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         selected_face: FaceBox | None,
         all_faces: list[FaceBox],
     ) -> dict[str, Any]:
-        """Full-body scene + identity ref — no mask/crop/stitch."""
+        """Full-body scene + identity ref — no crop; optional freeze mask after."""
         max_ff = int(
             self.cfg.get(
                 "multi_full_frame_max_dim",
@@ -942,6 +1047,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
         else:
             person = resize_contain(face_crop.convert("RGB"), scene.size, fill=(0, 0, 0))
+
+        freeze_outside = bool(self.cfg.get("full_frame_freeze_outside", True))
+        freeze_mask = None
+        if freeze_outside and selected_face is not None:
+            freeze_mask = self._build_full_frame_freeze_mask(
+                body_full, selected_face, all_faces
+            )
+
+        ref_boost_mask = None
+        if bool(self.cfg.get("full_frame_ref_boost_mask", True)):
+            ref_boost_mask = identity_face_boost_mask(person, self.cache_dir)
+
         diag = {
             "faces_detected": len(all_faces),
             "selected_box": (
@@ -961,12 +1078,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "face_position": self._face_position_label(selected_face, all_faces),
             "face_height_frac_scene": round(float(face_h_frac), 4),
             "identity_scale_match": bool(self.cfg.get("identity_scale_match", True)),
+            "full_frame_freeze_outside": freeze_outside,
+            "full_frame_ref_boost_mask": ref_boost_mask is not None,
             "multi_person": True,
             "use_tight": False,
             "isolate_selected": False,
             "face_white_bg_applied": False,
         }
-        return {"scene": scene, "person": person, "diag": diag}
+        return {
+            "scene": scene,
+            "person": person,
+            "freeze_mask": freeze_mask,
+            "ref_boost_mask": ref_boost_mask,
+            "diag": diag,
+        }
 
     def _sample_edit(
         self,
@@ -979,6 +1104,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         prompt: str,
         edit_cache_info: dict,
         seed: int | None = None,
+        ref_boost_mask: Image.Image | None = None,
     ) -> dict[str, Any]:
         """One Krea2 dual-ref sample → decoded PIL. Shared by single + swap-all."""
         import torch
@@ -1003,6 +1129,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         count_forwards = bool(self.cfg.get("debug_count_unet_forwards", False))
         torch_compile = bool(self.cfg.get("torch_compile", False))
         compile_mode = str(self.cfg.get("torch_compile_mode", "reduce-overhead"))
+        used_ref_boost_mask = False
 
         with torch.no_grad():
             scene_t = pil_to_comfy_tensor(scene, torch)
@@ -1013,18 +1140,27 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 person_lat = rt.call("VAEEncode", pixels=person_t, vae=bundle["vae"])
 
             with _stage(timings, "model_patch"):
-                patched = rt.call(
-                    "Krea2EditModelPatch",
-                    model=bundle["model"],
-                    source_latent=get_value_at_index(scene_lat, 0),
-                    source_latent_b=get_value_at_index(person_lat, 0),
-                    ref_boost=ref_boost,
-                    ref_boost_a=ref_boost_a,
-                    fit_mode=fit_mode,
-                    vae=bundle["vae"],
-                    source_image=scene_t,
-                    source_image_b=person_t,
-                )
+                patch_kwargs: dict[str, Any] = {
+                    "model": bundle["model"],
+                    "source_latent": get_value_at_index(scene_lat, 0),
+                    "source_latent_b": get_value_at_index(person_lat, 0),
+                    "ref_boost": ref_boost,
+                    "ref_boost_a": ref_boost_a,
+                    "fit_mode": fit_mode,
+                    "vae": bundle["vae"],
+                    "source_image": scene_t,
+                    "source_image_b": person_t,
+                }
+                # Identity attention boost localized to face — NOT an edit freeze.
+                if (
+                    ref_boost_mask is not None
+                    and self._node_accepts_kwarg(rt, "Krea2EditModelPatch", "ref_boost_mask")
+                ):
+                    patch_kwargs["ref_boost_mask"] = pil_mask_to_comfy_tensor(
+                        ref_boost_mask, torch
+                    )
+                    used_ref_boost_mask = True
+                patched = rt.call("Krea2EditModelPatch", **patch_kwargs)
                 model = get_value_at_index(patched, 0)
 
             compile_info = _maybe_torch_compile_diffusion(
@@ -1191,6 +1327,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "seed": seed_i,
             "ref_boost": ref_boost,
             "ref_boost_a": ref_boost_a,
+            "ref_boost_mask_used": used_ref_boost_mask,
             "grounding_px": grounding_px,
             "fit_mode": fit_mode,
             "verbose": verbose,
@@ -1317,6 +1454,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
         mask = None
         box = None
         crop_content_box: tuple[int, int, int, int] | None = None
+        freeze_mask: Image.Image | None = None
+        ref_boost_mask_img: Image.Image | None = None
         scene: Image.Image
         person: Image.Image
         all_faces: list[FaceBox] = []
@@ -1357,7 +1496,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     policy=body_face_policy if not swap_all else "largest",
                 )
                 multi_edit_mode = str(
-                    self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
+                    self.cfg.get("multi_person_edit_mode", "full_frame") or "full_frame"
                 ).strip().lower()
                 # MULTI-FACE: swap every detected face sequentially when requested.
                 if swap_all and len(all_faces) > 1:
@@ -1377,7 +1516,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     and multi_edit_mode in ("full_frame", "fullframe", "full")
                     and not swap_all
                 ):
-                    # Temporary A/B path: whole-image edit, no crop/stitch.
+                    # Full-frame Krea2 (no crop). Locality via post-freeze composite.
                     multi_person = True
                     use_tight = False
                     built = self._build_full_frame_inputs(
@@ -1389,8 +1528,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     )
                     scene = built["scene"]
                     person = built["person"]
-                    mask = None
-                    box = None
+                    freeze_mask = built.get("freeze_mask")
+                    ref_boost_mask_img = built.get("ref_boost_mask")
+                    # Expose freeze mask in debug as "mask" for overlay inspection.
+                    mask = freeze_mask
+                    box = (
+                        (0, 0, body_full.size[0], body_full.size[1])
+                        if freeze_mask is not None
+                        else None
+                    )
                     crop_content_box = None
                     face_prep_diag = built.get("diag") or {}
                     edit_mode = "full_frame"
@@ -1399,6 +1545,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     print(
                         f"[krea2] edit_mode=full_frame faces={len(all_faces)} "
                         f"position={face_prep_diag.get('face_position')} "
+                        f"freeze={freeze_mask is not None} "
+                        f"ref_boost_mask={ref_boost_mask_img is not None} "
                         f"scene={list(scene.size)} person={list(person.size)}",
                         file=sys.__stdout__,
                         flush=True,
@@ -1407,6 +1555,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     timings["_tight_crop"] = 0.0
                     timings["_body_face_count"] = float(len(all_faces))
                     timings["_edit_mode_full_frame"] = 1.0
+                    timings["_full_frame_freeze"] = (
+                        1.0 if freeze_mask is not None else 0.0
+                    )
                 else:
                     # Default / single-face / multi crop_stitch path.
                     if swap_all and len(all_faces) <= 1:
@@ -1598,6 +1749,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 prompt=prompt,
                 edit_cache_info=edit_cache_info,
                 seed=base_seed,
+                ref_boost_mask=ref_boost_mask_img if edit_mode == "full_frame" else None,
             )
             edited = sample_meta["edited"]
             with _stage(timings, "postprocessing"):
@@ -1646,6 +1798,24 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 file=sys.__stdout__,
                                 flush=True,
                             )
+                    # Freeze outside selected face (strongest locality without crop-stitch).
+                    if freeze_mask is not None and bool(
+                        self.cfg.get("full_frame_freeze_outside", True)
+                    ):
+                        out = self._freeze_full_frame_outside_selected(
+                            body_full,
+                            out,
+                            freeze_mask,
+                            selected_face,
+                            all_faces,
+                        )
+                        print(
+                            "[krea2] full_frame freeze_outside applied "
+                            f"(hard_neighbors="
+                            f"{bool(self.cfg.get('full_frame_hard_freeze_neighbors', True))})",
+                            file=sys.__stdout__,
+                            flush=True,
+                        )
             faces_succeeded = [0] if do_stitch or edit_mode == "full_frame" else []
 
         dbg = {}
@@ -1667,6 +1837,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     debug_imgs["debug_full_frame_scene"] = scene
                     debug_imgs["debug_full_frame_person"] = person
                     debug_imgs["debug_full_frame_raw"] = sample_meta["edited"]
+                    if freeze_mask is not None:
+                        debug_imgs["debug_freeze_mask"] = freeze_mask
+                    if out is not None:
+                        debug_imgs["debug_full_frame_frozen"] = out
+                    if ref_boost_mask_img is not None:
+                        debug_imgs["debug_ref_boost_mask"] = ref_boost_mask_img
                 if swap_all and body_full is not None and out is not None:
                     debug_imgs["debug_swap_all_result"] = out
                 dbg = {
@@ -1699,8 +1875,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "mask_crop_stitch": mask_crop_stitch,
             "edit_mode": edit_mode,
             "multi_person_edit_mode": str(
-                self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
+                self.cfg.get("multi_person_edit_mode", "full_frame") or "full_frame"
             ),
+            "full_frame_freeze_outside": bool(
+                self.cfg.get("full_frame_freeze_outside", True)
+            )
+            and freeze_mask is not None,
+            "ref_boost_mask_used": bool(sample_meta.get("ref_boost_mask_used")),
             "multi_person": bool(timings.get("_multi_person")),
             "tight_crop": bool(timings.get("_tight_crop")),
             "body_face_count": int(timings.get("_body_face_count") or 0),

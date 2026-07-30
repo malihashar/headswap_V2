@@ -73,13 +73,35 @@ mask_bot_extend: 0.40
 stitch_feather_px: 10
 post_color_match_strength: 0.35
 
-# Temporary A/B for multi-person (>1 detected face):
-#   crop_stitch — existing isolate + mask→crop→edit→stitch (DEFAULT; do not
-#                 switch product default until full_frame wins A/B).
-#   full_frame  — one Krea2 pass on the whole body image; no crop/stitch.
+# Multi-person (>1 detected face):
+#   full_frame  — one Krea2 pass on the whole body image (preferred for selected
+#                 face quality). Krea2 has NO latent/edit inpaint mask; locality
+#                 is enforced by freezing outside the selected head after sample.
+#   crop_stitch — isolate + mask→crop→edit→stitch (rollback only).
 # Single-person images always use crop_stitch when mask_crop_stitch is true.
-multi_person_edit_mode: crop_stitch
+multi_person_edit_mode: full_frame
 multi_full_frame_max_dim: 1024
+# After full-frame sample: soft-composite onto the original body using a
+# selected-face(+hair) mask, then hard-copy neighbor faces from the original.
+# This freezes neighbors/clothes/BG while keeping full-frame head quality.
+full_frame_freeze_outside: true
+full_frame_hard_freeze_neighbors: true
+# Slightly tighter sides than crop-stitch so the freeze mask does not bleed
+# onto the person standing next to the selected face.
+full_frame_mask_top_extend: 1.55
+full_frame_mask_side_extend: 0.42
+full_frame_mask_bot_extend: 0.40
+full_frame_mask_expand_px: 12
+full_frame_mask_blur_px: 12
+full_frame_freeze_dilate_px: 6
+full_frame_freeze_feather_px: 12
+full_frame_neighbor_suppress_shrink: 1.25
+full_frame_neighbor_pad_frac: 0.42
+full_frame_neighbor_top_frac: 0.60
+full_frame_post_color_match_strength: 0.45
+# Optional: restrict identity ref_boost to the face ellipse on image-2
+# (attention boost only — does NOT freeze the scene).
+full_frame_ref_boost_mask: true
 
 # Multi-person body photos: pick which face to swap, then tighten the crop so
 # neighbors are not in the edit canvas (fixes giant-head / wrong-person fails).

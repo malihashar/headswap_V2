@@ -11,7 +11,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from headswap.eval.dataset import generate_synthetic_eval_set, load_pairs
 from headswap.pipelines import create_pipeline_from_config
-from headswap.preprocess import head_hair_mask_from_face, soft_composite, evenify
+from headswap.preprocess import (
+    FaceBox,
+    hard_freeze_neighbor_faces,
+    head_hair_mask_from_face,
+    soft_composite,
+    suppress_neighbor_faces_in_mask,
+    evenify,
+)
 
 
 def test_evenify():
@@ -45,3 +52,38 @@ def test_soft_composite_preserves_outside_mask():
     arr = np.asarray(out)
     # Corner should stay base color
     assert tuple(arr[0, 0].tolist()) == (10, 20, 30)
+
+
+def test_hard_freeze_neighbor_faces_restores_pixels():
+    original = Image.new("RGB", (100, 80), (10, 20, 30))
+    # Paint two "faces"
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(original)
+    draw.rectangle([10, 10, 35, 40], fill=(255, 0, 0))  # left neighbor
+    draw.rectangle([60, 10, 85, 40], fill=(0, 255, 0))  # selected
+
+    # Simulated bad full-frame edit: neighbor corrupted
+    edited = original.copy()
+    ImageDraw.Draw(edited).rectangle([10, 10, 35, 40], fill=(0, 0, 255))
+
+    selected = FaceBox(60, 10, 85, 40, 0.9)
+    neighbor = FaceBox(10, 10, 35, 40, 0.9)
+    frozen = hard_freeze_neighbor_faces(
+        edited, original, selected, [selected, neighbor], pad_frac=0.0, expand_top_frac=0.0
+    )
+    arr = np.asarray(frozen)
+    # Neighbor center restored to original red
+    assert tuple(arr[25, 22].tolist()) == (255, 0, 0)
+    # Selected region still edited green
+    assert tuple(arr[25, 72].tolist()) == (0, 255, 0)
+
+
+def test_suppress_neighbor_zeros_other_faces():
+    mask = Image.new("L", (100, 80), 255)
+    selected = FaceBox(60, 10, 85, 40, 0.9)
+    neighbor = FaceBox(10, 10, 35, 40, 0.9)
+    out = suppress_neighbor_faces_in_mask(mask, selected, [selected, neighbor], shrink=1.0)
+    arr = np.asarray(out)
+    assert arr[25, 22] == 0
+    assert arr[25, 72] == 255

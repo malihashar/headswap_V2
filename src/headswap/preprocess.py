@@ -660,6 +660,80 @@ def suppress_neighbor_faces_in_mask(
     return Image.fromarray(arr)
 
 
+def hard_freeze_neighbor_faces(
+    result: Image.Image,
+    original: Image.Image,
+    selected: FaceBox | None,
+    all_faces: list[FaceBox],
+    *,
+    pad_frac: float = 0.40,
+    expand_top_frac: float = 0.55,
+) -> Image.Image:
+    """
+    Pixel-copy neighbor face (+hair) regions from ``original`` onto ``result``.
+
+    Used after full-frame Krea2 (which has no latent inpaint mask) so neighboring
+    people are restored exactly even if the model rewrote them during denoise.
+    """
+    if selected is None or not all_faces:
+        return result
+    if result.size != original.size:
+        original = original.resize(result.size, Image.Resampling.LANCZOS)
+    out = result.copy()
+    w, h = out.size
+    for face in all_faces:
+        if (
+            face.x0 == selected.x0
+            and face.y0 == selected.y0
+            and face.x1 == selected.x1
+            and face.y1 == selected.y1
+        ):
+            continue
+        fw, fh = max(1, face.width), max(1, face.height)
+        pad_x = int(pad_frac * fw)
+        pad_y = int(pad_frac * fh)
+        top_extra = int(expand_top_frac * fh)
+        x0 = max(0, face.x0 - pad_x)
+        y0 = max(0, face.y0 - top_extra)
+        x1 = min(w, face.x1 + pad_x)
+        y1 = min(h, face.y1 + pad_y)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        out.paste(original.crop((x0, y0, x1, y1)), (x0, y0))
+    return out
+
+
+def identity_face_boost_mask(
+    person: Image.Image,
+    cache_dir,
+    *,
+    expand: float = 1.35,
+) -> Image.Image:
+    """
+    L-mask over the identity face on the person/reference canvas.
+
+    For Krea2 ``ref_boost_mask`` (last-ref attention boost only — not an edit
+    freeze). Comfy MASK expects float later; this returns an 8-bit L image.
+    """
+    rgb = pil_to_rgb_np(person)
+    h, w = rgb.shape[:2]
+    box = detect_best_face(rgb, cache_dir)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    if box is None:
+        cx, cy = w // 2, int(h * 0.35)
+        axes = (max(8, int(w * 0.22)), max(8, int(h * 0.28)))
+        cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
+    else:
+        cx = (box.x0 + box.x1) // 2
+        cy = (box.y0 + box.y1) // 2
+        axes = (
+            max(4, int(0.5 * expand * box.width)),
+            max(4, int(0.55 * expand * box.height)),
+        )
+        cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
+    return Image.fromarray(mask)
+
+
 def expand_crop_box_for_face_fill(
     image_size: tuple[int, int],
     box: tuple[int, int, int, int],
