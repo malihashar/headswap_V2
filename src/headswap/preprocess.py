@@ -1349,9 +1349,13 @@ def align_face_to_destination(
     ellipse_scale_x: float = 2.05,
     ellipse_scale_y: float = 2.55,
     feather_px: int = 21,
+    use_full_affine: bool = True,
 ) -> tuple[Image.Image | None, dict]:
     """
-    Warp source face onto destination face geometry (similarity transform).
+    Warp source face onto destination face geometry.
+
+    Default uses full 6-DOF affine (not similarity-only) so head yaw / looking
+    direction can approximate the destination more closely.
 
     Returns (aligned_rgba_or_None, info_dict).
     Falls back to box-paste when InsightFace is missing or the affine warp is
@@ -1365,6 +1369,7 @@ def align_face_to_destination(
         "dest_landmarks_backend": None,
         "src_landmarks_backend": None,
         "paste_core_min_alpha": float(core_min_alpha),
+        "use_full_affine": bool(use_full_affine),
     }
     dest_rgb = pil_to_rgb_np(destination)
     src_rgb = pil_to_rgb_np(source_face)
@@ -1402,7 +1407,16 @@ def align_face_to_destination(
         ) or (dest_note or src_note or "align_failed")
         return None, info
 
-    matrix, inliers = cv2.estimateAffinePartial2D(src_lm, dest_lm, method=cv2.LMEDS)
+    # Full 6-DOF affine (not similarity-only): non-uniform scale/shear better
+    # approximates head yaw so the pasted face looks the same direction as dest.
+    if use_full_affine:
+        matrix, inliers = cv2.estimateAffine2D(src_lm, dest_lm, method=cv2.LMEDS)
+        affine_name = "estimateAffine2D"
+    else:
+        matrix, inliers = cv2.estimateAffinePartial2D(
+            src_lm, dest_lm, method=cv2.LMEDS
+        )
+        affine_name = "estimateAffinePartial2D"
     if matrix is None:
         boxed, box_info = _box_paste_rgba(
             source_face,
@@ -1412,10 +1426,11 @@ def align_face_to_destination(
             feather_px=feather_px,
         )
         if boxed is not None:
-            box_info["affine_skipped_reason"] = "estimateAffinePartial2D_failed"
+            box_info["affine_skipped_reason"] = f"{affine_name}_failed"
             return boxed, box_info
-        info["face_alignment_skip_reason"] = "estimateAffinePartial2D_failed"
+        info["face_alignment_skip_reason"] = f"{affine_name}_failed"
         return None, info
+    info["affine_estimator"] = affine_name
 
     h, w = dest_rgb.shape[:2]
     warped = cv2.warpAffine(
@@ -1466,6 +1481,97 @@ def align_face_to_destination(
     info["paste_mean_alpha"] = float(alpha_f[core].mean()) if core.any() else 0.0
     info["warp_core_luminance"] = core_lum
     return Image.fromarray(rgba, mode="RGBA"), info
+
+
+def relock_pose_to_destination(
+    generated: Image.Image,
+    destination: Image.Image,
+    cache_dir,
+    *,
+    face_mask: Image.Image | None = None,
+    use_full_affine: bool = True,
+    core_min_alpha: float = 0.90,
+    ellipse_scale_x: float = 2.05,
+    ellipse_scale_y: float = 2.55,
+    feather_px: int = 21,
+    stitch_feather_px: int = 8,
+) -> tuple[Image.Image, dict]:
+    """
+    Force ``generated`` face orientation onto ``destination`` landmarks.
+
+    After generative refine, head yaw / eye gaze often drift toward a frontal
+    identity. Re-aligning locks looking direction to the original photo.
+    """
+    info: dict = {"pose_relock": False, "pose_relock_reason": None}
+    gen = generated.convert("RGB")
+    dest = destination.convert("RGB")
+    if gen.size != dest.size:
+        gen = gen.resize(dest.size, Image.Resampling.LANCZOS)
+
+    aligned_rgba, align_info = align_face_to_destination(
+        gen,
+        dest,
+        cache_dir,
+        core_min_alpha=core_min_alpha,
+        ellipse_scale_x=ellipse_scale_x,
+        ellipse_scale_y=ellipse_scale_y,
+        feather_px=feather_px,
+        use_full_affine=use_full_affine,
+    )
+    info["align_info"] = align_info
+    if aligned_rgba is None:
+        info["pose_relock_reason"] = align_info.get("face_alignment_skip_reason") or "align_failed"
+        return gen, info
+
+    if face_mask is not None:
+        # Warp full generated crop via the same landmark matrix, then mask-blend.
+        dest_rgb = pil_to_rgb_np(dest)
+        gen_rgb = pil_to_rgb_np(gen)
+        dest_lm, dest_backend, _ = get_face_landmarks5(dest_rgb, cache_dir)
+        src_lm, src_backend, _ = get_face_landmarks5(gen_rgb, cache_dir)
+        if (
+            dest_lm is not None
+            and src_lm is not None
+            and dest_backend == "insightface"
+            and src_backend == "insightface"
+        ):
+            if use_full_affine:
+                matrix, _ = cv2.estimateAffine2D(src_lm, dest_lm, method=cv2.LMEDS)
+            else:
+                matrix, _ = cv2.estimateAffinePartial2D(
+                    src_lm, dest_lm, method=cv2.LMEDS
+                )
+            if matrix is not None:
+                h, w = dest_rgb.shape[:2]
+                warped = cv2.warpAffine(
+                    gen_rgb,
+                    matrix,
+                    (w, h),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_REFLECT_101,
+                )
+                out = feathered_soft_composite(
+                    dest,
+                    Image.fromarray(warped, mode="RGB"),
+                    face_mask,
+                    (0, 0, w, h),
+                    extra_blur_px=int(stitch_feather_px),
+                )
+                info["pose_relock"] = True
+                info["pose_relock_backend"] = "affine_mask_blend"
+                info["affine_estimator"] = (
+                    "estimateAffine2D" if use_full_affine else "estimateAffinePartial2D"
+                )
+                return out, info
+
+    pasted, paste_info = paste_aligned_face(dest, aligned_rgba)
+    info.update(paste_info)
+    info["pose_relock"] = bool(paste_info.get("composite_paste"))
+    info["pose_relock_backend"] = "rgba_paste"
+    if not info["pose_relock"]:
+        info["pose_relock_reason"] = paste_info.get("composite_paste_skip_reason") or "paste_failed"
+        return gen, info
+    return pasted, info
 
 
 def color_match_rgba_to_destination(

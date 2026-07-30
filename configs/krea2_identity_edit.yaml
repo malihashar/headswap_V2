@@ -79,6 +79,9 @@ post_color_match_strength: 0.35
 multi_person_swap_mode: align_paste
 align_paste_krea2_refine: true
 align_paste_refine_steps: 6
+# Full 6-DOF affine + post-refine pose relock keep looking direction on target.
+align_paste_full_affine: true
+align_paste_pose_relock: true
 align_paste_crop_pad_frac: 1.15
 align_paste_mask_expand_px: 10
 align_paste_mask_blur_px: 10

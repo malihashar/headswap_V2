@@ -66,6 +66,7 @@ def test_run_align_paste_preserves_outside_mask():
         all_faces=faces,
         cfg={
             "align_paste_krea2_refine": False,
+            "align_paste_pose_relock": False,
             "pre_color_match_strength": 0.0,
             "align_paste_post_color_match": 0.0,
             "div_by": 8,
@@ -84,6 +85,29 @@ def test_run_align_paste_preserves_outside_mask():
     assert mse < 50.0, f"neighbor MSE too high: {mse}"
     gates = out["gates"]
     assert "neighbor_psnr_outside_mask" in gates or "head_height_ratio" in gates
+
+
+def test_pose_relock_returns_meta():
+    body, faces = _fake_group()
+    donor = Image.new("RGB", (120, 140), (255, 255, 255))
+    ImageDraw.Draw(donor).ellipse([20, 20, 100, 110], fill=(80, 40, 20))
+    out = run_align_paste_swap(
+        body,
+        donor,
+        CACHE,
+        selected_face=faces[1],
+        all_faces=faces,
+        cfg={
+            "align_paste_krea2_refine": False,
+            "align_paste_pose_relock": True,
+            "pre_color_match_strength": 0.0,
+            "align_paste_post_color_match": 0.0,
+            "div_by": 8,
+        },
+        refine_fn=None,
+    )
+    assert "pose_meta" in out
+    assert out["image"].size == body.size
 
 
 def test_measure_gates_shape():

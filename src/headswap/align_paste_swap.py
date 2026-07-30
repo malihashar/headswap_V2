@@ -1,8 +1,8 @@
 """Geometry-locked align → paste → optional refine (Architecture B).
 
-Locks expression / pose / head scale from the target via landmark similarity,
-pastes a clothing-free identity face matte, and optionally runs a masked
-Krea2 refine on the pasted crop only.
+Locks expression / pose / head scale from the target via full affine landmarks,
+pastes a clothing-free identity face matte, optionally runs a masked Krea2
+refine, then re-locks looking direction onto the destination landmarks.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from headswap.preprocess import (
     lab_histogram_match_face,
     paste_aligned_face,
     pil_to_rgb_np,
+    relock_pose_to_destination,
     suppress_neighbor_faces_in_mask,
 )
 
@@ -146,6 +147,7 @@ def run_align_paste_swap(
         ellipse_scale_x=float(cfg.get("paste_ellipse_scale_x", 2.05)),
         ellipse_scale_y=float(cfg.get("paste_ellipse_scale_y", 2.55)),
         feather_px=int(cfg.get("paste_feather_px", 21)),
+        use_full_affine=bool(cfg.get("align_paste_full_affine", True)),
     )
     pre_match = float(cfg.get("pre_color_match_strength", 0.55) or 0.0)
     paste_info: dict[str, Any] = {"composite_paste": False}
@@ -221,6 +223,25 @@ def run_align_paste_swap(
             refine_meta["refine_error"] = str(exc)
             refined_crop = composite_crop
 
+    # Lock looking direction / head yaw back onto the original crop landmarks.
+    # Generative refine often front-faces the identity; re-align fixes that.
+    pose_meta: dict[str, Any] = {"pose_relock": False}
+    if bool(cfg.get("align_paste_pose_relock", True)) and bool(
+        paste_info.get("composite_paste")
+    ):
+        refined_crop, pose_meta = relock_pose_to_destination(
+            refined_crop,
+            work,
+            cache_dir,
+            face_mask=face_mask_crop,
+            use_full_affine=bool(cfg.get("align_paste_full_affine", True)),
+            core_min_alpha=float(cfg.get("paste_core_min_alpha", 0.90)),
+            ellipse_scale_x=float(cfg.get("paste_ellipse_scale_x", 2.05)),
+            ellipse_scale_y=float(cfg.get("paste_ellipse_scale_y", 2.55)),
+            feather_px=int(cfg.get("paste_feather_px", 21)),
+            stitch_feather_px=int(cfg.get("align_paste_stitch_feather_px", 10)),
+        )
+
     # Soft-stitch refined crop into full body; outside mask = exact body pixels.
     feather = int(cfg.get("align_paste_stitch_feather_px", 10))
     out = feathered_soft_composite(
@@ -262,6 +283,7 @@ def run_align_paste_swap(
         "align_info": align_info,
         "paste_info": paste_info,
         "refine_meta": refine_meta,
+        "pose_meta": pose_meta,
         "gates": gates,
         "mode": "align_paste",
     }

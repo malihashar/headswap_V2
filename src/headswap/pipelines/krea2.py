@@ -1641,6 +1641,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 self.cfg.get(
                     "align_paste_refine_prompt",
                     "Blend the pasted face naturally into the first image. "
+                    "CRITICAL: the person must look in exactly the same direction "
+                    "as in the first image — same head yaw, eye gaze, and face angle. "
+                    "Do not rotate the head toward the camera or front-face the identity. "
                     "Preserve the facial expression, mouth shape, eye gaze, and head "
                     "pose from the first image exactly. Use only facial identity from "
                     "the second image. Do not change clothing, collar, hair silhouette "
@@ -1707,6 +1710,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             f"paste={ap['paste_info'].get('composite_paste')} "
             f"align={ap['align_info'].get('face_alignment')} "
             f"refine={ap['refine_meta'].get('refine_applied')} "
+            f"pose_relock={ap.get('pose_meta', {}).get('pose_relock')} "
             f"gates={ap.get('gates')}",
             file=sys.__stdout__,
             flush=True,
