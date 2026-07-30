@@ -76,6 +76,17 @@ post_color_match_strength: 0.35
 # policy: largest | rightmost | leftmost | index
 body_face_policy: largest
 body_face_index: 0
+# --- Multi-face product features (intentionally OFF for now) ---
+# Current product: always automatic single-face swap (primary face via policy).
+# Set enable_multi_face_features: true later to re-enable:
+#   - Colab face picker UI (Swap All / Swap Face N)
+#   - face_swap_mode: all  (N× Krea2 passes + stitch)
+# Implementation is kept intact in krea2.py / colab_demo.py / notebook.
+enable_multi_face_features: false
+# single = one face (policy/index). all = one Krea2 pass per detected face,
+# then stitch each result into the same canvas (Colab "Swap All Faces").
+# Ignored while enable_multi_face_features is false (forced to single).
+face_swap_mode: single
 person_match_crop_size: true
 force_tight_head_crop: false
 group_aspect_thresh: 1.25

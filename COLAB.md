@@ -30,6 +30,19 @@ Internal **production demo** for Krea 2 Identity Edit (Magic Hour engineers).
 | `BODY_PSNR_THRESH` | `28.0` | Post-run body-preserve warning |
 | `PINNED_COMMIT` | `None` | Optional exact `git` commit to checkout |
 
+## Multi-face bodies
+
+**Current product:** if the body has multiple faces, the pipeline automatically swaps the **primary** face (`body_face_policy`, default `largest`) in a single pass. No face-picker UI.
+
+**Future (implemented, disabled):** face picker + swap-all live behind:
+
+| Flag | Where | Default |
+| --- | --- | --- |
+| `enable_multi_face_features` | `configs/krea2_identity_edit.yaml` | `false` |
+| `ENABLE_MULTI_FACE_UI` | notebook §1 + `scripts/colab_demo.py` | `False` |
+
+Set both to `true` / `True` to re-expose **Swap All Faces** / **Swap Face N** without rewriting the pipeline.
+
 ## Output package
 
 Each successful §5 run writes:

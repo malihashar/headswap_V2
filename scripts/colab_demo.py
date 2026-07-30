@@ -387,10 +387,11 @@ def require_face(image: Image.Image, cache_dir: Path | str, label: str) -> dict[
         )
     chosen = faces[0]
     if len(faces) > 1:
+        # Multi-face picker UI is disabled (ENABLE_MULTI_FACE_UI=False); always
+        # auto-select the primary face (largest / highest-confidence heuristic).
         warn(
-            f"{label}: detected {len(faces)} faces — using the largest "
-            f"(conf={chosen['confidence']}, box={chosen['box']}). "
-            "Crop to a single subject for more reliable swaps."
+            f"{label}: detected {len(faces)} faces — automatically using the "
+            f"primary face (largest, conf={chosen['confidence']}, box={chosen['box']})."
         )
     return {
         "box": chosen["box"],
@@ -509,6 +510,149 @@ def preflight(
     }
 
 
+# ---------------------------------------------------------------------------
+# Multi-face UI + swap-all helpers (IMPLEMENTED, intentionally DISABLED)
+# ---------------------------------------------------------------------------
+# Product direction (current): automatic single-face swap only — no picker UI.
+# Set ENABLE_MULTI_FACE_UI = True (and yaml enable_multi_face_features: true)
+# to re-expose the Colab radio widget and allow face_swap_mode=all.
+# Do not delete annotate_faces / parse_face_swap_choice / show_face_swap_selector.
+ENABLE_MULTI_FACE_UI = False
+
+
+def annotate_faces(
+    image: Image.Image,
+    faces: list[dict[str, Any]] | list[Any],
+    *,
+    max_preview: int = 640,
+) -> Image.Image:
+    """Draw numbered boxes on a body preview (Face 1 = largest, etc.).
+
+    Reserved for the multi-face picker UI (currently disabled — see
+    ENABLE_MULTI_FACE_UI). Kept intact for future re-enablement.
+    """
+    from PIL import ImageDraw, ImageFont
+
+    im = image.convert("RGB")
+    w, h = im.size
+    scale = min(1.0, float(max_preview) / float(max(w, h)))
+    if scale < 1.0:
+        im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
+    draw = ImageDraw.Draw(im)
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+    for i, face in enumerate(faces):
+        if isinstance(face, dict):
+            box = face.get("box") or [
+                face.get("x0", 0),
+                face.get("y0", 0),
+                face.get("x1", 0),
+                face.get("y1", 0),
+            ]
+        else:
+            box = [face.x0, face.y0, face.x1, face.y1]
+        x0, y0, x1, y1 = [int(round(v * scale)) for v in box]
+        draw.rectangle([x0, y0, x1, y1], outline=(0, 220, 90), width=3)
+        label = f"Face {i + 1}"
+        ty = max(0, y0 - 14)
+        draw.rectangle([x0, ty, x0 + 8 * len(label), ty + 14], fill=(0, 0, 0))
+        draw.text((x0 + 2, ty + 1), label, fill=(0, 255, 120), font=font)
+    return im
+
+
+def parse_face_swap_choice(value: str | None) -> dict[str, Any]:
+    """
+    Parse Colab widget value → pipeline knobs.
+
+    Reserved for the multi-face picker UI (currently disabled — see
+    ENABLE_MULTI_FACE_UI). Kept intact for future re-enablement.
+
+    Returns:
+      face_swap_mode: "single" | "all"
+      body_face_policy: policy string for single-face selection
+      body_face_index: 0-based index when selecting a specific face
+    """
+    raw = (value or "Swap Face 1").strip()
+    if raw.lower().startswith("swap all"):
+        return {
+            "face_swap_mode": "all",
+            "body_face_policy": "largest",
+            "body_face_index": 0,
+            "label": raw,
+        }
+    # "Swap Face N" (1-based UI → 0-based index)
+    idx = 0
+    parts = raw.replace(":", " ").split()
+    for tok in reversed(parts):
+        if tok.isdigit():
+            idx = max(0, int(tok) - 1)
+            break
+    return {
+        "face_swap_mode": "single",
+        "body_face_policy": "index",
+        "body_face_index": idx,
+        "label": raw,
+    }
+
+
+def show_face_swap_selector(
+    body_image: Image.Image,
+    cache_dir: Path | str,
+    *,
+    face_count: int | None = None,
+    enabled: bool | None = None,
+) -> Any:
+    """
+    If the body has >1 face, show a radio widget:
+      Swap All Faces | Swap Face 1 | Swap Face 2 | …
+
+    Stores selection in the returned widget; read `.value` before §5 run.
+    When only one face, returns None (no UI — keep current workflow).
+
+    CURRENT PRODUCT: disabled by default (ENABLE_MULTI_FACE_UI=False). Pass
+    enabled=True or flip the module flag to re-expose the picker later.
+    """
+    # Intentionally disabled for now — automatic primary-face swap only.
+    if enabled is None:
+        enabled = bool(ENABLE_MULTI_FACE_UI)
+    if not enabled:
+        return None
+
+    faces = _detect_faces_strict(body_image, cache_dir)
+    n = int(face_count if face_count is not None else len(faces))
+    if n <= 1:
+        return None
+    try:
+        import ipywidgets as widgets
+        from IPython.display import display, Markdown
+    except Exception as exc:
+        warn(f"ipywidgets unavailable ({exc}) — defaulting to Swap Face 1 (largest).")
+        return None
+
+    options = ["Swap All Faces"] + [f"Swap Face {i}" for i in range(1, n + 1)]
+    widget = widgets.RadioButtons(
+        options=options,
+        value="Swap All Faces",
+        description="Faces:",
+        layout=widgets.Layout(width="max-content"),
+        style={"description_width": "initial"},
+    )
+    preview = annotate_faces(body_image, faces)
+    display(Markdown("### Multi-face body — choose who to swap"))
+    display(preview)
+    display(
+        Markdown(
+            "Numbers match **largest → smallest** detection order. "
+            "Choose **Swap All Faces** to run one Krea2 pass per face, or pick a single face."
+        )
+    )
+    display(widget)
+    ok(f"Face selector ready ({n} faces). Pick an option, then run §5.")
+    return widget
+
+
 def apply_user_knobs(
     cfg: dict[str, Any],
     *,
@@ -521,6 +665,8 @@ def apply_user_knobs(
     debug: bool,
     body_face_policy: str | None = None,
     body_face_index: int | None = None,
+    face_swap_mode: str | None = None,
+    enable_multi_face_features: bool | None = None,
 ) -> dict[str, Any]:
     """Map the small user-facing knob set onto pipeline config."""
     out = dict(cfg)
@@ -545,6 +691,16 @@ def apply_user_knobs(
         out["body_face_policy"] = str(body_face_policy)
     if body_face_index is not None:
         out["body_face_index"] = int(body_face_index)
+    # Multi-face features default OFF (product: automatic single-face only).
+    if enable_multi_face_features is not None:
+        out["enable_multi_face_features"] = bool(enable_multi_face_features)
+    else:
+        out.setdefault("enable_multi_face_features", False)
+    if face_swap_mode is not None and bool(out.get("enable_multi_face_features")):
+        out["face_swap_mode"] = str(face_swap_mode).strip().lower() or "single"
+    else:
+        # Force single while multi-face product features are disabled.
+        out["face_swap_mode"] = "single"
     return out
 
 

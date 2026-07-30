@@ -31,6 +31,7 @@ from headswap.comfy.runtime import (
 from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 from headswap.preprocess import (
+    FaceBox,
     crop_face_reference,
     crop_with_mask,
     feathered_soft_composite,
@@ -537,166 +538,118 @@ class Krea2IdentityEditPipeline(BasePipeline):
             timings["_negative_mode"] = 2.0
             return positive, "copied_positive"
 
-    def run(
-        self, body: Image.Image, face: Image.Image, out_dir: Path | None = None
-    ) -> PipelineResult:
-        import torch
 
-        t0 = time.perf_counter()
-        timings: dict[str, float] = {}
-
-        rt = self._ensure_runtime(timings)
-        # Install once after custom nodes are imported (quality-preserving).
-        from headswap.comfy.krea2_edit_fast import (
-            clear_krea2_edit_static_cache,
-            install_krea2_edit_static_cache,
+    def _tight_crop_flags(
+        self,
+        body_full: Image.Image,
+        selected_face: FaceBox | None,
+        all_faces: list[FaceBox],
+    ) -> dict[str, Any]:
+        """Decide tight head-crop params for single- or multi-person bodies."""
+        multi_person = len(all_faces) > 1
+        bw, bh = body_full.size
+        face_frac = 0.0
+        if selected_face is not None and bw * bh > 0:
+            face_frac = (selected_face.width * selected_face.height) / float(bw * bh)
+        wide_group = (bw / max(1, bh)) >= float(
+            self.cfg.get("group_aspect_thresh", 1.25)
         )
+        small_face = face_frac > 0 and face_frac < float(
+            self.cfg.get("group_face_area_frac", 0.12)
+        )
+        force_tight = bool(self.cfg.get("force_tight_head_crop", False))
+        use_tight = (
+            multi_person
+            or force_tight
+            or (wide_group and small_face)
+            or small_face
+        )
+        top_ext = float(self.cfg.get("mask_top_extend", 1.25))
+        side_ext = float(self.cfg.get("mask_side_extend", 0.60))
+        bot_ext = float(self.cfg.get("mask_bot_extend", 0.40))
+        expand_px = int(self.cfg.get("mask_expand_px", 18))
+        crop_pad = 12
+        if use_tight:
+            top_ext = float(self.cfg.get("multi_mask_top_extend", 1.05))
+            side_ext = float(self.cfg.get("multi_mask_side_extend", 0.35))
+            bot_ext = float(self.cfg.get("multi_mask_bot_extend", 0.22))
+            expand_px = int(self.cfg.get("multi_mask_expand_px", 10))
+            crop_pad = int(self.cfg.get("multi_crop_pad", 6))
+        return {
+            "multi_person": multi_person,
+            "face_frac": face_frac,
+            "use_tight": use_tight,
+            "top_ext": top_ext,
+            "side_ext": side_ext,
+            "bot_ext": bot_ext,
+            "expand_px": expand_px,
+            "crop_pad": crop_pad,
+        }
 
-        edit_cache_info = install_krea2_edit_static_cache()
-        clear_krea2_edit_static_cache()  # fresh cache per image
-        bundle = self._load_models(rt, timings)
-        div_by = int(self.cfg.get("div_by", 16))
-        max_dim = int(self.cfg.get("max_dim", 768))
-        mask_crop_stitch = bool(self.cfg.get("mask_crop_stitch", True))
-
-        body_full: Image.Image | None = None
-        mask = None
-        box = None
-        crop_content_box: tuple[int, int, int, int] | None = None
-
-        with _stage(timings, "preprocessing"):
-            face_crop = crop_face_reference(
-                face,
-                self.cache_dir,
-                top=float(self.cfg.get("face_top_pad", 0.55)),
-                bot=float(self.cfg.get("face_bot_pad", 0.20)),
-                side=float(self.cfg.get("face_side_pad", 0.28)),
-                include_shoulders=bool(self.cfg.get("include_shoulders", False)),
+    def _build_scene_person(
+        self,
+        body_full: Image.Image,
+        face_crop: Image.Image,
+        selected_face: FaceBox | None,
+        *,
+        div_by: int,
+        use_tight: bool,
+        top_ext: float,
+        side_ext: float,
+        bot_ext: float,
+        expand_px: int,
+        crop_pad: int,
+    ) -> dict[str, Any]:
+        """Crop+mask one body face and size the identity reference to match."""
+        mask = head_hair_mask_from_face(
+            body_full,
+            self.cache_dir,
+            expand_px=expand_px,
+            blur_px=int(self.cfg.get("mask_blur_px", 12)),
+            top_extend=top_ext,
+            side_extend=side_ext,
+            bot_extend=bot_ext,
+            face_box=selected_face,
+        )
+        crop_img, _, box = crop_with_mask(
+            body_full, mask, pad=crop_pad, div_by=div_by
+        )
+        crop_long = int(self.cfg.get("crop_long_side", 768))
+        scene = resize_long_side(crop_img, crop_long, div_by=div_by)
+        if bool(self.cfg.get("person_match_crop_size", True)):
+            person = face_crop.convert("RGB").resize(
+                scene.size, Image.Resampling.LANCZOS
             )
-            if mask_crop_stitch:
-                # Locality shell (Klein/Qwen-improved): edit head crop, stitch back.
-                # Picture 1 = body crop, Picture 2 = face — never swap order.
-                body_full = resize_max_keep_ar(
-                    body.convert("RGB"),
-                    int(self.cfg.get("max_body_dim", max_dim)),
-                    div_by=div_by,
-                )
-                # Multi-person: pick one face, then crop tightly so neighbors
-                # are not in the edit canvas (avoids sticker / wrong-person fails).
-                body_face_policy = str(
-                    self.cfg.get("body_face_policy", "largest") or "largest"
-                )
-                body_face_index = int(self.cfg.get("body_face_index", 0) or 0)
-                selected_face, all_faces = select_face_box(
-                    pil_to_rgb_np(body_full),
-                    self.cache_dir,
-                    index=body_face_index,
-                    policy=body_face_policy,
-                )
-                multi_person = len(all_faces) > 1
-                # Group shots often only register 1 OpenCV face — still tighten when
-                # the selected face is a small fraction of the frame.
-                bw, bh = body_full.size
-                face_frac = 0.0
-                if selected_face is not None and bw * bh > 0:
-                    face_frac = (selected_face.width * selected_face.height) / float(bw * bh)
-                wide_group = (bw / max(1, bh)) >= float(
-                    self.cfg.get("group_aspect_thresh", 1.25)
-                )
-                small_face = face_frac > 0 and face_frac < float(
-                    self.cfg.get("group_face_area_frac", 0.12)
-                )
-                force_tight = bool(self.cfg.get("force_tight_head_crop", False))
-                use_tight = (
-                    multi_person
-                    or force_tight
-                    or (wide_group and small_face)
-                    or small_face
-                )
-                top_ext = float(self.cfg.get("mask_top_extend", 1.25))
-                side_ext = float(self.cfg.get("mask_side_extend", 0.60))
-                bot_ext = float(self.cfg.get("mask_bot_extend", 0.40))
-                expand_px = int(self.cfg.get("mask_expand_px", 18))
-                crop_pad = 12
-                if use_tight:
-                    # Tighter mask so crop is head-only, not half the group.
-                    top_ext = float(self.cfg.get("multi_mask_top_extend", 1.05))
-                    side_ext = float(self.cfg.get("multi_mask_side_extend", 0.35))
-                    bot_ext = float(self.cfg.get("multi_mask_bot_extend", 0.22))
-                    expand_px = int(self.cfg.get("multi_mask_expand_px", 10))
-                    crop_pad = int(self.cfg.get("multi_crop_pad", 6))
-                # Always print (even under quiet_logs consumers can check meta).
-                import sys
+        else:
+            person = resize_long_side(
+                face_crop.convert("RGB"), crop_long, div_by=div_by
+            )
+        if use_tight and bool(self.cfg.get("face_white_bg", True)):
+            from headswap.preprocess import face_on_white_background
 
-                print(
-                    f"[krea2] faces_detected={len(all_faces)} "
-                    f"policy={body_face_policy} index={body_face_index} "
-                    f"face_frac={face_frac:.3f} tight_crop={use_tight} "
-                    f"selected_box="
-                    f"{None if selected_face is None else [selected_face.x0, selected_face.y0, selected_face.x1, selected_face.y1]}",
-                    file=sys.__stdout__,
-                    flush=True,
-                )
-                mask = head_hair_mask_from_face(
-                    body_full,
-                    self.cache_dir,
-                    expand_px=expand_px,
-                    blur_px=int(self.cfg.get("mask_blur_px", 12)),
-                    top_extend=top_ext,
-                    side_extend=side_ext,
-                    bot_extend=bot_ext,
-                    face_box=selected_face,
-                )
-                crop_img, _, box = crop_with_mask(
-                    body_full, mask, pad=crop_pad, div_by=div_by
-                )
-                crop_long = int(self.cfg.get("crop_long_side", 768))
-                scene = resize_long_side(crop_img, crop_long, div_by=div_by)
-                # Match person spatial size to crop so head scale stays consistent
-                # (stops giant donor heads / clothing bleed in group shots).
-                if bool(self.cfg.get("person_match_crop_size", True)):
-                    person = face_crop.convert("RGB").resize(
-                        scene.size, Image.Resampling.LANCZOS
-                    )
-                else:
-                    person = resize_long_side(
-                        face_crop.convert("RGB"), crop_long, div_by=div_by
-                    )
-                # Strip donor clothing/collar (bowtie bleed) on group / tight crops.
-                if use_tight and bool(self.cfg.get("face_white_bg", True)):
-                    from headswap.preprocess import face_on_white_background
+            person = face_on_white_background(
+                person,
+                cache_dir=self.cache_dir,
+                force_ellipse=True,
+            )
+        crop_content_box: tuple[int, int, int, int] | None = None
+        if bool(self.cfg.get("square_crop", False)):
+            scene, crop_content_box = pad_to_square(
+                scene, fill="edge", div_by=div_by
+            )
+            if bool(self.cfg.get("person_match_crop_size", True)):
+                person = person.resize(scene.size, Image.Resampling.LANCZOS)
+        return {
+            "scene": scene,
+            "person": person,
+            "mask": mask,
+            "box": box,
+            "crop_content_box": crop_content_box,
+        }
 
-                    person = face_on_white_background(
-                        person,
-                        cache_dir=self.cache_dir,
-                        force_ellipse=True,
-                    )
-                if bool(self.cfg.get("square_crop", False)):
-                    scene, crop_content_box = pad_to_square(
-                        scene, fill="edge", div_by=div_by
-                    )
-                    if bool(self.cfg.get("person_match_crop_size", True)):
-                        person = person.resize(scene.size, Image.Resampling.LANCZOS)
-                # Stash for meta / prompt hint
-                timings["_multi_person"] = 1.0 if multi_person else 0.0
-                timings["_tight_crop"] = 1.0 if use_tight else 0.0
-                timings["_body_face_count"] = float(len(all_faces))
-                timings["_face_frac"] = float(face_frac)
-            else:
-                # Full-frame path (legacy A/B). Scene = body, person = face.
-                scene = resize_max_keep_ar(
-                    body.convert("RGB"), max_dim, div_by=div_by
-                )
-                person = resize_max_keep_ar(
-                    face_crop.convert("RGB"), max_dim, div_by=div_by
-                )
-                multi_person = False
-                all_faces = []
-                selected_face = None
-
-        w, h = scene.size
+    def _prompt_for_edit(self, *, use_tight: bool, multi_person: bool) -> str:
         prompt = str(self.cfg.get("prompt", "") or "").strip()
-        if bool(timings.get("_tight_crop")) or bool(timings.get("_multi_person")):
+        if use_tight or multi_person:
             prompt = (
                 prompt
                 + " The first image crop shows ONE person only — replace only that "
@@ -705,6 +658,27 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "Use ONLY the face identity from the second image — do not copy "
                 "clothing, collar, bowtie, or shoulders from the second image."
             )
+        return prompt
+
+    def _sample_edit(
+        self,
+        rt: NodeRuntime,
+        bundle: dict,
+        scene: Image.Image,
+        person: Image.Image,
+        timings: dict[str, float],
+        *,
+        prompt: str,
+        edit_cache_info: dict,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        """One Krea2 dual-ref sample → decoded PIL. Shared by single + swap-all."""
+        import torch
+        from headswap.comfy.krea2_edit_fast import clear_krea2_edit_static_cache
+
+        clear_krea2_edit_static_cache()
+
+        w, h = scene.size
         neg = str(self.cfg.get("negative_prompt", "") or "")
         grounding_px = int(self.cfg.get("grounding_px", 768))
         ref_boost = float(self.cfg.get("ref_boost", 4.0))
@@ -712,23 +686,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
         fit_mode = str(self.cfg.get("fit_mode", "fit") or "fit")
         steps = int(self.cfg.get("steps", 8))
         cfg = float(self.cfg.get("cfg", 1.0))
-        seed = int(self.cfg.get("seed", 46))
+        seed_i = int(self.cfg.get("seed", 46) if seed is None else seed)
         denoise = float(self.cfg.get("denoise", 1.0))
-        # Default ON: skip expensive VLM negative when CFG won't use it.
         skip_neg_vlm = bool(self.cfg.get("skip_negative_grounding", True)) and cfg <= 1.0 + 1e-6
-        save_debug = bool(self.cfg.get("save_debug", False))
         verbose = bool(self.cfg.get("verbose", False))
-
         negative_mode = "grounded_vlm"
         kernel_info = _configure_fast_kernels(prefer_flash=True)
         count_forwards = bool(self.cfg.get("debug_count_unet_forwards", False))
         torch_compile = bool(self.cfg.get("torch_compile", False))
         compile_mode = str(self.cfg.get("torch_compile_mode", "reduce-overhead"))
 
-        # Use no_grad — NOT inference_mode. Comfy ModelPatcher.detach / unload
-        # mutates tensor version counters; inference tensors raise
-        # "Cannot set version_counter for inference tensor", leave the UNet on
-        # GPU, then VAEDecode dies with broken LoadedModel.real_model.
         with torch.no_grad():
             scene_t = pil_to_comfy_tensor(scene, torch)
             person_t = pil_to_comfy_tensor(person, torch)
@@ -794,8 +761,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 latent = get_value_at_index(scene_lat, 0)
                 empty_node = "scene_latent_fallback"
 
-            # Turbo author rec: mu=1.15. Apply Flux-style shift when available so
-            # the 8-step schedule matches distilled training (quality, not speed).
             mu_shift = float(self.cfg.get("timestep_shift_mu", 1.15) or 1.15)
             apply_shift = bool(self.cfg.get("apply_timestep_shift", True))
             if apply_shift and rt.has("ModelSamplingFlux"):
@@ -811,12 +776,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     0,
                 )
             elif apply_shift:
-                mu_shift = None  # node missing — report in diagnostics
+                mu_shift = None
 
-            # CRITICAL: without force_full_load, NORMAL_VRAM partially loads the
-            # ~12GB UNet and streams layers CPU↔GPU every denoising step
-            # (~10–30s/step on T4 → ~160s for 8 steps). Full residency keeps
-            # weights on GPU for the sample only (CLIP already freed).
             use_full_load = bool(self.cfg.get("force_full_load", True))
             sampler_name = str(self.cfg.get("sampler", "euler"))
             scheduler_name = str(self.cfg.get("scheduler", "simple"))
@@ -847,7 +808,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             fwd_counter, restore_fwd = _count_unet_forwards(
                 model, enabled=count_forwards
             )
-            # Snapshot outside the timed KSampler wall — mem_get_info syncs the device.
             cuda_mid = _cuda_util_snapshot()
             if verbose:
                 print(
@@ -860,12 +820,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 with force_sampling_full_load(
                     models=(model,), enabled=use_full_load
                 ):
-                    # Silence only the denoising loop — not offload bookkeeping.
                     with _silence_krea2edit_step_prints():
                         samples = rt.call(
                             "KSampler",
                             model=model,
-                            seed=seed,
+                            seed=seed_i,
                             steps=steps,
                             cfg=cfg,
                             sampler_name=sampler_name,
@@ -894,28 +853,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     f"sec/step≈{sps}  sec/forward≈{spf}  "
                     f"fwd_wrap_ok={fwd_counter.get('wrapped')}"
                 )
-            if (
-                verbose
-                and count_forwards
-                and actual_forwards > 0
-                and steps > 0
-                and actual_forwards >= steps * 2 - 1
-            ):
-                print(
-                    "[krea2 sampling] WARNING: UNet forwards ≈ 2× steps → CFG is "
-                    "likely dual-evaluating each step. Try cfg=1.0 (or 0) to keep "
-                    "one forward/step."
-                )
-            if (
-                verbose
-                and sec_per_step is not None
-                and sec_per_step > 5.0
-                and not use_full_load
-            ):
-                print(
-                    "[krea2 sampling] WARNING: >5s/step with force_full_load=false "
-                    "strongly suggests CPU↔GPU weight streaming. Set force_full_load: true."
-                )
             cuda_after = _cuda_util_snapshot()
             sampling_diag["actual_unet_forwards"] = (
                 actual_forwards if count_forwards else None
@@ -925,11 +862,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 round(sec_per_step, 4) if sec_per_step is not None else None
             )
             sampling_diag["cuda_after_sample"] = cuda_after
-            if verbose:
-                print(
-                    f"[krea2 sampling] after gpu alloc_mb={cuda_after.get('allocated_mb')} "
-                    f"free_mb={cuda_after.get('free_mb')}"
-                )
 
             with _stage(timings, "vae_decode"):
                 decoded = rt.call(
@@ -939,31 +871,315 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 )
                 edited = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
 
-        with _stage(timings, "postprocessing"):
-            out = edited
-            if (
-                mask_crop_stitch
-                and body_full is not None
-                and mask is not None
-                and box is not None
-            ):
-                edited_crop = edited
-                if crop_content_box is not None:
-                    ox, oy, cw, ch = crop_content_box
-                    edited_crop = edited_crop.crop((ox, oy, ox + cw, oy + ch))
-                stitched = feathered_soft_composite(
-                    body_full,
-                    edited_crop,
-                    mask,
-                    box,
-                    extra_blur_px=int(self.cfg.get("stitch_feather_px", 10)),
+        return {
+            "edited": edited,
+            "sampling_diag": sampling_diag,
+            "negative_mode": negative_mode,
+            "empty_node": empty_node,
+            "use_full_load": use_full_load,
+            "skip_neg_vlm": skip_neg_vlm,
+            "steps": steps,
+            "cfg": cfg,
+            "seed": seed_i,
+            "ref_boost": ref_boost,
+            "ref_boost_a": ref_boost_a,
+            "grounding_px": grounding_px,
+            "fit_mode": fit_mode,
+            "verbose": verbose,
+        }
+
+    def _stitch_edited(
+        self,
+        canvas: Image.Image,
+        edited: Image.Image,
+        mask: Image.Image,
+        box: tuple[int, int, int, int],
+        crop_content_box: tuple[int, int, int, int] | None,
+        *,
+        color_ref: Image.Image,
+    ) -> Image.Image:
+        edited_crop = edited
+        if crop_content_box is not None:
+            ox, oy, cw, ch = crop_content_box
+            edited_crop = edited_crop.crop((ox, oy, ox + cw, oy + ch))
+        stitched = feathered_soft_composite(
+            canvas,
+            edited_crop,
+            mask,
+            box,
+            extra_blur_px=int(self.cfg.get("stitch_feather_px", 10)),
+        )
+        post_match = float(self.cfg.get("post_color_match_strength", 0.35) or 0.0)
+        return lab_histogram_match_face(
+            stitched, color_ref, mask, strength=post_match
+        )
+
+
+    def run(
+        self, body: Image.Image, face: Image.Image, out_dir: Path | None = None
+    ) -> PipelineResult:
+        import sys
+
+        t0 = time.perf_counter()
+        timings: dict[str, float] = {}
+
+        rt = self._ensure_runtime(timings)
+        from headswap.comfy.krea2_edit_fast import (
+            clear_krea2_edit_static_cache,
+            install_krea2_edit_static_cache,
+        )
+
+        edit_cache_info = install_krea2_edit_static_cache()
+        clear_krea2_edit_static_cache()  # fresh cache per image
+        bundle = self._load_models(rt, timings)
+        div_by = int(self.cfg.get("div_by", 16))
+        max_dim = int(self.cfg.get("max_dim", 768))
+        mask_crop_stitch = bool(self.cfg.get("mask_crop_stitch", True))
+
+        # face_swap_mode: "single" (default) | "all"
+        # "all" only triggers multi-pass when >1 face is detected.
+        #
+        # FUTURE / DISABLED: multi-face picker + swap-all are implemented below
+        # but gated by enable_multi_face_features (default false). Current product
+        # always does automatic single-face swap via body_face_policy. To re-enable:
+        # set enable_multi_face_features: true and face_swap_mode: all (or use Colab UI).
+        multi_face_enabled = bool(self.cfg.get("enable_multi_face_features", False))
+        face_swap_mode = str(self.cfg.get("face_swap_mode", "single") or "single").strip().lower()
+        if not multi_face_enabled:
+            face_swap_mode = "single"
+        swap_all = multi_face_enabled and face_swap_mode in ("all", "swap_all", "every")
+
+        body_full: Image.Image | None = None
+        mask = None
+        box = None
+        crop_content_box: tuple[int, int, int, int] | None = None
+        scene: Image.Image
+        person: Image.Image
+        all_faces: list[FaceBox] = []
+        selected_face: FaceBox | None = None
+        multi_person = False
+        use_tight = False
+        face_failures: list[dict[str, Any]] = []
+        faces_succeeded: list[int] = []
+
+        with _stage(timings, "preprocessing"):
+            face_crop = crop_face_reference(
+                face,
+                self.cache_dir,
+                top=float(self.cfg.get("face_top_pad", 0.55)),
+                bot=float(self.cfg.get("face_bot_pad", 0.20)),
+                side=float(self.cfg.get("face_side_pad", 0.28)),
+                include_shoulders=bool(self.cfg.get("include_shoulders", False)),
+            )
+            if mask_crop_stitch:
+                # Locality shell (Klein/Qwen-improved): edit head crop, stitch back.
+                # Picture 1 = body crop, Picture 2 = face — never swap order.
+                body_full = resize_max_keep_ar(
+                    body.convert("RGB"),
+                    int(self.cfg.get("max_body_dim", max_dim)),
+                    div_by=div_by,
                 )
-                post_match = float(
-                    self.cfg.get("post_color_match_strength", 0.35) or 0.0
+                body_face_policy = str(
+                    self.cfg.get("body_face_policy", "largest") or "largest"
                 )
-                out = lab_histogram_match_face(
-                    stitched, body_full, mask, strength=post_match
+                body_face_index = int(self.cfg.get("body_face_index", 0) or 0)
+                selected_face, all_faces = select_face_box(
+                    pil_to_rgb_np(body_full),
+                    self.cache_dir,
+                    index=body_face_index,
+                    policy=body_face_policy if not swap_all else "largest",
                 )
+                # MULTI-FACE: swap every detected face sequentially when requested.
+                if swap_all and len(all_faces) > 1:
+                    print(
+                        f"[krea2] face_swap_mode=all faces_detected={len(all_faces)} "
+                        f"— running {len(all_faces)} inference passes",
+                        file=sys.__stdout__,
+                        flush=True,
+                    )
+                    timings["_multi_person"] = 1.0
+                    timings["_body_face_count"] = float(len(all_faces))
+                    timings["_face_swap_mode_all"] = 1.0
+                else:
+                    # Single-face path (unchanged behavior / one inference pass).
+                    if swap_all and len(all_faces) <= 1:
+                        print(
+                            "[krea2] face_swap_mode=all but only 1 face detected "
+                            "— falling back to single-face path",
+                            file=sys.__stdout__,
+                            flush=True,
+                        )
+                    flags = self._tight_crop_flags(body_full, selected_face, all_faces)
+                    multi_person = bool(flags["multi_person"])
+                    use_tight = bool(flags["use_tight"])
+                    face_frac = float(flags["face_frac"])
+                    print(
+                        f"[krea2] faces_detected={len(all_faces)} "
+                        f"policy={body_face_policy} index={body_face_index} "
+                        f"face_frac={face_frac:.3f} tight_crop={use_tight} "
+                        f"selected_box="
+                        f"{None if selected_face is None else [selected_face.x0, selected_face.y0, selected_face.x1, selected_face.y1]}",
+                        file=sys.__stdout__,
+                        flush=True,
+                    )
+                    built = self._build_scene_person(
+                        body_full,
+                        face_crop,
+                        selected_face,
+                        div_by=div_by,
+                        use_tight=use_tight,
+                        top_ext=float(flags["top_ext"]),
+                        side_ext=float(flags["side_ext"]),
+                        bot_ext=float(flags["bot_ext"]),
+                        expand_px=int(flags["expand_px"]),
+                        crop_pad=int(flags["crop_pad"]),
+                    )
+                    scene = built["scene"]
+                    person = built["person"]
+                    mask = built["mask"]
+                    box = built["box"]
+                    crop_content_box = built["crop_content_box"]
+                    timings["_multi_person"] = 1.0 if multi_person else 0.0
+                    timings["_tight_crop"] = 1.0 if use_tight else 0.0
+                    timings["_body_face_count"] = float(len(all_faces))
+                    timings["_face_frac"] = float(face_frac)
+            else:
+                # Full-frame path (legacy A/B). Scene = body, person = face.
+                scene = resize_max_keep_ar(
+                    body.convert("RGB"), max_dim, div_by=div_by
+                )
+                person = resize_max_keep_ar(
+                    face_crop.convert("RGB"), max_dim, div_by=div_by
+                )
+                multi_person = False
+                all_faces = []
+                selected_face = None
+
+        save_debug = bool(self.cfg.get("save_debug", False))
+        verbose = bool(self.cfg.get("verbose", False))
+        base_seed = int(self.cfg.get("seed", 46))
+
+        # ---------- Swap-all: N× crop → sample → stitch ----------
+        # Gated by enable_multi_face_features + face_swap_mode=all (disabled by
+        # default). Kept intact for future re-enablement — do not delete.
+        if (
+            mask_crop_stitch
+            and body_full is not None
+            and swap_all
+            and len(all_faces) > 1
+        ):
+            canvas = body_full.copy()
+            color_ref = body_full  # LAB match vs original body lighting
+            last_sample: dict[str, Any] | None = None
+            last_scene = body_full
+            last_person = face_crop
+            for face_i, face_box in enumerate(all_faces):
+                try:
+                    flags = self._tight_crop_flags(body_full, face_box, all_faces)
+                    # Always tight when swapping many faces in one frame.
+                    use_tight_i = True
+                    built = self._build_scene_person(
+                        body_full,  # mask/crop from original geometry
+                        face_crop,
+                        face_box,
+                        div_by=div_by,
+                        use_tight=use_tight_i,
+                        top_ext=float(flags["top_ext"]),
+                        side_ext=float(flags["side_ext"]),
+                        bot_ext=float(flags["bot_ext"]),
+                        expand_px=int(flags["expand_px"]),
+                        crop_pad=int(flags["crop_pad"]),
+                    )
+                    prompt_i = self._prompt_for_edit(
+                        use_tight=True, multi_person=True
+                    )
+                    print(
+                        f"[krea2] swap-all face {face_i + 1}/{len(all_faces)} "
+                        f"box=[{face_box.x0},{face_box.y0},{face_box.x1},{face_box.y1}]",
+                        file=sys.__stdout__,
+                        flush=True,
+                    )
+                    sample = self._sample_edit(
+                        rt,
+                        bundle,
+                        built["scene"],
+                        built["person"],
+                        timings,
+                        prompt=prompt_i,
+                        edit_cache_info=edit_cache_info,
+                        seed=base_seed + face_i,
+                    )
+                    with _stage(timings, "postprocessing"):
+                        canvas = self._stitch_edited(
+                            canvas,
+                            sample["edited"],
+                            built["mask"],
+                            built["box"],
+                            built["crop_content_box"],
+                            color_ref=color_ref,
+                        )
+                    faces_succeeded.append(face_i)
+                    last_sample = sample
+                    mask = built["mask"]
+                    box = built["box"]
+                    crop_content_box = built["crop_content_box"]
+                    scene = built["scene"]
+                    person = built["person"]
+                except Exception as exc:  # noqa: BLE001 — best-effort per face
+                    msg = f"{type(exc).__name__}: {exc}"
+                    print(
+                        f"[krea2] swap-all face {face_i + 1}/{len(all_faces)} FAILED — {msg}",
+                        file=sys.__stdout__,
+                        flush=True,
+                    )
+                    face_failures.append({"index": face_i, "error": msg})
+                    continue
+
+            if not faces_succeeded:
+                raise PipelineRunError(
+                    "swap-all failed: every detected face failed during inference"
+                )
+            out = canvas
+            if last_sample is None:
+                raise PipelineRunError("swap-all produced no successful samples")
+            sample_meta = last_sample
+            prompt = self._prompt_for_edit(use_tight=True, multi_person=True)
+            timings["_tight_crop"] = 1.0
+            use_tight = True
+            multi_person = True
+        else:
+            # ---------- Single-face / full-frame path (one inference) ----------
+            prompt = self._prompt_for_edit(
+                use_tight=use_tight, multi_person=multi_person
+            )
+            sample_meta = self._sample_edit(
+                rt,
+                bundle,
+                scene,
+                person,
+                timings,
+                prompt=prompt,
+                edit_cache_info=edit_cache_info,
+                seed=base_seed,
+            )
+            edited = sample_meta["edited"]
+            with _stage(timings, "postprocessing"):
+                out = edited
+                if (
+                    mask_crop_stitch
+                    and body_full is not None
+                    and mask is not None
+                    and box is not None
+                ):
+                    out = self._stitch_edited(
+                        body_full,
+                        edited,
+                        mask,
+                        box,
+                        crop_content_box,
+                        color_ref=body_full,
+                    )
+            faces_succeeded = [0] if mask_crop_stitch else []
 
         dbg = {}
         if out_dir is not None and save_debug:
@@ -979,7 +1195,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     debug_imgs["debug_mask"] = mask
                 if mask_crop_stitch:
                     debug_imgs["debug_crop"] = scene
-                    debug_imgs["debug_edited_crop"] = edited
+                    debug_imgs["debug_edited_crop"] = sample_meta["edited"]
+                if swap_all and body_full is not None and out is not None:
+                    debug_imgs["debug_swap_all_result"] = out
                 dbg = {
                     k: v
                     for k, v in {
@@ -1014,6 +1232,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "face_frac": round(float(timings.get("_face_frac") or 0.0), 4),
             "body_face_policy": str(self.cfg.get("body_face_policy", "largest") or "largest"),
             "body_face_index": int(self.cfg.get("body_face_index", 0) or 0),
+            "face_swap_mode": "all" if (swap_all and len(all_faces) > 1) else "single",
+            "enable_multi_face_features": bool(multi_face_enabled),
+            "faces_succeeded": list(faces_succeeded),
+            "face_failures": list(face_failures),
             "person_match_crop_size": bool(self.cfg.get("person_match_crop_size", True)),
             "square_crop": bool(self.cfg.get("square_crop", False)),
             "stitch_feather_px": int(self.cfg.get("stitch_feather_px", 10)),
@@ -1021,29 +1243,29 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 self.cfg.get("post_color_match_strength", 0.35) or 0.0
             ),
             "box": list(box) if box is not None else None,
-            "steps": steps,
-            "cfg": cfg,
-            "seed": seed,
-            "ref_boost": ref_boost,
-            "ref_boost_a": ref_boost_a,
-            "grounding_px": grounding_px,
-            "fit_mode": fit_mode,
-            "empty_latent_node": empty_node,
-            "force_full_load": use_full_load,
-            "skip_negative_grounding": skip_neg_vlm,
-            "negative_mode": negative_mode,
+            "steps": sample_meta["steps"],
+            "cfg": sample_meta["cfg"],
+            "seed": sample_meta["seed"],
+            "ref_boost": sample_meta["ref_boost"],
+            "ref_boost_a": sample_meta["ref_boost_a"],
+            "grounding_px": sample_meta["grounding_px"],
+            "fit_mode": sample_meta["fit_mode"],
+            "empty_latent_node": sample_meta["empty_node"],
+            "force_full_load": sample_meta["use_full_load"],
+            "skip_negative_grounding": sample_meta["skip_neg_vlm"],
+            "negative_mode": sample_meta["negative_mode"],
             "model_cache_hit": bool(timings.get("_model_cache_hit")),
             "verbose": verbose,
             "timing_s": timing_rounded,
-            "sampling_diagnostics": sampling_diag,
+            "sampling_diagnostics": sample_meta["sampling_diag"],
         }
         if verbose:
             print(
                 f"[krea2] checkpoint={meta['checkpoint']} loras={meta['loras_loaded']} "
                 f"scene={meta['scene_size']} person={meta['person_size']} "
-                f"mask_crop={mask_crop_stitch} steps={steps} cfg={cfg} "
-                f"ref_boost={ref_boost} neg={negative_mode} "
-                f"cache_hit={meta['model_cache_hit']}"
+                f"mask_crop={mask_crop_stitch} steps={meta['steps']} cfg={meta['cfg']} "
+                f"ref_boost={meta['ref_boost']} neg={meta['negative_mode']} "
+                f"cache_hit={meta['model_cache_hit']} face_swap_mode={meta['face_swap_mode']}"
             )
         return PipelineResult(
             image=out,
