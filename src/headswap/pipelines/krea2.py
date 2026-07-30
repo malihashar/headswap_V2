@@ -19,6 +19,7 @@ from typing import Any, Iterator
 
 from PIL import Image
 
+from headswap.align_paste_swap import run_align_paste_swap
 from headswap.comfy.full_load import force_sampling_full_load
 from headswap.comfy.runtime import (
     NodeRuntime,
@@ -1614,6 +1615,166 @@ class Krea2IdentityEditPipeline(BasePipeline):
         return stitched
 
 
+    def _run_multi_align_paste(
+        self,
+        body_full: Image.Image,
+        face: Image.Image,
+        *,
+        selected_face: FaceBox | None,
+        all_faces: list[FaceBox],
+        rt: NodeRuntime,
+        bundle: dict,
+        timings: dict[str, float],
+        edit_cache_info: dict,
+        out_dir: Path | None,
+        save_debug: bool,
+        base_seed: int,
+        t0: float,
+    ) -> PipelineResult:
+        """Architecture B: align-paste (+ optional masked Krea2 refine) for multi-person."""
+        import sys
+
+        refine_fn = None
+        do_refine = bool(self.cfg.get("align_paste_krea2_refine", True))
+        if do_refine:
+            refine_prompt = str(
+                self.cfg.get(
+                    "align_paste_refine_prompt",
+                    "Blend the pasted face naturally into the first image. "
+                    "Preserve the facial expression, mouth shape, eye gaze, and head "
+                    "pose from the first image exactly. Use only facial identity from "
+                    "the second image. Do not change clothing, collar, hair silhouette "
+                    "outside the face, or neighboring people. Match lighting to the first image.",
+                )
+            ).strip()
+
+            def refine_fn(composite_crop, id_matte, face_mask_crop):  # noqa: ANN001
+                scene = composite_crop.convert("RGB")
+                person = resize_contain(id_matte.convert("RGB"), scene.size, fill=(0, 0, 0))
+                # Temporarily lower steps for refine if configured.
+                old_steps = self.cfg.get("steps")
+                refine_steps = self.cfg.get("align_paste_refine_steps")
+                if refine_steps is not None:
+                    self.cfg["steps"] = int(refine_steps)
+                try:
+                    sample_meta = self._sample_edit(
+                        rt,
+                        bundle,
+                        scene,
+                        person,
+                        timings,
+                        prompt=refine_prompt,
+                        edit_cache_info=edit_cache_info,
+                        seed=base_seed,
+                        ref_boost_mask=None,
+                    )
+                finally:
+                    if refine_steps is not None:
+                        if old_steps is None:
+                            self.cfg.pop("steps", None)
+                        else:
+                            self.cfg["steps"] = old_steps
+                edited = sample_meta["edited"]
+                if edited.size != scene.size:
+                    edited = edited.resize(scene.size, Image.Resampling.LANCZOS)
+                # Keep geometry lock: only blend refined pixels inside face mask.
+                return feathered_soft_composite(
+                    scene,
+                    edited,
+                    face_mask_crop,
+                    (0, 0, scene.size[0], scene.size[1]),
+                    extra_blur_px=int(self.cfg.get("align_paste_stitch_feather_px", 10)),
+                )
+
+        with _stage(timings, "align_paste"):
+            ap = run_align_paste_swap(
+                body_full,
+                face,
+                self.cache_dir,
+                selected_face=selected_face,
+                all_faces=all_faces,
+                cfg=self.cfg,
+                refine_fn=refine_fn if do_refine else None,
+            )
+        out = ap["image"]
+        timings["_multi_person"] = 1.0
+        timings["_body_face_count"] = float(len(all_faces))
+        timings["_edit_mode_align_paste"] = 1.0
+        timings["_align_paste_refine"] = 1.0 if ap["refine_meta"].get("refine_applied") else 0.0
+
+        print(
+            f"[krea2] edit_mode=align_paste faces={len(all_faces)} "
+            f"paste={ap['paste_info'].get('composite_paste')} "
+            f"align={ap['align_info'].get('face_alignment')} "
+            f"refine={ap['refine_meta'].get('refine_applied')} "
+            f"gates={ap.get('gates')}",
+            file=sys.__stdout__,
+            flush=True,
+        )
+
+        dbg: dict[str, str] = {}
+        if out_dir is not None and save_debug:
+            with _stage(timings, "image_saving"):
+                debug_imgs = {
+                    "debug_body": body_full,
+                    "debug_identity_matte": ap["identity_matte"],
+                    "debug_align_work": ap["work_crop"],
+                    "debug_align_composite": ap["composite_crop"],
+                    "debug_align_refined": ap["refined_crop"],
+                    "debug_align_mask": ap["face_mask"],
+                }
+                dbg = {
+                    k: v
+                    for k, v in {
+                        key: self._save_debug(out_dir, f"{key}.png", img)
+                        for key, img in debug_imgs.items()
+                    }.items()
+                    if v
+                }
+        else:
+            timings.setdefault("image_saving", 0.0)
+
+        total_s = time.perf_counter() - t0
+        verbose = bool(self.cfg.get("verbose", False))
+        _print_timing_breakdown(timings, total_s, verbose=verbose)
+        timing_rounded = {
+            k: round(float(v), 4) for k, v in timings.items() if not k.startswith("_")
+        }
+        meta = {
+            "pipeline": self.name,
+            "edit_mode": "align_paste",
+            "multi_person_swap_mode": "align_paste",
+            "multi_person_edit_mode": str(
+                self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
+            ),
+            "multi_person": True,
+            "body_face_count": len(all_faces),
+            "selected_box": (
+                None
+                if selected_face is None
+                else [
+                    selected_face.x0,
+                    selected_face.y0,
+                    selected_face.x1,
+                    selected_face.y1,
+                ]
+            ),
+            "body_size": list(body_full.size),
+            "align_paste": {
+                "matte_info": ap["matte_info"],
+                "align_info": ap["align_info"],
+                "paste_info": ap["paste_info"],
+                "refine_meta": ap["refine_meta"],
+                "gates": ap["gates"],
+                "box": list(ap["box"]),
+            },
+            "checkpoint": bundle["load_meta"].get("checkpoint"),
+            "loras_loaded": list(bundle["load_meta"].get("loras_loaded") or []),
+            "timing_s": timing_rounded,
+            "verbose": verbose,
+        }
+        return PipelineResult(image=out, latency_s=total_s, meta=meta, debug_paths=dbg)
+
     def run(
         self, body: Image.Image, face: Image.Image, out_dir: Path | None = None
     ) -> PipelineResult:
@@ -1696,8 +1857,50 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 multi_edit_mode = str(
                     self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
                 ).strip().lower()
+                multi_swap_mode = str(
+                    self.cfg.get("multi_person_swap_mode", "align_paste") or "align_paste"
+                ).strip().lower()
+                # Architecture B: multi-person → geometry-locked align-paste (default).
+                if (
+                    len(all_faces) > 1
+                    and not swap_all
+                    and multi_swap_mode
+                    in ("align_paste", "align", "paste", "geometry_lock")
+                ):
+                    multi_person = True
+                    edit_mode = "align_paste"
+                    do_stitch = False
+                    scene = body_full
+                    person = face_crop
+                    mask = None
+                    box = None
+                    crop_content_box = None
+                    face_prep_diag = {
+                        "edit_mode": "align_paste",
+                        "faces_detected": len(all_faces),
+                        "selected_box": (
+                            None
+                            if selected_face is None
+                            else [
+                                selected_face.x0,
+                                selected_face.y0,
+                                selected_face.x1,
+                                selected_face.y1,
+                            ]
+                        ),
+                        "multi_person_swap_mode": multi_swap_mode,
+                    }
+                    timings["_multi_person"] = 1.0
+                    timings["_body_face_count"] = float(len(all_faces))
+                    timings["_edit_mode_align_paste"] = 1.0
+                    print(
+                        f"[krea2] edit_mode=align_paste faces={len(all_faces)} "
+                        f"(geometry-locked; Krea2 dual-ref free-gen skipped)",
+                        file=sys.__stdout__,
+                        flush=True,
+                    )
                 # MULTI-FACE: swap every detected face sequentially when requested.
-                if swap_all and len(all_faces) > 1:
+                elif swap_all and len(all_faces) > 1:
                     print(
                         f"[krea2] face_swap_mode=all faces_detected={len(all_faces)} "
                         f"— running {len(all_faces)} inference passes",
@@ -1832,6 +2035,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
         save_debug = bool(self.cfg.get("save_debug", False))
         verbose = bool(self.cfg.get("verbose", False))
         base_seed = int(self.cfg.get("seed", 46))
+
+        if edit_mode == "align_paste" and body_full is not None:
+            return self._run_multi_align_paste(
+                body_full,
+                face,
+                selected_face=selected_face,
+                all_faces=all_faces,
+                rt=rt,
+                bundle=bundle,
+                timings=timings,
+                edit_cache_info=edit_cache_info,
+                out_dir=out_dir,
+                save_debug=save_debug,
+                base_seed=base_seed,
+                t0=t0,
+            )
 
         # ---------- Swap-all: N× crop → sample → stitch ----------
         # Gated by enable_multi_face_features + face_swap_mode=all (disabled by

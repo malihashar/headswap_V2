@@ -589,6 +589,75 @@ def crop_face_reference(
     return face_pil.crop((expanded.x0, expanded.y0, expanded.x1, expanded.y1)).convert("RGB")
 
 
+def identity_face_only_matte(
+    face_pil: Image.Image,
+    cache_dir,
+    *,
+    top: float = 0.35,
+    bot: float = 0.08,
+    side: float = 0.12,
+    force_ellipse: bool = True,
+) -> tuple[Image.Image, dict]:
+    """
+    Clothing-free identity prep: tight face crop + ellipse/white matte.
+
+    Strips collar/suit/jersey that otherwise leak through dual-ref / paste ID paths.
+    """
+    info: dict = {
+        "identity_face_only": True,
+        "face_matte_top": float(top),
+        "face_matte_bot": float(bot),
+        "face_matte_side": float(side),
+    }
+    crop = crop_face_reference(
+        face_pil,
+        cache_dir,
+        top=top,
+        bot=bot,
+        side=side,
+        include_shoulders=False,
+    )
+    matted = face_on_white_background(
+        crop, cache_dir=cache_dir, force_ellipse=bool(force_ellipse)
+    )
+    info["matte_size"] = list(matted.size)
+    return matted.convert("RGB"), info
+
+
+def crop_around_face_box(
+    image: Image.Image,
+    face: FaceBox | None,
+    *,
+    pad_frac: float = 1.15,
+    div_by: int = 16,
+) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    """
+    Crop a working window around ``face`` for align-paste (multi-person safe).
+
+    Returns (crop_rgb, box_xyxy on the full image).
+    """
+    w, h = image.size
+    if face is None:
+        box = (0, 0, w, h)
+        return image.convert("RGB"), box
+    fw, fh = max(1, face.width), max(1, face.height)
+    pad_x = int(pad_frac * fw)
+    pad_y = int(pad_frac * fh)
+    x0 = max(0, face.x0 - pad_x)
+    y0 = max(0, face.y0 - pad_y)
+    x1 = min(w, face.x1 + pad_x)
+    y1 = min(h, face.y1 + pad_y)
+    # Evenify for VAE-friendly sizes when used as a Krea2 crop later.
+    cw, ch = x1 - x0, y1 - y0
+    x1 = x0 + evenify(cw, div_by)
+    y1 = y0 + evenify(ch, div_by)
+    x1, y1 = min(w, x1), min(h, y1)
+    x0 = max(0, x1 - evenify(x1 - x0, div_by))
+    y0 = max(0, y1 - evenify(y1 - y0, div_by))
+    box = (x0, y0, x1, y1)
+    return image.crop(box).convert("RGB"), box
+
+
 def pad_to_ar_blur(im: Image.Image, target_ar: float) -> Image.Image:
     """Legacy baseline helper — prefer not using for improved pipelines."""
     im = im.convert("RGB")

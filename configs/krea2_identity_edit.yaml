@@ -73,19 +73,35 @@ mask_bot_extend: 0.40
 stitch_feather_px: 10
 post_color_match_strength: 0.35
 
-# Multi-person (>1 detected face):
-#   crop_stitch — Architecture C (SPP-CC): same single-person crop→Krea2→stitch
-#                 recipe; default product path.
-#   full_frame  — debug/A/B only (no latent locality; post-freeze neighbors).
-# Single-person images always use crop_stitch when mask_crop_stitch is true.
+# Architecture B (multi-person): geometry-locked align → paste → optional
+# masked Krea2 refine. Single-person keeps classic Krea2 crop path.
+# Set multi_person_swap_mode: krea2_crop to force legacy SPP-CC crop→Krea2.
+multi_person_swap_mode: align_paste
+align_paste_krea2_refine: true
+align_paste_refine_steps: 6
+align_paste_crop_pad_frac: 1.15
+align_paste_mask_expand_px: 10
+align_paste_mask_blur_px: 10
+align_paste_mask_top: 0.85
+align_paste_mask_side: 0.35
+align_paste_mask_bot: 0.25
+align_paste_stitch_feather_px: 10
+align_paste_post_color_match: 0.40
+pre_color_match_strength: 0.55
+paste_core_min_alpha: 0.90
+paste_feather_px: 21
+# Clothing-free identity matte (no collar/suit/jersey in ID ref).
+face_matte_top_pad: 0.35
+face_matte_bot_pad: 0.08
+face_matte_side_pad: 0.12
+face_matte_force_ellipse: true
+
+# Multi-person (>1 detected face) legacy Krea2 modes (only if swap_mode=krea2_crop):
+#   crop_stitch — SPP-CC single-person crop recipe
+#   full_frame  — debug/A/B only
 multi_person_edit_mode: crop_stitch
-# Force multi onto the single-person conditioning recipe (no isolate/scale_match
-# / multi stitch boosts / multi prompt add-ons).
 single_person_parity: true
-# Head/hair/neck mask: ellipse (portable) | birefnet (rembg if installed) | sam2
-# (requires configured checkpoint — falls back to ellipse).
 head_mask_backend: ellipse
-# Stage E: narrow-band seam refine after stitch (off until C metrics say so).
 seam_refine: false
 seam_refine_erode_px: 8
 seam_refine_dilate_px: 16
