@@ -175,6 +175,71 @@ def dilate_mask(mask: Image.Image, px: int) -> Image.Image:
     return Image.fromarray(arr)
 
 
+def erode_mask(mask: Image.Image, px: int) -> Image.Image:
+    """Shrink an L mask (used to build a seam annulus)."""
+    if px <= 0:
+        return mask
+    arr = np.asarray(mask.convert("L"))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (px * 2 + 1, px * 2 + 1))
+    arr = cv2.erode(arr, k)
+    return Image.fromarray(arr)
+
+
+def seam_annulus_mask(
+    mask: Image.Image,
+    *,
+    erode_px: int = 8,
+    dilate_px: int = 16,
+) -> Image.Image:
+    """Band around the stitch boundary: dilate(mask) − erode(mask)."""
+    d = np.asarray(dilate_mask(mask, dilate_px).convert("L")).astype(np.int16)
+    e = np.asarray(erode_mask(mask, erode_px).convert("L")).astype(np.int16)
+    band = np.clip(d - e, 0, 255).astype(np.uint8)
+    return Image.fromarray(band)
+
+
+def narrow_band_seam_refine(
+    original: Image.Image,
+    stitched: Image.Image,
+    mask: Image.Image,
+    *,
+    erode_px: int = 8,
+    dilate_px: int = 16,
+    strength: float = 0.85,
+    blur_px: int = 6,
+) -> Image.Image:
+    """
+    Stage E: re-blend only a narrow annulus around the stitch boundary.
+
+    Face interior (eroded mask core) stays as stitched. Outside the dilated
+    mask stays as original. The annulus pulls color/luma toward the original
+    body so neck seams soften without re-running diffusion.
+    """
+    if strength <= 0:
+        return stitched
+    if stitched.size != original.size:
+        stitched = stitched.resize(original.size, Image.Resampling.LANCZOS)
+    if mask.size != original.size:
+        mask = mask.resize(original.size, Image.Resampling.BILINEAR)
+
+    band = seam_annulus_mask(mask, erode_px=erode_px, dilate_px=dilate_px)
+    if blur_px > 0:
+        k = max(3, int(blur_px) * 2 + 1)
+        band_arr = cv2.GaussianBlur(np.asarray(band.convert("L")), (k, k), 0)
+        band = Image.fromarray(band_arr)
+
+    # Color-match stitched toward original inside the band, then lerp.
+    matched = lab_histogram_match_face(stitched, original, band, strength=1.0)
+    a = pil_to_rgb_np(stitched).astype(np.float32)
+    b = pil_to_rgb_np(matched).astype(np.float32)
+    o = pil_to_rgb_np(original).astype(np.float32)
+    w = (np.asarray(band.convert("L")).astype(np.float32) / 255.0) * float(strength)
+    w = w[..., None]
+    # In band: mix matched stitched with original; outside band keep stitched.
+    out = a * (1.0 - w) + (0.55 * b + 0.45 * o) * w
+    return np_to_pil(np.clip(out, 0, 255))
+
+
 def resize_long_side(im: Image.Image, long_side: int, div_by: int = 16) -> Image.Image:
     im = im.convert("RGB")
     w, h = im.size

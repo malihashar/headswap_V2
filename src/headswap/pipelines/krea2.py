@@ -41,9 +41,9 @@ from headswap.preprocess import (
     expand_crop_box_for_face_fill,
     feathered_soft_composite,
     hard_freeze_neighbor_faces,
-    head_hair_mask_from_face,
     identity_face_boost_mask,
     lab_histogram_match_face,
+    narrow_band_seam_refine,
     pad_to_square,
     pil_to_rgb_np,
     place_face_at_height_frac,
@@ -53,6 +53,7 @@ from headswap.preprocess import (
     select_face_box,
     suppress_neighbor_faces_in_mask,
 )
+from headswap.segmentation import build_head_hair_mask
 
 
 @contextmanager
@@ -549,6 +550,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
             return positive, "copied_positive"
 
 
+    def _single_person_parity(self) -> bool:
+        """SPP-CC: multi uses the same conditioning recipe as single-person."""
+        return bool(self.cfg.get("single_person_parity", True))
+
     def _tight_crop_flags(
         self,
         body_full: Image.Image,
@@ -557,11 +562,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
     ) -> dict[str, Any]:
         """Decide crop/mask flags for the selected face.
 
-        Comparison finding (scripts/compare_single_vs_multi.py): merely detecting
-        multiple faces used to force use_tight=True, which forked mask params,
-        identity white-bg, prompt, and resolution away from the successful
-        single-person recipe. Automatic single-face product should keep the
-        single-person prep; only isolate the selected face spatially.
+        With ``single_person_parity`` (Architecture C / SPP-CC), multi-person
+        photos use the same mask extents and crop recipe as single-person —
+        only neighbor suppress remains for group locality. Legacy isolate /
+        tight forks stay available when parity is disabled.
         """
         multi_person = len(all_faces) > 1
         bw, bh = body_full.size
@@ -575,16 +579,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
             self.cfg.get("group_face_area_frac", 0.12)
         )
         force_tight = bool(self.cfg.get("force_tight_head_crop", False))
-        # Do NOT set use_tight from multi_person alone (see compare report).
-        use_tight = bool(
+        spp = self._single_person_parity()
+
+        # SPP-CC: never enter the legacy multi tight/isolate mask recipe.
+        use_tight = False if spp else bool(
             force_tight
             or (
                 bool(self.cfg.get("tight_on_small_face", False))
                 and (small_face or (wide_group and small_face))
             )
         )
-        # Spatial isolation for group shots without entering the tight recipe.
-        isolate_selected = bool(multi_person or small_face)
+        # Spatial isolation fork (wider masks / expand_crop) — off under SPP-CC.
+        isolate_selected = False if spp else bool(multi_person or small_face)
 
         top_ext = float(self.cfg.get("mask_top_extend", 1.25))
         side_ext = float(self.cfg.get("mask_side_extend", 0.60))
@@ -598,8 +604,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             expand_px = int(self.cfg.get("multi_mask_expand_px", 16))
             crop_pad = int(self.cfg.get("multi_crop_pad", 14))
         elif isolate_selected:
-            # Cover the full selected head (ears/sides) so the old face cannot
-            # ghost beside the swap; keep top tall for hair replacement.
             side_ext = float(
                 self.cfg.get("isolate_mask_side_extend", max(side_ext, 0.70))
             )
@@ -615,6 +619,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "face_frac": face_frac,
             "use_tight": use_tight,
             "isolate_selected": isolate_selected,
+            "single_person_parity": spp,
             "small_face": small_face,
             "top_ext": top_ext,
             "side_ext": side_ext,
@@ -642,18 +647,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
         """Crop+mask one body face and size the identity reference to match."""
         all_faces = list(all_faces or [])
         multi_person = len(all_faces) > 1
-        mask = head_hair_mask_from_face(
+        spp = self._single_person_parity()
+        mask, mask_info = build_head_hair_mask(
             body_full,
             self.cache_dir,
+            backend=str(self.cfg.get("head_mask_backend", "ellipse") or "ellipse"),
+            face_box=selected_face,
             expand_px=expand_px,
             blur_px=int(self.cfg.get("mask_blur_px", 12)),
             top_extend=top_ext,
             side_extend=side_ext,
             bot_extend=bot_ext,
-            face_box=selected_face,
         )
         # Prevent expanded group crops from stitching neighbor faces.
-        if (multi_person or isolate_selected) and selected_face is not None:
+        if multi_person and selected_face is not None:
             mask = suppress_neighbor_faces_in_mask(
                 mask, selected_face, all_faces, shrink=0.90
             )
@@ -669,9 +676,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "crop_long_before": float(crop_long_before),
             "crop_long_after": float(crop_long_before),
         }
-        # Enlarge only when the native crop is tiny (small face in frame) so
-        # upscale quality matches single-person — not a separate "multi recipe".
-        if isolate_selected or use_tight:
+        # SPP-CC: do not expand crop for face-fill (single-person recipe).
+        if (not spp) and (isolate_selected or use_tight):
             box, expand_info = expand_crop_box_for_face_fill(
                 body_full.size,
                 box,
@@ -687,14 +693,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
         # Match successful single-person inference resolution (default 768).
         crop_long = int(self.cfg.get("crop_long_side", 768))
-        if use_tight and bool(self.cfg.get("multi_boost_crop_long", False)):
+        if (not spp) and use_tight and bool(self.cfg.get("multi_boost_crop_long", False)):
             crop_long = max(
                 crop_long, int(self.cfg.get("multi_crop_long_side", 896))
             )
         scene = resize_long_side(crop_img, crop_long, div_by=div_by)
-        # Face height in the *scene* tensor (after resize) — drive identity scale.
-        # Boost slightly so the identity sticker includes donor hair above the face
-        # box (otherwise only the face transfers and body hair remains).
         face_h_frac_scene = 0.55
         hair_boost = float(self.cfg.get("identity_hair_height_boost", 1.30))
         if selected_face is not None and box is not None:
@@ -702,13 +705,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
             face_h_frac_native = float(selected_face.height) / float(crop_h)
             face_h_frac_scene = min(0.70, face_h_frac_native * hair_boost)
 
-        scale_match = bool(self.cfg.get("identity_scale_match", True)) and (
-            multi_person or isolate_selected
+        # SPP-CC: always full-bleed resize_contain (same as single-person).
+        scale_match = (
+            (not spp)
+            and bool(self.cfg.get("identity_scale_match", True))
+            and (multi_person or isolate_selected)
         )
         scale_factor = float(self.cfg.get("identity_scale_factor", 0.90))
         if bool(self.cfg.get("person_match_crop_size", True)):
             if scale_match:
-                # Group-shot fix: full-bleed identity refs make heads too big.
                 person = place_face_at_height_frac(
                     face_crop.convert("RGB"),
                     scene.size,
@@ -723,12 +728,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
             person = resize_long_side(
                 face_crop.convert("RGB"), crop_long, div_by=div_by
             )
-        # ROOT-CAUSE FIX: do not white-ellipse the identity ref for group shots.
-        # compare_single_vs_multi showed multi person input ≠ single (white
-        # sticker vs natural crop). That alone changes Krea2 conditioning.
-        # Opt-in only via face_white_bg_on_tight (default false).
         apply_white_bg = (
-            use_tight
+            (not spp)
+            and use_tight
             and bool(self.cfg.get("face_white_bg", False))
             and bool(self.cfg.get("face_white_bg_on_tight", False))
         )
@@ -781,6 +783,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "face_height_frac_scene": round(float(face_h_frac_scene), 4),
             "identity_scale_match": bool(scale_match),
             "identity_scale_factor": float(scale_factor) if scale_match else 1.0,
+            "person_prep": (
+                "place_face_at_height_frac" if scale_match else "resize_contain"
+            ),
+            "single_person_parity": spp,
+            "head_mask": mask_info,
             "crop_box": list(box),
             "crop_native_size": [box[2] - box[0], box[3] - box[1]],
             "crop_long_native": int(max(box[2] - box[0], box[3] - box[1])),
@@ -801,6 +808,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "crop_pad": crop_pad,
             },
         }
+        if spp and (scale_match or isolate_selected or use_tight):
+            import sys
+
+            print(
+                "[krea2] WARNING: SPP-CC parity violated "
+                f"(scale_match={scale_match} isolate={isolate_selected} "
+                f"tight={use_tight})",
+                file=sys.__stdout__,
+                flush=True,
+            )
         return {
             "scene": scene,
             "person": person,
@@ -832,6 +849,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
     def _prompt_for_edit(self, *, use_tight: bool, multi_person: bool) -> str:
         prompt = str(self.cfg.get("prompt", "") or "").strip()
+        # SPP-CC: identical prompt to single-person (no multi add-ons).
+        if self._single_person_parity():
+            return prompt
         # Head-scale reminder for group shots (oversized heads are the main fail).
         if multi_person and bool(self.cfg.get("multi_head_scale_prompt", True)):
             prompt = (
@@ -925,9 +945,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
         all_faces: list[FaceBox],
     ) -> Image.Image:
         """Selected head+hair mask; neighbors carved out aggressively."""
-        mask = head_hair_mask_from_face(
+        mask, _info = build_head_hair_mask(
             body_full,
             self.cache_dir,
+            backend=str(self.cfg.get("head_mask_backend", "ellipse") or "ellipse"),
+            face_box=selected_face,
             expand_px=int(self.cfg.get("full_frame_mask_expand_px", 12)),
             blur_px=int(self.cfg.get("full_frame_mask_blur_px", 12)),
             top_extend=float(
@@ -938,7 +960,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             ),
             side_extend=float(self.cfg.get("full_frame_mask_side_extend", 0.42)),
             bot_extend=float(self.cfg.get("full_frame_mask_bot_extend", 0.40)),
-            face_box=selected_face,
         )
         shrink = float(self.cfg.get("full_frame_neighbor_suppress_shrink", 1.05))
         mask = suppress_neighbor_faces_in_mask(
@@ -1506,8 +1527,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if crop_content_box is not None:
             ox, oy, cw, ch = crop_content_box
             edited_crop = edited_crop.crop((ox, oy, ox + cw, oy + ch))
+        # Clamp / multi stitch boosts only when NOT on SPP-CC parity path.
+        stitch_multi = bool(multi_person) and not self._single_person_parity()
         # Clamp oversized heads before composite (group-shot failure mode).
-        if multi_person and bool(self.cfg.get("clamp_edited_head_scale", True)):
+        if stitch_multi and bool(self.cfg.get("clamp_edited_head_scale", True)):
             ref_scene = original_scene
             if ref_scene is None:
                 ref_scene = canvas.crop(box).resize(
@@ -1539,13 +1562,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
         stitch_mask = mask
         # Dilate before feather so the opaque core fully covers the old head
         # (stops original face/ear ghosting next to neighbors).
-        if multi_person:
+        if stitch_multi:
             dilate_px = int(self.cfg.get("multi_stitch_mask_dilate_px", 14))
             if dilate_px > 0:
                 stitch_mask = dilate_mask(mask, dilate_px)
         # Multi-person: stronger feather + LAB match — jaw/neck seams are the
         # dominant failure mode when the donor face lighting ≠ body flash.
-        if multi_person:
+        if stitch_multi:
             feather = int(
                 self.cfg.get(
                     "multi_stitch_feather_px",
@@ -1568,9 +1591,27 @@ class Krea2IdentityEditPipeline(BasePipeline):
             box,
             extra_blur_px=feather,
         )
-        return lab_histogram_match_face(
+        stitched = lab_histogram_match_face(
             stitched, color_ref, stitch_mask, strength=post_match
         )
+        # Stage E: optional narrow-band seam refine (face interior locked).
+        if bool(self.cfg.get("seam_refine", False)):
+            # stitch_mask is crop-local; paste onto full-canvas mask for refine.
+            full_mask = Image.new("L", canvas.size, 0)
+            x0, y0, x1, y1 = box
+            mw, mh = x1 - x0, y1 - y0
+            m_r = stitch_mask.convert("L").resize((mw, mh), Image.Resampling.BILINEAR)
+            full_mask.paste(m_r, (x0, y0))
+            stitched = narrow_band_seam_refine(
+                color_ref,
+                stitched,
+                full_mask,
+                erode_px=int(self.cfg.get("seam_refine_erode_px", 8)),
+                dilate_px=int(self.cfg.get("seam_refine_dilate_px", 16)),
+                strength=float(self.cfg.get("seam_refine_strength", 0.85) or 0.0),
+                blur_px=int(self.cfg.get("seam_refine_blur_px", 6)),
+            )
+        return stitched
 
 
     def run(
@@ -1653,7 +1694,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     policy=body_face_policy if not swap_all else "largest",
                 )
                 multi_edit_mode = str(
-                    self.cfg.get("multi_person_edit_mode", "full_frame") or "full_frame"
+                    self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
                 ).strip().lower()
                 # MULTI-FACE: swap every detected face sequentially when requested.
                 if swap_all and len(all_faces) > 1:
@@ -2072,8 +2113,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "mask_crop_stitch": mask_crop_stitch,
             "edit_mode": edit_mode,
             "multi_person_edit_mode": str(
-                self.cfg.get("multi_person_edit_mode", "full_frame") or "full_frame"
+                self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
             ),
+            "single_person_parity": self._single_person_parity(),
+            "head_mask_backend": str(
+                self.cfg.get("head_mask_backend", "ellipse") or "ellipse"
+            ),
+            "seam_refine": bool(self.cfg.get("seam_refine", False)),
             "full_frame_freeze_outside": bool(
                 self.cfg.get("full_frame_freeze_outside", True)
             )

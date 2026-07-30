@@ -710,7 +710,7 @@ def apply_user_knobs(
             "full_frame" if mode in ("full_frame", "fullframe", "full") else "crop_stitch"
         )
     else:
-        out.setdefault("multi_person_edit_mode", "full_frame")
+        out.setdefault("multi_person_edit_mode", "crop_stitch")
     return out
 
 

@@ -74,16 +74,28 @@ stitch_feather_px: 10
 post_color_match_strength: 0.35
 
 # Multi-person (>1 detected face):
-#   full_frame  — one Krea2 pass on the whole body image (preferred for selected
-#                 face quality). Krea2 has NO latent/edit inpaint mask; locality
-#                 is enforced by freezing outside the selected head after sample.
-#   crop_stitch — isolate + mask→crop→edit→stitch (rollback only).
+#   crop_stitch — Architecture C (SPP-CC): same single-person crop→Krea2→stitch
+#                 recipe; default product path.
+#   full_frame  — debug/A/B only (no latent locality; post-freeze neighbors).
 # Single-person images always use crop_stitch when mask_crop_stitch is true.
-multi_person_edit_mode: full_frame
+multi_person_edit_mode: crop_stitch
+# Force multi onto the single-person conditioning recipe (no isolate/scale_match
+# / multi stitch boosts / multi prompt add-ons).
+single_person_parity: true
+# Head/hair/neck mask: ellipse (portable) | birefnet (rembg if installed) | sam2
+# (requires configured checkpoint — falls back to ellipse).
+head_mask_backend: ellipse
+# Stage E: narrow-band seam refine after stitch (off until C metrics say so).
+seam_refine: false
+seam_refine_erode_px: 8
+seam_refine_dilate_px: 16
+seam_refine_strength: 0.85
+seam_refine_blur_px: 6
 multi_full_frame_max_dim: 1024
 # After full-frame sample: soft-composite onto the original body using a
 # selected-face(+hair) mask, then hard-copy neighbor faces from the original.
 # This freezes neighbors/clothes/BG while keeping full-frame head quality.
+# (Debug path only while multi_person_edit_mode=full_frame.)
 full_frame_freeze_outside: true
 full_frame_hard_freeze_neighbors: true
 # Slightly tighter sides than crop-stitch so the freeze mask does not bleed
@@ -167,9 +179,9 @@ isolate_crop_pad: 14
 multi_stitch_feather_px: 14
 multi_stitch_mask_dilate_px: 14
 multi_post_color_match_strength: 0.55
-# Group-shot head scale: identity ref height tracks the body face (not full-bleed),
-# then clamp the edited head if the model still enlarges it.
-identity_scale_match: true
+# SPP-CC: OFF — use full-bleed resize_contain like single-person.
+# Legacy multi stickers: set true and single_person_parity: false.
+identity_scale_match: false
 identity_scale_factor: 0.95
 identity_hair_height_boost: 1.30
 clamp_edited_head_scale: true
