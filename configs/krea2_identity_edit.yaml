@@ -75,9 +75,12 @@ prompt: >-
   Replace the person's head and face in the first image with the person from
   the second image. Preserve the exact facial identity of the second person —
   bone structure, jawline, eyebrows, eyes, nose, mouth, hairline, and skin.
-  Keep the body, clothing, pose, camera angle, lighting, and background from
-  the first image. Remove the original face and glasses from the first person.
-  Photorealistic, natural skin texture, sharp details.
+  Keep the facial expression, mouth shape, smile/no-smile, eye gaze direction,
+  and micro-expressions from the first image — do not copy the second person's
+  expression. Keep the body, clothing, pose, head rotation, camera angle,
+  lighting, and background from the first image. Remove the original face and
+  glasses from the first person. Photorealistic, natural skin texture, sharp
+  details.
 
 negative_prompt: ""
 
