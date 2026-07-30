@@ -91,12 +91,15 @@ person_match_crop_size: true
 force_tight_head_crop: false
 group_aspect_thresh: 1.25
 group_face_area_frac: 0.12
-face_white_bg: true
-# Multi-person / small-face profile (vs single-person mask_* above).
-# Prior bot_extend≈0.22 cut the jaw/neck → pasted look + lighting seam.
-# Sides stay slightly tighter than single to limit neighbor bleed; neck/hair
-# restored. Crop is then expanded toward ~16% face fill + min long side
-# before the 768/896 upscale (see expand_crop_box_for_face_fill).
+face_white_bg: false
+# White-ellipse identity sticker (legacy group experiment). OFF by default —
+# compare_single_vs_multi showed it makes multi person≠single person input.
+face_white_bg_on_tight: false
+# Do not enter legacy multi_mask_* recipe just because faces>1 or face is small.
+tight_on_small_face: false
+# Keep prompt identical to single-person unless debugging.
+multi_extra_prompt: false
+# Multi-person / small-face profile retained for opt-in (force_tight_head_crop).
 multi_mask_top_extend: 1.20
 multi_mask_side_extend: 0.48
 multi_mask_bot_extend: 0.48
@@ -105,8 +108,11 @@ multi_mask_blur_px: 14
 multi_crop_pad: 14
 multi_target_face_fill: 0.16
 multi_min_crop_long: 448
-multi_boost_crop_long: true
+# Keep inference long-side identical to single-person (768) by default.
+multi_boost_crop_long: false
 multi_crop_long_side: 896
+isolate_mask_side_extend: 0.50
+isolate_crop_pad: 12
 multi_stitch_feather_px: 18
 multi_post_color_match_strength: 0.55
 

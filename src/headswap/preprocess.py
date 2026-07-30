@@ -42,6 +42,32 @@ def resize_max_keep_ar(im: Image.Image, max_dim: int, div_by: int = 2) -> Image.
     return im.resize((nw, nh), Image.Resampling.LANCZOS)
 
 
+def resize_contain(
+    im: Image.Image,
+    size: tuple[int, int],
+    *,
+    fill: tuple[int, int, int] = (0, 0, 0),
+) -> Image.Image:
+    """Fit ``im`` inside ``size`` preserving aspect ratio; letterbox with fill.
+
+    Avoids the non-uniform stretch from Image.resize(scene.size), which warps
+    identity faces whenever the body crop AR differs from the face crop AR
+    (common in multi-person wider isolates).
+    """
+    im = im.convert("RGB")
+    tw, th = int(size[0]), int(size[1])
+    if tw <= 0 or th <= 0:
+        return im
+    w, h = im.size
+    scale = min(tw / max(1, w), th / max(1, h))
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    resized = im.resize((nw, nh), Image.Resampling.LANCZOS)
+    out = Image.new("RGB", (tw, th), fill)
+    out.paste(resized, ((tw - nw) // 2, (th - nh) // 2))
+    return out
+
+
 def resize_long_side(im: Image.Image, long_side: int, div_by: int = 16) -> Image.Image:
     im = im.convert("RGB")
     w, h = im.size
