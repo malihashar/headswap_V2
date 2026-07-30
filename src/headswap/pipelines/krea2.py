@@ -37,8 +37,10 @@ from headswap.preprocess import (
     head_hair_mask_from_face,
     lab_histogram_match_face,
     pad_to_square,
+    pil_to_rgb_np,
     resize_long_side,
     resize_max_keep_ar,
+    select_face_box,
 )
 
 
@@ -579,27 +581,71 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     int(self.cfg.get("max_body_dim", max_dim)),
                     div_by=div_by,
                 )
+                # Multi-person: pick one face, then crop tightly so neighbors
+                # are not in the edit canvas (avoids sticker / wrong-person fails).
+                body_face_policy = str(
+                    self.cfg.get("body_face_policy", "largest") or "largest"
+                )
+                body_face_index = int(self.cfg.get("body_face_index", 0) or 0)
+                selected_face, all_faces = select_face_box(
+                    pil_to_rgb_np(body_full),
+                    self.cache_dir,
+                    index=body_face_index,
+                    policy=body_face_policy,
+                )
+                multi_person = len(all_faces) > 1
+                top_ext = float(self.cfg.get("mask_top_extend", 1.25))
+                side_ext = float(self.cfg.get("mask_side_extend", 0.60))
+                bot_ext = float(self.cfg.get("mask_bot_extend", 0.40))
+                expand_px = int(self.cfg.get("mask_expand_px", 18))
+                crop_pad = 12
+                if multi_person:
+                    # Tighter mask so crop is head-only, not half the group.
+                    top_ext = float(self.cfg.get("multi_mask_top_extend", 1.05))
+                    side_ext = float(self.cfg.get("multi_mask_side_extend", 0.35))
+                    bot_ext = float(self.cfg.get("multi_mask_bot_extend", 0.22))
+                    expand_px = int(self.cfg.get("multi_mask_expand_px", 10))
+                    crop_pad = int(self.cfg.get("multi_crop_pad", 6))
+                    print(
+                        f"[krea2] multi-person: {len(all_faces)} faces, "
+                        f"policy={body_face_policy} index={body_face_index} "
+                        f"selected_box="
+                        f"{None if selected_face is None else [selected_face.x0, selected_face.y0, selected_face.x1, selected_face.y1]}"
+                    )
                 mask = head_hair_mask_from_face(
                     body_full,
                     self.cache_dir,
-                    expand_px=int(self.cfg.get("mask_expand_px", 18)),
+                    expand_px=expand_px,
                     blur_px=int(self.cfg.get("mask_blur_px", 12)),
-                    top_extend=float(self.cfg.get("mask_top_extend", 1.25)),
-                    side_extend=float(self.cfg.get("mask_side_extend", 0.60)),
-                    bot_extend=float(self.cfg.get("mask_bot_extend", 0.40)),
+                    top_extend=top_ext,
+                    side_extend=side_ext,
+                    bot_extend=bot_ext,
+                    face_box=selected_face,
                 )
                 crop_img, _, box = crop_with_mask(
-                    body_full, mask, pad=12, div_by=div_by
+                    body_full, mask, pad=crop_pad, div_by=div_by
                 )
                 crop_long = int(self.cfg.get("crop_long_side", 768))
                 scene = resize_long_side(crop_img, crop_long, div_by=div_by)
-                person = resize_long_side(
-                    face_crop.convert("RGB"), crop_long, div_by=div_by
-                )
+                # Match person spatial size to crop so head scale stays consistent
+                # (stops giant donor heads / clothing bleed in group shots).
+                if bool(self.cfg.get("person_match_crop_size", True)):
+                    person = face_crop.convert("RGB").resize(
+                        scene.size, Image.Resampling.LANCZOS
+                    )
+                else:
+                    person = resize_long_side(
+                        face_crop.convert("RGB"), crop_long, div_by=div_by
+                    )
                 if bool(self.cfg.get("square_crop", False)):
                     scene, crop_content_box = pad_to_square(
                         scene, fill="edge", div_by=div_by
                     )
+                    if bool(self.cfg.get("person_match_crop_size", True)):
+                        person = person.resize(scene.size, Image.Resampling.LANCZOS)
+                # Stash for meta / prompt hint
+                timings["_multi_person"] = 1.0 if multi_person else 0.0
+                timings["_body_face_count"] = float(len(all_faces))
             else:
                 # Full-frame path (legacy A/B). Scene = body, person = face.
                 scene = resize_max_keep_ar(
@@ -608,9 +654,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 person = resize_max_keep_ar(
                     face_crop.convert("RGB"), max_dim, div_by=div_by
                 )
+                multi_person = False
+                all_faces = []
+                selected_face = None
 
         w, h = scene.size
         prompt = str(self.cfg.get("prompt", "") or "").strip()
+        if bool(timings.get("_multi_person")):
+            prompt = (
+                prompt
+                + " The first image crop shows ONE person only — replace only that "
+                "person's head. Match the original head size and neck placement "
+                "exactly. Do not change other people, arms, or background. "
+                "Use ONLY the face identity from the second image — do not copy "
+                "clothing, collar, bowtie, or shoulders from the second image."
+            )
         neg = str(self.cfg.get("negative_prompt", "") or "")
         grounding_px = int(self.cfg.get("grounding_px", 768))
         ref_boost = float(self.cfg.get("ref_boost", 4.0))
@@ -914,6 +972,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "body_size": list(body_full.size) if body_full is not None else list(scene.size),
             "crop_size": list(scene.size) if mask_crop_stitch else None,
             "mask_crop_stitch": mask_crop_stitch,
+            "multi_person": bool(timings.get("_multi_person")),
+            "body_face_count": int(timings.get("_body_face_count") or 0),
+            "body_face_policy": str(self.cfg.get("body_face_policy", "largest") or "largest"),
+            "body_face_index": int(self.cfg.get("body_face_index", 0) or 0),
+            "person_match_crop_size": bool(self.cfg.get("person_match_crop_size", True)),
             "square_crop": bool(self.cfg.get("square_crop", False)),
             "stitch_feather_px": int(self.cfg.get("stitch_feather_px", 10)),
             "post_color_match_strength": float(

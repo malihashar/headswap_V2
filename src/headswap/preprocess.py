@@ -164,15 +164,35 @@ def _face_box_from_cutout(rgb: np.ndarray) -> FaceBox | None:
 
 
 def detect_best_face(rgb: np.ndarray, cache_dir, conf_thresh: float = 0.30) -> FaceBox | None:
+    faces = detect_faces(rgb, cache_dir, conf_thresh=conf_thresh, allow_prior=True)
+    return faces[0] if faces else None
+
+
+def detect_faces(
+    rgb: np.ndarray,
+    cache_dir,
+    *,
+    conf_thresh: float = 0.30,
+    allow_prior: bool = False,
+) -> list[FaceBox]:
+    """
+    Detect all faces, largest-first.
+
+    When allow_prior=False (multi-person / validation), never invent a geometric
+    face — return [] if OpenCV finds nothing.
+    """
     backend = get_face_backend(cache_dir)
     h, w = rgb.shape[:2]
+    faces: list[FaceBox] = []
 
     if backend == "caffe":
         assert _FACE_NET is not None
         max_side = 640
         scale = min(1.0, max_side / float(max(h, w)))
         if scale < 1.0:
-            small = cv2.resize(rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            small = cv2.resize(
+                rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+            )
         else:
             small = rgb
         sh, sw = small.shape[:2]
@@ -181,10 +201,8 @@ def detect_best_face(rgb: np.ndarray, cache_dir, conf_thresh: float = 0.30) -> F
         )
         _FACE_NET.setInput(blob)
         det = _FACE_NET.forward()
-        best: FaceBox | None = None
-        best_score = -1.0
-        # Retry with a lower conf floor — glossy studio faces on black often score ~0.2–0.3.
         for min_conf in (conf_thresh, 0.15):
+            batch: list[FaceBox] = []
             for i in range(det.shape[2]):
                 conf = float(det[0, 0, i, 2])
                 if conf < min_conf:
@@ -202,43 +220,94 @@ def detect_best_face(rgb: np.ndarray, cache_dir, conf_thresh: float = 0.30) -> F
                 x1, y1 = min(w, x1), min(h, y1)
                 if x1 <= x0 + 2 or y1 <= y0 + 2:
                     continue
-                area = (x1 - x0) * (y1 - y0)
-                score = conf * area
-                if score > best_score:
-                    best_score = score
-                    best = FaceBox(x0, y0, x1, y1, conf)
-            if best is not None:
-                return best
+                batch.append(FaceBox(x0, y0, x1, y1, conf))
+            if batch:
+                faces = batch
+                break
 
-    if backend == "haar" or backend == "caffe":
-        # Haar as secondary when caffe misses (common on black-bg cutouts).
+    if not faces and backend in ("haar", "caffe"):
         try:
             gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-            faces = _haar_cascade().detectMultiScale(
+            haar = _haar_cascade().detectMultiScale(
                 gray, scaleFactor=1.1, minNeighbors=4, minSize=(32, 32)
             )
-            if len(faces) > 0:
-                x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-                return FaceBox(int(x), int(y), int(x + fw), int(y + fh), 0.5)
+            for x, y, fw, fh in haar:
+                faces.append(FaceBox(int(x), int(y), int(x + fw), int(y + fh), 0.5))
         except Exception:
             pass
 
-    content = _face_box_from_cutout(rgb)
-    if content is not None:
-        return content
+    if not faces and allow_prior:
+        content = _face_box_from_cutout(rgb)
+        if content is not None:
+            return [content]
+        face_h = int(h * 0.42)
+        face_w = int(min(w * 0.55, face_h * 0.90))
+        cx, cy = w // 2, int(h * 0.36)
+        return [
+            FaceBox(
+                max(0, cx - face_w // 2),
+                max(0, cy - face_h // 2),
+                min(w, cx + face_w // 2),
+                min(h, cy + face_h // 2),
+                0.2,
+            )
+        ]
 
-    # Geometric prior for portrait selfies: large upper-center face.
-    # Used when OpenCV DNN/Haar are unavailable in the environment.
-    face_h = int(h * 0.42)
-    face_w = int(min(w * 0.55, face_h * 0.90))
-    cx, cy = w // 2, int(h * 0.36)
-    return FaceBox(
-        max(0, cx - face_w // 2),
-        max(0, cy - face_h // 2),
-        min(w, cx + face_w // 2),
-        min(h, cy + face_h // 2),
-        0.2,
-    )
+    # De-dupe overlaps, keep higher area*conf
+    faces.sort(key=lambda b: b.width * b.height * max(0.05, b.conf), reverse=True)
+    kept: list[FaceBox] = []
+    for f in faces:
+        dup = False
+        for k in kept:
+            ix0, iy0 = max(f.x0, k.x0), max(f.y0, k.y0)
+            ix1, iy1 = min(f.x1, k.x1), min(f.y1, k.y1)
+            inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+            union = f.width * f.height + k.width * k.height - inter
+            if union > 0 and inter / union > 0.5:
+                dup = True
+                break
+        if not dup:
+            kept.append(f)
+    return kept
+
+
+def select_face_box(
+    rgb: np.ndarray,
+    cache_dir,
+    *,
+    index: int = 0,
+    policy: str = "largest",
+    conf_thresh: float = 0.30,
+) -> tuple[FaceBox | None, list[FaceBox]]:
+    """
+    Pick which body face to swap in multi-person photos.
+
+    policy:
+      largest   — biggest face (default)
+      rightmost — max center-x (common for 'person on the right')
+      leftmost  — min center-x
+      index     — use ``index`` into largest-first list
+    """
+    faces = detect_faces(rgb, cache_dir, conf_thresh=conf_thresh, allow_prior=False)
+    if not faces:
+        # Fall back to legacy single-face path (may use prior).
+        best = detect_best_face(rgb, cache_dir, conf_thresh=conf_thresh)
+        return best, ([best] if best is not None else [])
+
+    pol = (policy or "largest").strip().lower()
+    ordered = list(faces)
+    if pol == "rightmost":
+        ordered = sorted(faces, key=lambda b: (b.x0 + b.x1) / 2.0, reverse=True)
+    elif pol == "leftmost":
+        ordered = sorted(faces, key=lambda b: (b.x0 + b.x1) / 2.0)
+    elif pol == "index":
+        ordered = list(faces)  # already largest-first
+    else:
+        ordered = list(faces)
+
+    idx = int(index) if pol == "index" else 0
+    idx = max(0, min(idx, len(ordered) - 1))
+    return ordered[idx], faces
 
 
 def expand_box(
@@ -346,15 +415,18 @@ def head_hair_mask_from_face(
     top_extend: float = 1.1,
     side_extend: float = 0.55,
     bot_extend: float = 0.35,
+    face_box: FaceBox | None = None,
 ) -> Image.Image:
     """
     Approximate head+hair mask without SAM (portable fallback).
     Uses face box expanded toward hair/neck. Good enough for crop locality;
     replace with SAM/BiRefNet in production GPU stacks when available.
+
+    Pass ``face_box`` to target a specific person in multi-face photos.
     """
     rgb = pil_to_rgb_np(body_pil)
     h, w = rgb.shape[:2]
-    box = detect_best_face(rgb, cache_dir)
+    box = face_box if face_box is not None else detect_best_face(rgb, cache_dir)
     mask = np.zeros((h, w), dtype=np.uint8)
     if box is None:
         # Center prior fallback

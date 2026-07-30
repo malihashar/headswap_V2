@@ -519,6 +519,8 @@ def apply_user_knobs(
     output_long_side: int | None,
     stitch: bool,
     debug: bool,
+    body_face_policy: str | None = None,
+    body_face_index: int | None = None,
 ) -> dict[str, Any]:
     """Map the small user-facing knob set onto pipeline config."""
     out = dict(cfg)
@@ -539,6 +541,10 @@ def apply_user_knobs(
         out["crop_long_side"] = min(side, int(out.get("crop_long_side", 768) or 768))
         if not stitch:
             out["max_dim"] = side
+    if body_face_policy is not None:
+        out["body_face_policy"] = str(body_face_policy)
+    if body_face_index is not None:
+        out["body_face_index"] = int(body_face_index)
     return out
 
 

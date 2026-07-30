@@ -71,6 +71,18 @@ mask_bot_extend: 0.40
 stitch_feather_px: 10
 post_color_match_strength: 0.35
 
+# Multi-person body photos: pick which face to swap, then tighten the crop so
+# neighbors are not in the edit canvas (fixes giant-head / wrong-person fails).
+# policy: largest | rightmost | leftmost | index
+body_face_policy: largest
+body_face_index: 0
+person_match_crop_size: true
+multi_mask_top_extend: 1.05
+multi_mask_side_extend: 0.35
+multi_mask_bot_extend: 0.22
+multi_mask_expand_px: 10
+multi_crop_pad: 6
+
 prompt: >-
   Replace the person's head and face in the first image with the person from
   the second image. Preserve the exact facial identity of the second person —
@@ -78,13 +90,17 @@ prompt: >-
   Keep the facial expression, mouth shape, smile/no-smile, eye gaze direction,
   and micro-expressions from the first image — do not copy the second person's
   expression. Keep the body, clothing, pose, head rotation, camera angle,
-  lighting, and background from the first image. Remove the original face and
-  glasses from the first person. Photorealistic, natural skin texture, sharp
-  details.
+  lighting, and background from the first image. Match the original head size
+  and neck seam — do not enlarge the head. Use face identity only from the
+  second image; do not copy clothing, collar, bowtie, or shoulders from the
+  second image. If other people are visible, leave them completely unchanged.
+  Remove the original face and glasses from the first person. Photorealistic,
+  natural skin texture, sharp details.
 
 negative_prompt: ""
 
-face_side_pad: 0.28
-face_top_pad: 0.55
-face_bot_pad: 0.20
+# Tight face ref — avoid donor shoulders/collar bleeding into the swap.
+face_side_pad: 0.22
+face_top_pad: 0.50
+face_bot_pad: 0.12
 include_shoulders: false
