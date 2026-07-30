@@ -1042,6 +1042,125 @@ class Krea2IdentityEditPipeline(BasePipeline):
         req = types.get("required") or {}
         return key in opt or key in req
 
+    def _log_selected_face_delta(
+        self,
+        label: str,
+        body: Image.Image,
+        edited: Image.Image,
+        selected: FaceBox,
+    ) -> dict[str, float]:
+        """MSE/PSNR in the selected face box — proves whether the sampler swapped."""
+        import sys
+
+        import numpy as np
+
+        if edited.size != body.size:
+            edited = edited.resize(body.size, Image.Resampling.LANCZOS)
+        a = np.asarray(body.convert("RGB"), dtype=np.float64)
+        b = np.asarray(edited.convert("RGB"), dtype=np.float64)
+        x0, y0 = max(0, selected.x0), max(0, selected.y0)
+        x1, y1 = min(body.size[0], selected.x1), min(body.size[1], selected.y1)
+        if x1 <= x0 or y1 <= y0:
+            return {"mse": -1.0, "psnr": -1.0}
+        patch_a = a[y0:y1, x0:x1]
+        patch_b = b[y0:y1, x0:x1]
+        mse = float(np.mean((patch_a - patch_b) ** 2))
+        psnr = 99.0 if mse <= 1e-12 else float(20.0 * np.log10(255.0 / np.sqrt(mse)))
+        print(
+            f"[krea2 face_delta] {label} selected_box=[{x0},{y0},{x1},{y1}] "
+            f"mse={mse:.2f} psnr={psnr:.2f} "
+            f"(high mse / low psnr ⇒ sampler changed the face)",
+            file=sys.__stdout__,
+            flush=True,
+        )
+        return {"mse": round(mse, 3), "psnr": round(psnr, 3)}
+
+    def _pil_content_stats(self, im: Image.Image) -> dict[str, Any]:
+        """Compact fingerprint for scene/person tensors entering Krea2."""
+        import hashlib
+
+        import numpy as np
+
+        rgb = np.asarray(im.convert("RGB"))
+        mean = rgb.astype(np.float64).mean(axis=(0, 1))
+        # Non-near-black coverage — distinguishes full-bleed vs tiny stickers.
+        nonblack = float((rgb.astype(np.float32).mean(axis=2) > 14.0).mean())
+        digest = hashlib.sha1(rgb.tobytes()).hexdigest()[:12]
+        return {
+            "size": list(im.size),
+            "sha1_12": digest,
+            "mean_rgb": [round(float(x), 2) for x in mean],
+            "nonblack_frac": round(nonblack, 4),
+        }
+
+    def _log_krea2_conditioning(
+        self,
+        *,
+        edit_mode: str,
+        scene: Image.Image,
+        person: Image.Image,
+        prompt: str,
+        bundle: dict,
+        seed: int,
+        ref_boost_mask: Image.Image | None,
+    ) -> dict[str, Any]:
+        """Log every conditioning input that enters shared `_sample_edit`."""
+        import hashlib
+        import sys
+
+        scene_s = self._pil_content_stats(scene)
+        person_s = self._pil_content_stats(person)
+        prompt_sha = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:12]
+        load = bundle.get("load_meta") or {}
+        info = {
+            "edit_mode": edit_mode,
+            "scene": scene_s,
+            "person": person_s,
+            "prompt_len": len(prompt),
+            "prompt_sha1_12": prompt_sha,
+            "prompt_preview": prompt[:120].replace("\n", " "),
+            "ref_boost_mask": ref_boost_mask is not None,
+            "checkpoint": load.get("checkpoint"),
+            "loras_loaded": list(load.get("loras_loaded") or []),
+            "lora_strengths": dict(load.get("lora_strengths") or {}),
+            "steps": int(self.cfg.get("steps", 8)),
+            "cfg": float(self.cfg.get("cfg", 1.0)),
+            "seed": int(seed),
+            "denoise": float(self.cfg.get("denoise", 1.0)),
+            "ref_boost": float(self.cfg.get("ref_boost", 4.0)),
+            "ref_boost_a": float(self.cfg.get("ref_boost_a", 1.0)),
+            "fit_mode": str(self.cfg.get("fit_mode", "fit") or "fit"),
+            "grounding_px": int(self.cfg.get("grounding_px", 768)),
+            "sampler_name": str(self.cfg.get("sampler_name", "euler") or "euler"),
+            "scheduler": str(self.cfg.get("scheduler", "simple") or "simple"),
+            "timestep_shift_mu": float(self.cfg.get("timestep_shift_mu", 1.15) or 1.15),
+        }
+        print(
+            f"[krea2 conditioning] mode={edit_mode} "
+            f"scene={scene_s['size']} sha={scene_s['sha1_12']} "
+            f"nonblack={scene_s['nonblack_frac']} "
+            f"person={person_s['size']} sha={person_s['sha1_12']} "
+            f"nonblack={person_s['nonblack_frac']} "
+            f"ref_boost_mask={info['ref_boost_mask']} "
+            f"prompt_sha={prompt_sha} prompt_len={info['prompt_len']} "
+            f"ckpt={info['checkpoint']} loras={info['loras_loaded']} "
+            f"strengths={info['lora_strengths']} "
+            f"steps={info['steps']} cfg={info['cfg']} seed={info['seed']} "
+            f"denoise={info['denoise']} ref_boost={info['ref_boost']}/"
+            f"{info['ref_boost_a']} fit={info['fit_mode']} "
+            f"grounding_px={info['grounding_px']} "
+            f"sampler={info['sampler_name']}/{info['scheduler']} "
+            f"shift_mu={info['timestep_shift_mu']}",
+            file=sys.__stdout__,
+            flush=True,
+        )
+        print(
+            f"[krea2 conditioning] prompt_preview={info['prompt_preview']!r}",
+            file=sys.__stdout__,
+            flush=True,
+        )
+        return info
+
     def _build_full_frame_inputs(
         self,
         body_full: Image.Image,
@@ -1051,7 +1170,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         selected_face: FaceBox | None,
         all_faces: list[FaceBox],
     ) -> dict[str, Any]:
-        """Full-body scene + identity ref — no crop; optional freeze mask after."""
+        """Full-body scene + identity ref matching crop_stitch person prep."""
         max_ff = int(
             self.cfg.get(
                 "multi_full_frame_max_dim",
@@ -1059,14 +1178,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
         )
         scene = resize_max_keep_ar(body_full.convert("RGB"), max_ff, div_by=div_by)
-        # Match identity head height to the selected face in the full frame.
+
+        # Identity conditioning parity with successful single-person crop_stitch:
+        # that path uses resize_contain (scale_match gated off for single).
+        # place_face_at_height_frac stickers were a full_frame-only divergence
+        # that starved identity tokens on group shots.
+        match_crop_id = bool(self.cfg.get("full_frame_match_crop_identity", True))
         face_h_frac = 0.22
         if selected_face is not None and body_full.size[1] > 0:
-            # Scale coords if body_full was resized into scene.
             sy = scene.size[1] / float(body_full.size[1])
             face_h_frac = (selected_face.height * sy) / float(max(1, scene.size[1]))
         scale_factor = float(self.cfg.get("identity_scale_factor", 0.90))
-        if bool(self.cfg.get("identity_scale_match", True)):
+        if match_crop_id or not bool(self.cfg.get("identity_scale_match", True)):
+            person = resize_contain(face_crop.convert("RGB"), scene.size, fill=(0, 0, 0))
+            person_prep = "resize_contain"
+        else:
             person = place_face_at_height_frac(
                 face_crop.convert("RGB"),
                 scene.size,
@@ -1074,8 +1200,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 fill=(0, 0, 0),
                 max_height_frac=0.45,
             )
-        else:
-            person = resize_contain(face_crop.convert("RGB"), scene.size, fill=(0, 0, 0))
+            person_prep = "place_face_at_height_frac"
 
         freeze_outside = bool(self.cfg.get("full_frame_freeze_outside", True))
         freeze_mask = None
@@ -1084,8 +1209,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 body_full, selected_face, all_faces
             )
 
+        # Default OFF — crop_stitch never passes ref_boost_mask.
         ref_boost_mask = None
-        if bool(self.cfg.get("full_frame_ref_boost_mask", True)):
+        if bool(self.cfg.get("full_frame_ref_boost_mask", False)):
             ref_boost_mask = identity_face_boost_mask(person, self.cache_dir)
 
         diag = {
@@ -1106,6 +1232,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "body_size": list(body_full.size),
             "face_position": self._face_position_label(selected_face, all_faces),
             "face_height_frac_scene": round(float(face_h_frac), 4),
+            "person_prep": person_prep,
+            "full_frame_match_crop_identity": match_crop_id,
             "identity_scale_match": bool(self.cfg.get("identity_scale_match", True)),
             "full_frame_freeze_outside": freeze_outside,
             "full_frame_ref_boost_mask": ref_boost_mask is not None,
@@ -1574,6 +1702,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     print(
                         f"[krea2] edit_mode=full_frame faces={len(all_faces)} "
                         f"position={face_prep_diag.get('face_position')} "
+                        f"person_prep={face_prep_diag.get('person_prep')} "
                         f"freeze={freeze_mask is not None} "
                         f"ref_boost_mask={ref_boost_mask_img is not None} "
                         f"scene={list(scene.size)} person={list(person.size)}",
@@ -1763,12 +1892,32 @@ class Krea2IdentityEditPipeline(BasePipeline):
             multi_person = True
         else:
             # ---------- Single-pass path (crop_stitch or full_frame) ----------
-            if edit_mode == "full_frame":
+            if edit_mode == "full_frame" and not bool(
+                self.cfg.get("full_frame_use_crop_prompt", True)
+            ):
+                # Legacy full_frame-only prompt (diverges from crop_stitch).
                 prompt = self._prompt_for_full_frame_multi(selected_face, all_faces)
             else:
+                # Same prompt builder as crop_stitch. For full_frame parity with
+                # the successful single-person path: use_tight=False and do not
+                # inject multi_person prompt add-ons (those are crop-path extras).
+                prompt_multi = bool(multi_person) and edit_mode != "full_frame"
                 prompt = self._prompt_for_edit(
-                    use_tight=use_tight, multi_person=multi_person
+                    use_tight=use_tight if edit_mode != "full_frame" else False,
+                    multi_person=prompt_multi,
                 )
+            cond_info = self._log_krea2_conditioning(
+                edit_mode=edit_mode,
+                scene=scene,
+                person=person,
+                prompt=prompt,
+                bundle=bundle,
+                seed=int(base_seed),
+                ref_boost_mask=(
+                    ref_boost_mask_img if edit_mode == "full_frame" else None
+                ),
+            )
+            face_prep_diag["krea2_conditioning"] = cond_info
             sample_meta = self._sample_edit(
                 rt,
                 bundle,
@@ -1803,9 +1952,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     # Model output is already full-frame; resize to body_full if needed.
                     if out.size != body_full.size:
                         out = out.resize(body_full.size, Image.Resampling.LANCZOS)
-                    if multi_person and bool(
-                        self.cfg.get("clamp_edited_head_scale", True)
-                    ):
+                    # Log whether the sampler changed the selected face BEFORE freeze.
+                    if selected_face is not None:
+                        self._log_selected_face_delta(
+                            "full_frame_raw_vs_body",
+                            body_full,
+                            out,
+                            selected_face,
+                        )
+                    do_clamp = bool(
+                        self.cfg.get(
+                            "full_frame_clamp_head_scale",
+                            False,
+                        )
+                    ) and bool(self.cfg.get("clamp_edited_head_scale", True))
+                    if multi_person and do_clamp:
                         out, clamp_info = clamp_edited_head_scale(
                             body_full,
                             out,
@@ -1827,7 +1988,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 file=sys.__stdout__,
                                 flush=True,
                             )
-                    # Freeze outside selected face (strongest locality without crop-stitch).
+                    # Freeze outside selected face (post-sample locality only).
                     if freeze_mask is not None and bool(
                         self.cfg.get("full_frame_freeze_outside", True)
                     ):
@@ -1845,6 +2006,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             file=sys.__stdout__,
                             flush=True,
                         )
+                        if selected_face is not None:
+                            self._log_selected_face_delta(
+                                "full_frame_frozen_vs_body",
+                                body_full,
+                                out,
+                                selected_face,
+                            )
             faces_succeeded = [0] if do_stitch or edit_mode == "full_frame" else []
 
         dbg = {}

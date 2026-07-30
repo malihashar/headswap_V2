@@ -104,9 +104,20 @@ full_frame_neighbor_pad_frac: 0.22
 full_frame_neighbor_top_frac: 0.35
 full_frame_protect_expand: 1.20
 full_frame_post_color_match_strength: 0.45
-# Optional: restrict identity ref_boost to the face ellipse on image-2
-# (attention boost only — does NOT freeze the scene).
-full_frame_ref_boost_mask: true
+# Optional: restrict identity ref_boost to the face ellipse on image-2.
+# OFF by default — crop_stitch passes None; enabling this is a conditioning
+# divergence from the successful single-person path.
+full_frame_ref_boost_mask: false
+# Match successful crop_stitch identity prep: full-bleed resize_contain onto
+# the scene canvas (NOT place_face_at_height_frac stickers). Only intentional
+# difference vs crop_stitch should be scene = full body vs head crop.
+full_frame_match_crop_identity: true
+# Use the same prompt builder as crop_stitch (_prompt_for_edit). Do not append
+# full_frame-only locality essays (those are a prompt divergence).
+full_frame_use_crop_prompt: true
+# Post-sample clamp on the full group frame can target the wrong face — OFF
+# until inference-path identity parity is proven.
+full_frame_clamp_head_scale: false
 
 # Multi-person body photos: pick which face to swap, then tighten the crop so
 # neighbors are not in the edit canvas (fixes giant-head / wrong-person fails).
