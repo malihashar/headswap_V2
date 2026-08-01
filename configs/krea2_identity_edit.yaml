@@ -73,11 +73,19 @@ mask_bot_extend: 0.40
 stitch_feather_px: 10
 post_color_match_strength: 0.35
 
-# Multi-person identity path (hybrid restore):
-#   krea2_crop (default) — SPP-CC crop→full Krea2 dual-ref→stitch + neighbor freeze
-#   align_paste — legacy Architecture B geometry lock (weak ID; A/B only)
+# Multi-person production path (SPP-Strict):
+#   Identical single-person crop→Krea2 dual-ref→stitch. Locality comes from
+#   neighbor mask carve + clamping the crop window away from other faces —
+#   NOT from post-hoc pixel freezes (those erase identity on tight groups).
+#   krea2_crop (default) — strong identity, geometric neighbor exclusion
+#   align_paste — legacy Architecture B (weak ID; A/B only)
 multi_person_swap_mode: krea2_crop
-multi_crop_hard_freeze_neighbors: true
+# OFF by default: hard-freezing neighbor faces after stitch can overwrite the
+# selected head/hair when protect ellipses overlap. Prefer clamp_crop_away_neighbors.
+multi_crop_hard_freeze_neighbors: false
+clamp_crop_away_neighbors: true
+neighbor_crop_margin_frac: 0.18
+neighbor_crop_min_face_margin_frac: 0.35
 # Architecture B knobs (only when multi_person_swap_mode: align_paste)
 align_paste_krea2_refine: true
 align_paste_refine_steps: 6

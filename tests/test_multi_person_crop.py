@@ -3,11 +3,33 @@ from __future__ import annotations
 
 from headswap.preprocess import (
     FaceBox,
+    clamp_crop_away_neighbors,
     expand_crop_box_for_face_fill,
     suppress_neighbor_faces_in_mask,
 )
 from PIL import Image
 import numpy as np
+
+
+def test_clamp_crop_excludes_neighbor_center():
+    selected = FaceBox(200, 40, 280, 140, 0.9)
+    neighbor = FaceBox(40, 40, 120, 140, 0.9)
+    # Wide crop that includes both faces.
+    box = (0, 0, 320, 200)
+    new_box, info = clamp_crop_away_neighbors(
+        (320, 200),
+        box,
+        selected,
+        [selected, neighbor],
+        margin_frac=0.1,
+        min_face_margin_frac=0.2,
+        div_by=8,
+    )
+    assert info["neighbors_excluded"] >= 1.0
+    ncx = 0.5 * (neighbor.x0 + neighbor.x1)
+    assert not (new_box[0] <= ncx < new_box[2] and new_box[1] <= 90 < new_box[3])
+    # Selected face must remain inside the crop.
+    assert new_box[0] <= selected.x0 and new_box[2] >= selected.x1
 
 
 def test_expand_crop_reduces_face_fill_and_grows_long_side():

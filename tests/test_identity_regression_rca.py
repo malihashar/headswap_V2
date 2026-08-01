@@ -25,10 +25,12 @@ CFG_PATH = ROOT / "configs" / "krea2_identity_edit.yaml"
 
 
 def test_exp_a_config_default_is_krea2_crop():
-    """Exp A: default multi path must be SPP-CC crop→Krea2 (strong ID)."""
+    """Exp A: default multi path must be SPP-Strict crop→Krea2 (strong ID)."""
     cfg = yaml.safe_load(CFG_PATH.read_text())
     assert cfg.get("multi_person_swap_mode") == "krea2_crop"
-    assert cfg.get("multi_crop_hard_freeze_neighbors") is True
+    # Hard freeze is opt-in; geometric crop clamp is the production locality path.
+    assert cfg.get("multi_crop_hard_freeze_neighbors") is False
+    assert cfg.get("clamp_crop_away_neighbors") is True
     assert cfg.get("single_person_parity") is True
 
 

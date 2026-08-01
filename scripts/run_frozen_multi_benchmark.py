@@ -26,12 +26,14 @@ from headswap.profiling.run_manifest import build_manifest, write_manifest
 
 
 VARIANTS = {
-    "krea2_crop_no_freeze": {
+    "krea2_crop_spp_strict": {
         "multi_person_swap_mode": "krea2_crop",
+        "clamp_crop_away_neighbors": True,
         "multi_crop_hard_freeze_neighbors": False,
     },
     "krea2_crop_neighbor_freeze": {
         "multi_person_swap_mode": "krea2_crop",
+        "clamp_crop_away_neighbors": True,
         "multi_crop_hard_freeze_neighbors": True,
     },
     "deterministic_paste": {

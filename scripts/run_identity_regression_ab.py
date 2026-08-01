@@ -48,7 +48,8 @@ def _cfg_for_exp(exp: str) -> dict:
                 "multi_person_swap_mode": "krea2_crop",
                 "multi_person_edit_mode": "crop_stitch",
                 "single_person_parity": True,
-                "multi_crop_hard_freeze_neighbors": True,
+                "clamp_crop_away_neighbors": True,
+                "multi_crop_hard_freeze_neighbors": False,
             }
         )
     elif exp == "B":

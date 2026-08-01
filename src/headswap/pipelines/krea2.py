@@ -34,6 +34,7 @@ from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 from headswap.preprocess import (
     FaceBox,
+    clamp_crop_away_neighbors,
     clamp_edited_head_scale,
     crop_face_reference,
     crop_with_mask,
@@ -677,7 +678,38 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "crop_long_before": float(crop_long_before),
             "crop_long_after": float(crop_long_before),
         }
-        # SPP-CC: do not expand crop for face-fill (single-person recipe).
+        neighbor_clamp_info: dict[str, float] = {
+            "clamped": 0.0,
+            "neighbors_excluded": 0.0,
+        }
+        # Production multi locality: keep single-person crop recipe, but shrink
+        # the window so neighboring face centers never enter the Krea2 scene.
+        if multi_person and selected_face is not None and bool(
+            self.cfg.get("clamp_crop_away_neighbors", True)
+        ):
+            box, neighbor_clamp_info = clamp_crop_away_neighbors(
+                body_full.size,
+                box,
+                selected_face,
+                all_faces,
+                margin_frac=float(self.cfg.get("neighbor_crop_margin_frac", 0.18)),
+                min_face_margin_frac=float(
+                    self.cfg.get("neighbor_crop_min_face_margin_frac", 0.35)
+                ),
+                div_by=div_by,
+            )
+            crop_img = body_full.crop(box)
+            if neighbor_clamp_info.get("neighbors_excluded", 0) > 0:
+                import sys as _sys
+
+                print(
+                    "[krea2] clamped crop away from neighbors "
+                    f"excluded={int(neighbor_clamp_info['neighbors_excluded'])} "
+                    f"box={list(box)}",
+                    file=_sys.__stdout__,
+                    flush=True,
+                )
+        # Legacy: expand crop for face-fill (off under SPP-CC / single-person parity).
         if (not spp) and (isolate_selected or use_tight):
             box, expand_info = expand_crop_box_for_face_fill(
                 body_full.size,
@@ -801,6 +833,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "multi_person": bool(multi_person),
             "face_white_bg_applied": bool(apply_white_bg),
             "crop_expand": {k: round(float(v), 4) for k, v in expand_info.items()},
+            "neighbor_crop_clamp": {
+                k: round(float(v), 4) for k, v in neighbor_clamp_info.items()
+            },
             "mask_params": {
                 "top_ext": top_ext,
                 "side_ext": side_ext,
@@ -2231,13 +2266,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         original_scene=scene,
                         debug_stages=stitch_debug,
                     )
-                    # Hybrid restore: after SPP-CC crop→Krea2→stitch, hard-freeze
-                    # neighbor faces so locality matches Arch B without killing ID.
+                    # Optional post-stitch neighbor restore. OFF by default —
+                    # production locality is crop-window exclusion + mask carve.
                     if (
                         multi_person
                         and selected_face is not None
                         and bool(
-                            self.cfg.get("multi_crop_hard_freeze_neighbors", True)
+                            self.cfg.get("multi_crop_hard_freeze_neighbors", False)
                         )
                     ):
                         before_neighbor_freeze = out.copy()
