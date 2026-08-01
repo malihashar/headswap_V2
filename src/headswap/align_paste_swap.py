@@ -1,8 +1,9 @@
-"""Geometry-locked align → paste → optional refine (Architecture B).
+"""Geometry-locked identity paste (production multi-person path).
 
-Locks expression / pose / head scale from the target via full affine landmarks,
-pastes a clothing-free identity face matte, optionally runs a masked Krea2
-refine, then re-locks looking direction onto the destination landmarks.
+Locks expression / pose / head scale from the target via InsightFace landmarks
++ full affine warp, pastes a clothing-free identity face matte, optionally runs
+masked Krea2 refine (OFF by default — rewrite destroys geometry), then
+seamless-clones for lighting. Neighbors outside the face mask stay exact.
 """
 from __future__ import annotations
 
@@ -139,6 +140,16 @@ def run_align_paste_swap(
         div_by=div_by,
     )
 
+    face_in_crop: FaceBox | None = None
+    if selected_face is not None:
+        face_in_crop = FaceBox(
+            selected_face.x0 - box[0],
+            selected_face.y0 - box[1],
+            selected_face.x1 - box[0],
+            selected_face.y1 - box[1],
+            selected_face.conf,
+        )
+
     aligned_rgba, align_info = align_face_to_destination(
         id_matte,
         work,
@@ -148,6 +159,7 @@ def run_align_paste_swap(
         ellipse_scale_y=float(cfg.get("paste_ellipse_scale_y", 2.55)),
         feather_px=int(cfg.get("paste_feather_px", 21)),
         use_full_affine=bool(cfg.get("align_paste_full_affine", True)),
+        prefer_dest_box=face_in_crop,
     )
     pre_match = float(cfg.get("pre_color_match_strength", 0.55) or 0.0)
     paste_info: dict[str, Any] = {"composite_paste": False}
@@ -158,7 +170,11 @@ def run_align_paste_swap(
                 aligned_rgba, work, strength=pre_match
             )
             align_info["pre_color_match_strength"] = pre_match
-        composite_crop, paste_info = paste_aligned_face(work, aligned_rgba)
+        composite_crop, paste_info = paste_aligned_face(
+            work,
+            aligned_rgba,
+            seamless=bool(cfg.get("align_paste_seamless_clone", True)),
+        )
     else:
         paste_info = {
             "composite_paste": False,
@@ -169,21 +185,14 @@ def run_align_paste_swap(
         }
 
     # Face-local mask on the working crop (neighbors carved out in full-body coords).
-    face_in_crop: FaceBox | None = None
-    if selected_face is not None:
-        face_in_crop = FaceBox(
-            selected_face.x0 - box[0],
-            selected_face.y0 - box[1],
-            selected_face.x1 - box[0],
-            selected_face.y1 - box[1],
-            selected_face.conf,
-        )
+    # Geometry-lock production default: moderate top extent so destination hair
+    # is preserved when possible (product: keep hairstyle whenever possible).
     face_mask_crop = head_hair_mask_from_face(
         work,
         cache_dir,
         expand_px=int(cfg.get("align_paste_mask_expand_px", 10)),
         blur_px=int(cfg.get("align_paste_mask_blur_px", 10)),
-        top_extend=float(cfg.get("align_paste_mask_top", 0.85)),
+        top_extend=float(cfg.get("align_paste_mask_top", 0.55)),
         side_extend=float(cfg.get("align_paste_mask_side", 0.35)),
         bot_extend=float(cfg.get("align_paste_mask_bot", 0.25)),
         face_box=face_in_crop,
@@ -229,13 +238,14 @@ def run_align_paste_swap(
             refine_meta["refine_error"] = str(exc)
             refined_crop = composite_crop
 
-    # Lock looking direction / head yaw back onto the original crop landmarks.
-    # Generative refine often front-faces the identity; re-align fixes that.
+    # Lock looking direction only after generative refine (which often front-faces).
+    # Pure geometry paste already matches destination landmarks — skip re-warp.
     pose_before = refined_crop
     pose_meta: dict[str, Any] = {"pose_relock": False}
-    if bool(cfg.get("align_paste_pose_relock", True)) and bool(
-        paste_info.get("composite_paste")
-    ):
+    do_relock = bool(cfg.get("align_paste_pose_relock", True)) and bool(
+        refine_meta.get("refine_applied")
+    )
+    if do_relock and bool(paste_info.get("composite_paste")):
         refined_crop, pose_meta = relock_pose_to_destination(
             refined_crop,
             work,
@@ -248,6 +258,8 @@ def run_align_paste_swap(
             feather_px=int(cfg.get("paste_feather_px", 21)),
             stitch_feather_px=int(cfg.get("align_paste_stitch_feather_px", 10)),
         )
+    elif bool(cfg.get("align_paste_pose_relock", True)):
+        pose_meta["pose_relock_reason"] = "skipped_no_refine_geometry_already_locked"
 
     # Full-body mask BEFORE stitch. soft_composite does mask.crop(box) and
     # requires a full-canvas mask; passing crop-local alpha mis-extracts the
@@ -298,5 +310,5 @@ def run_align_paste_swap(
         "refine_meta": refine_meta,
         "pose_meta": pose_meta,
         "gates": gates,
-        "mode": "align_paste",
+        "mode": "geometry_lock",
     }

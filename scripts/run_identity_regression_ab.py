@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
-"""Colab / local A/B harness for the multi-person identity regression.
+"""Colab / local A/B harness for multi-person identity architectures.
 
-Exp A — strong ID baseline (default after hybrid restore):
-  multi_person_swap_mode: krea2_crop
-
-Exp B — paste-only isolation (align_paste, no refine/relock/color-match):
+Exp A — production geometry lock (default):
   multi_person_swap_mode: align_paste
   align_paste_krea2_refine: false
+  align_paste_seamless_clone: true
+
+Exp B — legacy dual-ref crop (krea2_crop SPP):
+  multi_person_swap_mode: krea2_crop
+
+Exp C — geometry lock + Krea2 refine (no pose relock):
+  align_paste_krea2_refine: true
   align_paste_pose_relock: false
-  pre_color_match_strength: 0
-  align_paste_post_color_match: 0
-  save_debug: true
 
-Usage (Colab, after pull):
+Usage:
   python scripts/run_identity_regression_ab.py \\
-    --body /path/to/group.png --face /path/to/gosling.png \\
+    --body /path/to/group.png --face /path/to/id.png \\
     --exp A --out results/_id_ab_A
-
-  python scripts/run_identity_regression_ab.py \\
-    --body /path/to/group.png --face /path/to/gosling.png \\
-    --exp B --out results/_id_ab_B
-
-Compare debug_align_composite vs final (Exp B) and crop edited vs final (Exp A).
 """
 from __future__ import annotations
 
@@ -39,10 +34,19 @@ def _cfg_for_exp(exp: str) -> dict:
         "save_debug": True,
         "verbose": True,
         "mask_crop_stitch": True,
-        "body_face_policy": "rightmost",  # matches Gosling×rightmost person demos
+        "body_face_policy": "rightmost",
     }
     exp = exp.upper().strip()
     if exp == "A":
+        base.update(
+            {
+                "multi_person_swap_mode": "align_paste",
+                "align_paste_krea2_refine": False,
+                "align_paste_seamless_clone": True,
+                "align_paste_full_affine": True,
+            }
+        )
+    elif exp == "B":
         base.update(
             {
                 "multi_person_swap_mode": "krea2_crop",
@@ -52,18 +56,7 @@ def _cfg_for_exp(exp: str) -> dict:
                 "multi_crop_hard_freeze_neighbors": False,
             }
         )
-    elif exp == "B":
-        base.update(
-            {
-                "multi_person_swap_mode": "align_paste",
-                "align_paste_krea2_refine": False,
-                "align_paste_pose_relock": False,
-                "pre_color_match_strength": 0.0,
-                "align_paste_post_color_match": 0.0,
-            }
-        )
     elif exp == "C":
-        # Refine on, pose relock off — fork model ID vs relock dilution.
         base.update(
             {
                 "multi_person_swap_mode": "align_paste",

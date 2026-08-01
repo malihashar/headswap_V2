@@ -26,6 +26,12 @@ from headswap.profiling.run_manifest import build_manifest, write_manifest
 
 
 VARIANTS = {
+    "geometry_lock": {
+        "multi_person_swap_mode": "align_paste",
+        "align_paste_krea2_refine": False,
+        "align_paste_seamless_clone": True,
+        "align_paste_full_affine": True,
+    },
     "krea2_crop_spp_strict": {
         "multi_person_swap_mode": "krea2_crop",
         "clamp_crop_away_neighbors": True,

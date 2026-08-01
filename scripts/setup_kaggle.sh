@@ -116,6 +116,8 @@ echo
 echo "[2/3] Python dependencies (requirements.txt)"
 echo "  Note: do not install hf_xet; setup forces HF_HUB_DISABLE_XET=1."
 python3 -m pip install -q -r "$REPO_ROOT/requirements.txt"
+# Geometry-lock multi-person path needs InsightFace buffalo_l.
+python3 "$REPO_ROOT/scripts/download_insightface.py" || echo "WARN: InsightFace download failed; box-paste fallback will be used."
 echo "  Done."
 echo
 

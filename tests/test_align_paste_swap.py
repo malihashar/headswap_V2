@@ -75,7 +75,7 @@ def test_run_align_paste_preserves_outside_mask():
     )
     result = out["image"]
     assert result.size == body.size
-    assert out["mode"] == "align_paste"
+    assert out["mode"] == "geometry_lock"
     # Far-left neighbor region should stay close to original (outside mask)
     body_a = np.asarray(body)
     res_a = np.asarray(result)

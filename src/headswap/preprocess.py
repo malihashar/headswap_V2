@@ -264,6 +264,64 @@ _PROTO_MODEL: tuple[str, str] | None = None
 _HAAR = None
 _FACE_BACKEND: str | None = None
 _INSIGHTFACE_APP = None
+_INSIGHTFACE_INIT_ERROR: str | None = None
+
+
+def ensure_insightface_app(cache_dir=None):
+    """
+    Lazily construct InsightFace FaceAnalysis (buffalo_l).
+
+    Models auto-download into INSIGHTFACE_HOME / ~/.insightface on first use.
+    Returns the app or None when insightface/onnxruntime is unavailable.
+    """
+    global _INSIGHTFACE_APP, _INSIGHTFACE_INIT_ERROR
+    if _INSIGHTFACE_APP is not None:
+        return _INSIGHTFACE_APP
+    if _INSIGHTFACE_INIT_ERROR is not None:
+        return None
+    try:
+        from insightface.app import FaceAnalysis  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        _INSIGHTFACE_INIT_ERROR = f"insightface_import_failed:{exc}"
+        return None
+    try:
+        import os
+        from pathlib import Path
+
+        if cache_dir is not None:
+            root = Path(cache_dir) / "insightface"
+            root.mkdir(parents=True, exist_ok=True)
+            os.environ.setdefault("INSIGHTFACE_HOME", str(root))
+        # Prefer CUDA when available; otherwise CPU (avoid noisy provider warnings).
+        providers: list[str] = ["CPUExecutionProvider"]
+        try:
+            import onnxruntime as ort  # type: ignore
+
+            avail = set(ort.get_available_providers())
+            if "CUDAExecutionProvider" in avail:
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            elif "CoreMLExecutionProvider" in avail:
+                providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+        except Exception:
+            pass
+        app = FaceAnalysis(name="buffalo_l", providers=providers)
+        app.prepare(ctx_id=0, det_size=(640, 640))
+        _INSIGHTFACE_APP = app
+        return _INSIGHTFACE_APP
+    except Exception as exc:  # noqa: BLE001
+        _INSIGHTFACE_INIT_ERROR = f"insightface_runtime_failed:{exc}"
+        return None
+
+
+def _iou_box(a: FaceBox, b0: float, b1: float, b2: float, b3: float) -> float:
+    ix0, iy0 = max(a.x0, b0), max(a.y0, b1)
+    ix1, iy1 = min(a.x1, b2), min(a.y1, b3)
+    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    if inter <= 0:
+        return 0.0
+    area_a = float(max(1, a.width) * max(1, a.height))
+    area_b = float(max(1.0, (b2 - b0) * (b3 - b1)))
+    return inter / max(1e-6, area_a + area_b - inter)
 
 
 def _ensure_face_dnn(cache_dir) -> tuple[str, str]:
@@ -376,14 +434,33 @@ def detect_faces(
     """
     Detect all faces, largest-first.
 
+    Preference: InsightFace buffalo_l (when installed) → OpenCV SSD → Haar.
     When allow_prior=False (multi-person / validation), never invent a geometric
-    face — return [] if OpenCV finds nothing.
+    face — return [] if detectors find nothing.
     """
-    backend = get_face_backend(cache_dir)
     h, w = rgb.shape[:2]
     faces: list[FaceBox] = []
 
-    if backend == "caffe":
+    app = ensure_insightface_app(cache_dir)
+    if app is not None:
+        try:
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            for f in app.get(bgr):
+                conf = float(getattr(f, "det_score", 0.9) or 0.9)
+                if conf < conf_thresh:
+                    continue
+                x0, y0, x1, y1 = [int(v) for v in f.bbox]
+                x0, y0 = max(0, x0), max(0, y0)
+                x1, y1 = min(w, x1), min(h, y1)
+                if x1 <= x0 + 2 or y1 <= y0 + 2:
+                    continue
+                faces.append(FaceBox(x0, y0, x1, y1, conf))
+        except Exception:
+            faces = []
+
+    backend = get_face_backend(cache_dir)
+
+    if not faces and backend == "caffe":
         assert _FACE_NET is not None
         max_side = 640
         scale = min(1.0, max_side / float(max(h, w)))
@@ -1295,43 +1372,49 @@ def describe_hair_length_hint(body: Image.Image, face: Image.Image, cache_dir) -
 
 
 def get_face_landmarks5(
-    rgb: np.ndarray, cache_dir
+    rgb: np.ndarray,
+    cache_dir,
+    prefer_box: FaceBox | None = None,
 ) -> tuple[np.ndarray | None, str, str | None]:
     """
     Return 5 face landmarks as float32 (5, 2) in image XY order.
 
     Preference order:
-      1. InsightFace (buffalo_l / default) — community Align→Paste path
+      1. InsightFace (buffalo_l) — production geometry lock
       2. OpenCV box corners derived from detect_best_face — weak fallback
+
+    When ``prefer_box`` is set (multi-person), pick the InsightFace detection
+    with highest IoU against that box instead of the largest face.
 
     Returns (landmarks_or_None, backend_name, skip_reason_or_None).
     """
-    # InsightFace (optional GPU extra)
-    try:
-        from insightface.app import FaceAnalysis  # type: ignore
-    except Exception as exc:
-        insight_err = f"insightface_import_failed:{exc}"
-    else:
-        insight_err = None
-        global _INSIGHTFACE_APP
+    insight_err = _INSIGHTFACE_INIT_ERROR
+    app = ensure_insightface_app(cache_dir)
+    if app is not None:
         try:
-            if _INSIGHTFACE_APP is None:
-                app = FaceAnalysis(
-                    name="buffalo_l",
-                    providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-                )
-                app.prepare(ctx_id=0, det_size=(640, 640))
-                _INSIGHTFACE_APP = app
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            faces = _INSIGHTFACE_APP.get(bgr)
+            faces = app.get(bgr)
             if not faces:
                 return None, "insightface", "insightface_no_face_detected"
-            face = max(
-                faces,
-                key=lambda f: float(
-                    (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
-                ),
-            )
+            if prefer_box is not None:
+                scored = []
+                for f in faces:
+                    x0, y0, x1, y1 = [float(v) for v in f.bbox]
+                    scored.append((_iou_box(prefer_box, x0, y0, x1, y1), f))
+                scored.sort(key=lambda t: t[0], reverse=True)
+                face = scored[0][1] if scored[0][0] > 0.05 else max(
+                    faces,
+                    key=lambda f: float(
+                        (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+                    ),
+                )
+            else:
+                face = max(
+                    faces,
+                    key=lambda f: float(
+                        (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+                    ),
+                )
             kps = np.asarray(face.kps, dtype=np.float32)
             if kps.shape != (5, 2):
                 return None, "insightface", f"insightface_bad_kps_shape:{kps.shape}"
@@ -1340,7 +1423,10 @@ def get_face_landmarks5(
             insight_err = f"insightface_runtime_failed:{exc}"
 
     # OpenCV box → synthetic 5-point layout (eyes / nose / mouth corners)
-    box = detect_best_face(rgb, cache_dir)
+    if prefer_box is not None:
+        box = prefer_box
+    else:
+        box = detect_best_face(rgb, cache_dir)
     if box is None:
         reason = insight_err or "no_face_for_landmarks"
         return None, "none", reason
@@ -1475,6 +1561,7 @@ def align_face_to_destination(
     ellipse_scale_y: float = 2.55,
     feather_px: int = 21,
     use_full_affine: bool = True,
+    prefer_dest_box: FaceBox | None = None,
 ) -> tuple[Image.Image | None, dict]:
     """
     Warp source face onto destination face geometry.
@@ -1499,7 +1586,9 @@ def align_face_to_destination(
     dest_rgb = pil_to_rgb_np(destination)
     src_rgb = pil_to_rgb_np(source_face)
 
-    dest_lm, dest_backend, dest_note = get_face_landmarks5(dest_rgb, cache_dir)
+    dest_lm, dest_backend, dest_note = get_face_landmarks5(
+        dest_rgb, cache_dir, prefer_box=prefer_dest_box
+    )
     src_lm, src_backend, src_note = get_face_landmarks5(src_rgb, cache_dir)
     info["dest_landmarks_backend"] = dest_backend
     info["src_landmarks_backend"] = src_backend
@@ -1746,18 +1835,66 @@ def color_match_rgba_to_destination(
 def paste_aligned_face(
     destination: Image.Image,
     aligned_rgba: Image.Image,
+    *,
+    seamless: bool = True,
 ) -> tuple[Image.Image, dict]:
-    """Alpha-composite aligned RGBA face onto destination RGB. Returns (RGB, info)."""
-    info = {"composite_paste": False, "composite_paste_skip_reason": None}
+    """
+    Composite aligned RGBA face onto destination RGB.
+
+    When ``seamless`` is True (default), follow alpha composite with OpenCV
+    ``seamlessClone`` (MIXED_CLONE) so lighting/texture match the destination
+    while identity texture from the warped donor is preserved.
+    """
+    info: dict = {
+        "composite_paste": False,
+        "composite_paste_skip_reason": None,
+        "seamless_clone": False,
+    }
     if aligned_rgba is None:
         info["composite_paste_skip_reason"] = "aligned_rgba_none"
         return destination.convert("RGB"), info
     if aligned_rgba.size != destination.size:
         aligned_rgba = aligned_rgba.resize(destination.size, Image.Resampling.LANCZOS)
     base = destination.convert("RGBA")
-    out = Image.alpha_composite(base, aligned_rgba.convert("RGBA"))
+    out = Image.alpha_composite(base, aligned_rgba.convert("RGBA")).convert("RGB")
     info["composite_paste"] = True
-    return out.convert("RGB"), info
+
+    if not seamless:
+        return out, info
+
+    try:
+        dest_rgb = pil_to_rgb_np(destination)
+        face_rgb = pil_to_rgb_np(out)
+        alpha = np.asarray(aligned_rgba.convert("RGBA"))[:, :, 3]
+        mask = (alpha >= 40).astype(np.uint8) * 255
+        if int(mask.sum()) < 500:
+            return out, info
+        # Shrink mask slightly so clone center sits in face interior.
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        mask_core = cv2.erode(mask, k, iterations=1)
+        if int(mask_core.sum()) < 200:
+            mask_core = mask
+        ys, xs = np.where(mask_core > 0)
+        if len(xs) < 20:
+            return out, info
+        cx = int(np.median(xs))
+        cy = int(np.median(ys))
+        # seamlessClone expects BGR
+        src_bgr = cv2.cvtColor(face_rgb, cv2.COLOR_RGB2BGR)
+        dst_bgr = cv2.cvtColor(dest_rgb, cv2.COLOR_RGB2BGR)
+        cloned = cv2.seamlessClone(
+            src_bgr, dst_bgr, mask_core, (cx, cy), cv2.MIXED_CLONE
+        )
+        # Only keep clone inside the original alpha footprint; outside = dest.
+        cloned_rgb = cv2.cvtColor(cloned, cv2.COLOR_BGR2RGB).astype(np.float32)
+        a = (alpha.astype(np.float32) / 255.0)[..., None]
+        dest_f = dest_rgb.astype(np.float32)
+        blended = cloned_rgb * a + dest_f * (1.0 - a)
+        info["seamless_clone"] = True
+        return np_to_pil(np.clip(blended, 0, 255)), info
+    except Exception as exc:  # noqa: BLE001 — alpha composite already succeeded
+        info["seamless_clone_error"] = str(exc)
+        return out, info
 
 
 def lab_histogram_match_face(

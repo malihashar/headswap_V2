@@ -1678,7 +1678,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         import sys
 
         refine_fn = None
-        do_refine = bool(self.cfg.get("align_paste_krea2_refine", True))
+        do_refine = bool(self.cfg.get("align_paste_krea2_refine", False))
         if do_refine:
             refine_prompt = str(
                 self.cfg.get(
@@ -1751,9 +1751,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
         timings["_align_paste_refine"] = 1.0 if ap["refine_meta"].get("refine_applied") else 0.0
 
         print(
-            f"[krea2] edit_mode=align_paste faces={len(all_faces)} "
+            f"[krea2] edit_mode=geometry_lock faces={len(all_faces)} "
             f"paste={ap['paste_info'].get('composite_paste')} "
             f"align={ap['align_info'].get('face_alignment')} "
+            f"seamless={ap['paste_info'].get('seamless_clone')} "
+            f"backend={ap['align_info'].get('face_alignment_backend')} "
             f"refine={ap['refine_meta'].get('refine_applied')} "
             f"pose_relock={ap.get('pose_meta', {}).get('pose_relock')} "
             f"gates={ap.get('gates')}",
@@ -1797,7 +1799,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         }
         meta = {
             "pipeline": self.name,
-            "edit_mode": "align_paste",
+            "edit_mode": "geometry_lock",
             "multi_person_swap_mode": "align_paste",
             "multi_person_edit_mode": str(
                 self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
@@ -1915,10 +1917,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
                 ).strip().lower()
                 multi_swap_mode = str(
-                    self.cfg.get("multi_person_swap_mode", "krea2_crop") or "krea2_crop"
+                    self.cfg.get("multi_person_swap_mode", "align_paste")
+                    or "align_paste"
                 ).strip().lower()
-                # Architecture B (legacy): explicit align-paste. Default multi path
-                # is SPP-CC crop→Krea2 (krea2_crop) for strong identity transfer.
+                # Production multi: geometry-locked landmark paste (align_paste).
+                # krea2_crop remains available for A/B (dual-ref restage).
                 if (
                     len(all_faces) > 1
                     and not swap_all

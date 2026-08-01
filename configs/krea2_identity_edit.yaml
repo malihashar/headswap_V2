@@ -73,13 +73,12 @@ mask_bot_extend: 0.40
 stitch_feather_px: 10
 post_color_match_strength: 0.35
 
-# Multi-person production path (SPP-Strict):
-#   Identical single-person crop→Krea2 dual-ref→stitch. Locality comes from
-#   neighbor mask carve + clamping the crop window away from other faces —
-#   NOT from post-hoc pixel freezes (those erase identity on tight groups).
-#   krea2_crop (default) — strong identity, geometric neighbor exclusion
-#   align_paste — legacy Architecture B (weak ID; A/B only)
-multi_person_swap_mode: krea2_crop
+# Multi-person production path (geometry-locked identity paste):
+#   align_paste / geometry_lock (default) — InsightFace landmark affine + seamless
+#   blend. Preserves pose/expression/head size/neighbors by construction.
+#   Krea2 refine is OFF by default (full rewrite destroys geometry lock).
+#   krea2_crop — legacy dual-ref restage (strong ID, weak geometry) for A/B only.
+multi_person_swap_mode: align_paste
 # OFF by default: hard-freezing neighbor faces after stitch can overwrite the
 # selected head/hair when protect ellipses overlap. Prefer clamp_crop_away_neighbors.
 multi_crop_hard_freeze_neighbors: false
@@ -87,16 +86,20 @@ multi_crop_hard_freeze_neighbors: false
 # so it can never slice the stitch region; only margin_frac is tunable.
 clamp_crop_away_neighbors: true
 neighbor_crop_margin_frac: 0.18
-# Architecture B knobs (only when multi_person_swap_mode: align_paste)
-align_paste_krea2_refine: true
+# Architecture B / geometry-lock knobs (multi_person_swap_mode: align_paste)
+# Krea2 refine OFF: EmptySD3 rewrite breaks pose/expression/head-size lock.
+align_paste_krea2_refine: false
 align_paste_refine_steps: 6
-# Full 6-DOF affine + post-refine pose relock keep looking direction on target.
+align_paste_seamless_clone: true
+# Full 6-DOF affine locks looking direction onto the destination.
 align_paste_full_affine: true
+# Pose relock only runs when refine is applied (see align_paste_swap.py).
 align_paste_pose_relock: true
 align_paste_crop_pad_frac: 1.15
 align_paste_mask_expand_px: 10
 align_paste_mask_blur_px: 10
-align_paste_mask_top: 0.85
+# Moderate top — preserve destination hairstyle when possible.
+align_paste_mask_top: 0.55
 align_paste_mask_side: 0.35
 align_paste_mask_bot: 0.25
 align_paste_stitch_feather_px: 10
