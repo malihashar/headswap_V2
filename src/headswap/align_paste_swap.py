@@ -27,6 +27,7 @@ from headswap.preprocess import (
     relock_pose_to_destination,
     suppress_neighbor_faces_in_mask,
 )
+from headswap.profiling.identity_stage_trace import overlay_bbox
 
 
 def _head_height_ratio(
@@ -102,6 +103,11 @@ def measure_align_paste_gates(
     return gates
 
 
+def _alpha_composite_rgb(destination: Image.Image, aligned_rgba: Image.Image) -> Image.Image:
+    base = destination.convert("RGBA")
+    return Image.alpha_composite(base, aligned_rgba.convert("RGBA")).convert("RGB")
+
+
 def run_align_paste_swap(
     body: Image.Image,
     face: Image.Image,
@@ -111,6 +117,7 @@ def run_align_paste_swap(
     all_faces: list[FaceBox] | None = None,
     cfg: dict | None = None,
     refine_fn: Callable[..., Image.Image] | None = None,
+    identity_trace: Any | None = None,
 ) -> dict[str, Any]:
     """
     Architecture B core: face-only matte → landmark align → paste → optional refine.
@@ -118,11 +125,48 @@ def run_align_paste_swap(
     ``refine_fn(composite_crop, identity_matte, face_mask_crop) -> refined_crop``
     when provided (e.g. Krea2 masked refine). Outside the face mask, body pixels
     stay exact.
+
+    When ``identity_trace`` is provided, every major stage is saved + scored for
+    ArcFace identity so we can prove where donor likeness is lost.
     """
     cfg = dict(cfg or {})
     all_faces = list(all_faces or [])
     body_full = body.convert("RGB")
     div_by = int(cfg.get("div_by", 16))
+    trace = identity_trace
+
+    if trace is not None:
+        trace.add(
+            "01_original_body",
+            overlay_bbox(body_full, selected_face, "selected")
+            if selected_face is not None
+            else body_full,
+            notes={"selected_index": getattr(trace, "selected_index", None)},
+        )
+        if selected_face is not None:
+            sel_crop = body_full.crop(
+                (
+                    max(0, selected_face.x0),
+                    max(0, selected_face.y0),
+                    min(body_full.size[0], selected_face.x1),
+                    min(body_full.size[1], selected_face.y1),
+                )
+            )
+            trace.add(
+                "02_selected_face_crop",
+                sel_crop,
+                region=sel_crop,
+                notes={
+                    "bbox": [
+                        selected_face.x0,
+                        selected_face.y0,
+                        selected_face.x1,
+                        selected_face.y1,
+                    ]
+                },
+            )
+        else:
+            trace.add_missing("02_selected_face_crop", "no_selected_face")
 
     id_matte, matte_info = identity_face_only_matte(
         face,
@@ -132,6 +176,13 @@ def run_align_paste_swap(
         side=float(cfg.get("face_matte_side_pad", 0.12)),
         force_ellipse=bool(cfg.get("face_matte_force_ellipse", True)),
     )
+    if trace is not None:
+        trace.add(
+            "03_identity_preprocessed",
+            id_matte,
+            region=id_matte,
+            notes=dict(matte_info),
+        )
 
     work, box = crop_around_face_box(
         body_full,
@@ -150,6 +201,31 @@ def run_align_paste_swap(
             selected_face.conf,
         )
 
+    if trace is not None:
+        # Stages 04/05/06 are Krea2 I/O — filled only when refine runs.
+        if refine_fn is None:
+            trace.add_missing(
+                "04_scene_sent_to_krea2",
+                "krea2_refine_disabled_geometry_lock",
+            )
+            trace.add_missing(
+                "05_identity_sent_to_krea2",
+                "krea2_refine_disabled_geometry_lock",
+            )
+
+    def _face_region(im: Image.Image) -> Image.Image | None:
+        if face_in_crop is None:
+            return None
+        w, h = im.size
+        return im.crop(
+            (
+                max(0, face_in_crop.x0),
+                max(0, face_in_crop.y0),
+                min(w, face_in_crop.x1),
+                min(h, face_in_crop.y1),
+            )
+        )
+
     aligned_rgba, align_info = align_face_to_destination(
         id_matte,
         work,
@@ -164,18 +240,74 @@ def run_align_paste_swap(
     pre_match = float(cfg.get("pre_color_match_strength", 0.55) or 0.0)
     paste_info: dict[str, Any] = {"composite_paste": False}
     composite_crop = work
+    aligned_before_cm = aligned_rgba
     if aligned_rgba is not None:
+        if trace is not None:
+            preview = _alpha_composite_rgb(work, aligned_rgba)
+            trace.add(
+                "07_aligned_before_color_match",
+                preview,
+                region=_face_region(preview),
+                notes={
+                    "align_info": {
+                        k: align_info.get(k)
+                        for k in (
+                            "face_alignment",
+                            "face_alignment_backend",
+                            "affine_estimator",
+                            "warp_core_luminance",
+                        )
+                    }
+                },
+            )
         if pre_match > 0:
             aligned_rgba = color_match_rgba_to_destination(
                 aligned_rgba, work, strength=pre_match
             )
             align_info["pre_color_match_strength"] = pre_match
-        composite_crop, paste_info = paste_aligned_face(
-            work,
-            aligned_rgba,
-            seamless=bool(cfg.get("align_paste_seamless_clone", True)),
-            clone_mode=str(cfg.get("align_paste_seamless_mode", "normal")),
+        if trace is not None:
+            preview_cm = _alpha_composite_rgb(work, aligned_rgba)
+            trace.add(
+                "07_aligned_after_color_match",
+                preview_cm,
+                region=_face_region(preview_cm),
+                notes={
+                    "pre_color_match_strength": pre_match,
+                    "blend_strength": pre_match,
+                },
+            )
+        # Fork alpha-only vs seamless so we can prove which paste step kills ID.
+        alpha_only, alpha_info = paste_aligned_face(
+            work, aligned_rgba, seamless=False
         )
+        if trace is not None:
+            trace.add(
+                "07a_after_paste_alpha",
+                alpha_only,
+                region=_face_region(alpha_only),
+                notes=dict(alpha_info),
+            )
+        do_seamless = bool(cfg.get("align_paste_seamless_clone", True))
+        if do_seamless:
+            composite_crop, paste_info = paste_aligned_face(
+                work,
+                aligned_rgba,
+                seamless=True,
+                clone_mode=str(cfg.get("align_paste_seamless_mode", "normal")),
+            )
+        else:
+            composite_crop, paste_info = alpha_only, alpha_info
+        if trace is not None:
+            trace.add(
+                "07b_after_paste_seamless",
+                composite_crop,
+                region=_face_region(composite_crop),
+                notes={
+                    **dict(paste_info),
+                    "seamless_enabled": do_seamless,
+                    "clone_mode": str(cfg.get("align_paste_seamless_mode", "normal")),
+                },
+            )
     else:
         paste_info = {
             "composite_paste": False,
@@ -184,6 +316,11 @@ def run_align_paste_swap(
             )
             or "align_failed",
         }
+        if trace is not None:
+            trace.add_missing("07_aligned_before_color_match", "align_failed")
+            trace.add_missing("07_aligned_after_color_match", "align_failed")
+            trace.add_missing("07a_after_paste_alpha", "align_failed")
+            trace.add_missing("07b_after_paste_seamless", "align_failed")
 
     # Face-local mask (not full hair) — preserve destination hairstyle; avoid
     # soft-stitching bright crop edges into night sky / bushes (halo).
@@ -227,6 +364,23 @@ def run_align_paste_swap(
     refine_meta: dict[str, Any] = {"refine_applied": False}
     if refine_fn is not None and bool(paste_info.get("composite_paste")):
         try:
+            if trace is not None:
+                from headswap.preprocess import resize_contain
+
+                person = resize_contain(
+                    id_matte.convert("RGB"), composite_crop.size, fill=(0, 0, 0)
+                )
+                trace.add(
+                    "04_scene_sent_to_krea2",
+                    composite_crop,
+                    notes={"actual_refine_scene": True},
+                )
+                trace.add(
+                    "05_identity_sent_to_krea2",
+                    person,
+                    region=id_matte,
+                    notes={"actual_refine_person": True},
+                )
             refined_out = refine_fn(composite_crop, id_matte, face_mask_crop)
             # refine_fn may return (blended, raw_edited) for debug, or a single image.
             if isinstance(refined_out, tuple) and len(refined_out) == 2:
@@ -234,9 +388,36 @@ def run_align_paste_swap(
             else:
                 refined_crop = refined_out
             refine_meta["refine_applied"] = True
+            if trace is not None:
+                if raw_refined_crop is not None:
+                    trace.add(
+                        "06_raw_krea2_output",
+                        raw_refined_crop,
+                        notes={"restoration_model": "krea2_refine"},
+                    )
+                trace.add(
+                    "08_after_geometry_alignment",
+                    refined_crop,
+                    region=_face_region(refined_crop),
+                    notes={"refine_blended_into_mask": True},
+                )
         except Exception as exc:  # noqa: BLE001 — fall back to paste
             refine_meta["refine_error"] = str(exc)
             refined_crop = composite_crop
+            if trace is not None:
+                trace.add_missing("06_raw_krea2_output", f"refine_error:{exc}")
+    else:
+        if trace is not None:
+            trace.add_missing(
+                "06_raw_krea2_output",
+                "krea2_refine_disabled_geometry_lock",
+            )
+            trace.add(
+                "08_after_geometry_alignment",
+                refined_crop,
+                region=_face_region(refined_crop),
+                notes={"pose_relock": False, "geometry_from_affine_paste": True},
+            )
 
     # Lock looking direction only after generative refine (which often front-faces).
     # Pure geometry paste already matches destination landmarks — skip re-warp.
@@ -258,6 +439,12 @@ def run_align_paste_swap(
             feather_px=int(cfg.get("paste_feather_px", 21)),
             stitch_feather_px=int(cfg.get("align_paste_stitch_feather_px", 10)),
         )
+        if trace is not None:
+            trace.add(
+                "08_after_geometry_alignment",
+                refined_crop,
+                notes=dict(pose_meta),
+            )
     elif bool(cfg.get("align_paste_pose_relock", True)):
         pose_meta["pose_relock_reason"] = "skipped_no_refine_geometry_already_locked"
 
@@ -280,9 +467,38 @@ def run_align_paste_swap(
         box,
         extra_blur_px=feather,
     )
+    if trace is not None:
+        trace.add(
+            "09_after_blend_stitch",
+            out,
+            mask=full_mask,
+            notes={
+                "stitch_feather_px": feather,
+                "blend_strength": feather,
+                "restoration_model": None,
+            },
+        )
     post_match = float(cfg.get("align_paste_post_color_match", 0.40) or 0.0)
     if post_match > 0:
         out = lab_histogram_match_face(out, body_full, full_mask, strength=post_match)
+        if trace is not None:
+            trace.add(
+                "09b_after_post_color_match",
+                out,
+                mask=full_mask,
+                notes={
+                    "post_color_match_strength": post_match,
+                    "blend_strength": post_match,
+                },
+            )
+
+    if trace is not None:
+        # Explicit "restoration" stage — none in geometry-lock default path.
+        trace.add_missing("08b_after_restoration", "no_face_restoration_in_geometry_lock")
+        trace.add("10_final", out, mask=full_mask)
+        report = trace.write_report()
+    else:
+        report = None
 
     gates = measure_align_paste_gates(
         body_full,
@@ -301,6 +517,7 @@ def run_align_paste_swap(
         "raw_refined_crop": raw_refined_crop,
         "pose_before_relock": pose_before,
         "aligned_rgba": aligned_rgba,
+        "aligned_rgba_before_color_match": aligned_before_cm,
         "face_mask": full_mask,
         "face_mask_crop": face_mask_crop,
         "box": box,
@@ -311,4 +528,5 @@ def run_align_paste_swap(
         "pose_meta": pose_meta,
         "gates": gates,
         "mode": "geometry_lock",
+        "identity_stage_report": report,
     }

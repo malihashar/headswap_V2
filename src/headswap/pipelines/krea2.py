@@ -32,6 +32,7 @@ from headswap.comfy.runtime import (
 )
 from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
+from headswap.profiling.identity_stage_trace import IdentityStageTrace
 from headswap.preprocess import (
     FaceBox,
     clamp_crop_away_neighbors,
@@ -1678,7 +1679,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         import sys
 
         refine_fn = None
-        do_refine = bool(self.cfg.get("align_paste_krea2_refine", False))
+        do_refine = bool(self.cfg.get("align_paste_krea2_refine", True))
         if do_refine:
             refine_prompt = str(
                 self.cfg.get(
@@ -1735,6 +1736,31 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 return blended, edited
 
         with _stage(timings, "align_paste"):
+            trace = None
+            want_trace = bool(save_debug) or bool(
+                self.cfg.get("identity_stage_trace", True)
+            )
+            if want_trace and out_dir is not None:
+                sel_idx = None
+                if selected_face is not None and all_faces:
+                    for i, f in enumerate(all_faces):
+                        if (
+                            f.x0 == selected_face.x0
+                            and f.y0 == selected_face.y0
+                            and f.x1 == selected_face.x1
+                            and f.y1 == selected_face.y1
+                        ):
+                            sel_idx = i
+                            break
+                trace = IdentityStageTrace(
+                    Path(out_dir) / "identity_stages",
+                    donor=face,
+                    body=body_full,
+                    selected=selected_face,
+                    selected_index=sel_idx,
+                    cache_dir=self.cache_dir,
+                    enabled=True,
+                )
             ap = run_align_paste_swap(
                 body_full,
                 face,
@@ -1743,6 +1769,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 all_faces=all_faces,
                 cfg=self.cfg,
                 refine_fn=refine_fn if do_refine else None,
+                identity_trace=trace,
             )
         out = ap["image"]
         timings["_multi_person"] = 1.0
@@ -1825,6 +1852,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "pose_meta": ap.get("pose_meta") or {},
                 "gates": ap["gates"],
                 "box": list(ap["box"]),
+                "identity_stage_diagnosis": (ap.get("identity_stage_report") or {}).get(
+                    "diagnosis"
+                ),
             },
             "checkpoint": bundle["load_meta"].get("checkpoint"),
             "loras_loaded": list(bundle["load_meta"].get("loras_loaded") or []),

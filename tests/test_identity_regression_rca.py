@@ -25,10 +25,11 @@ CFG_PATH = ROOT / "configs" / "krea2_identity_edit.yaml"
 
 
 def test_exp_a_config_default_is_geometry_lock():
-    """Exp A: default multi path must be geometry-locked paste (pose/expression lock)."""
+    """Exp A: default multi path = geometry-locked paste + masked Krea2 identity refine."""
     cfg = yaml.safe_load(CFG_PATH.read_text())
     assert cfg.get("multi_person_swap_mode") == "align_paste"
-    assert cfg.get("align_paste_krea2_refine") is False
+    # Paste alone caps ArcFace ~0.5; refine is required for celebrity identity.
+    assert cfg.get("align_paste_krea2_refine") is True
     assert cfg.get("align_paste_seamless_clone") is True
     assert cfg.get("single_person_parity") is True
 

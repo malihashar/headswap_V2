@@ -40,7 +40,8 @@ class _Pipe(Krea2IdentityEditPipeline):
 def test_production_config_is_geometry_lock():
     cfg = yaml.safe_load(CFG_PATH.read_text())
     assert cfg["multi_person_swap_mode"] == "align_paste"
-    assert cfg["align_paste_krea2_refine"] is False
+    # Paste locks geometry; masked Krea2 refine is required for donor identity.
+    assert cfg["align_paste_krea2_refine"] is True
     assert cfg["align_paste_seamless_clone"] is True
     assert cfg["single_person_parity"] is True
     assert cfg["identity_scale_match"] is False
