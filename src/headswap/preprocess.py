@@ -1394,31 +1394,33 @@ def get_face_landmarks5(
         try:
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             faces = app.get(bgr)
-            if not faces:
-                return None, "insightface", "insightface_no_face_detected"
-            if prefer_box is not None:
-                scored = []
-                for f in faces:
-                    x0, y0, x1, y1 = [float(v) for v in f.bbox]
-                    scored.append((_iou_box(prefer_box, x0, y0, x1, y1), f))
-                scored.sort(key=lambda t: t[0], reverse=True)
-                face = scored[0][1] if scored[0][0] > 0.05 else max(
-                    faces,
-                    key=lambda f: float(
-                        (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
-                    ),
-                )
+            if faces:
+                if prefer_box is not None:
+                    scored = []
+                    for f in faces:
+                        x0, y0, x1, y1 = [float(v) for v in f.bbox]
+                        scored.append((_iou_box(prefer_box, x0, y0, x1, y1), f))
+                    scored.sort(key=lambda t: t[0], reverse=True)
+                    face = scored[0][1] if scored[0][0] > 0.05 else max(
+                        faces,
+                        key=lambda f: float(
+                            (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+                        ),
+                    )
+                else:
+                    face = max(
+                        faces,
+                        key=lambda f: float(
+                            (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+                        ),
+                    )
+                kps = np.asarray(face.kps, dtype=np.float32)
+                if kps.shape != (5, 2):
+                    insight_err = f"insightface_bad_kps_shape:{kps.shape}"
+                else:
+                    return kps, "insightface", None
             else:
-                face = max(
-                    faces,
-                    key=lambda f: float(
-                        (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
-                    ),
-                )
-            kps = np.asarray(face.kps, dtype=np.float32)
-            if kps.shape != (5, 2):
-                return None, "insightface", f"insightface_bad_kps_shape:{kps.shape}"
-            return kps, "insightface", None
+                insight_err = "insightface_no_face_detected"
         except Exception as exc:
             insight_err = f"insightface_runtime_failed:{exc}"
 
