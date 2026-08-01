@@ -155,9 +155,9 @@ def run_align_paste_swap(
         work,
         cache_dir,
         core_min_alpha=float(cfg.get("paste_core_min_alpha", 0.90)),
-        ellipse_scale_x=float(cfg.get("paste_ellipse_scale_x", 2.05)),
-        ellipse_scale_y=float(cfg.get("paste_ellipse_scale_y", 2.55)),
-        feather_px=int(cfg.get("paste_feather_px", 21)),
+        ellipse_scale_x=float(cfg.get("paste_ellipse_scale_x", 1.85)),
+        ellipse_scale_y=float(cfg.get("paste_ellipse_scale_y", 2.15)),
+        feather_px=int(cfg.get("paste_feather_px", 17)),
         use_full_affine=bool(cfg.get("align_paste_full_affine", True)),
         prefer_dest_box=face_in_crop,
     )
@@ -174,6 +174,7 @@ def run_align_paste_swap(
             work,
             aligned_rgba,
             seamless=bool(cfg.get("align_paste_seamless_clone", True)),
+            clone_mode=str(cfg.get("align_paste_seamless_mode", "normal")),
         )
     else:
         paste_info = {
@@ -184,17 +185,16 @@ def run_align_paste_swap(
             or "align_failed",
         }
 
-    # Face-local mask on the working crop (neighbors carved out in full-body coords).
-    # Geometry-lock production default: moderate top extent so destination hair
-    # is preserved when possible (product: keep hairstyle whenever possible).
+    # Face-local mask (not full hair) — preserve destination hairstyle; avoid
+    # soft-stitching bright crop edges into night sky / bushes (halo).
     face_mask_crop = head_hair_mask_from_face(
         work,
         cache_dir,
-        expand_px=int(cfg.get("align_paste_mask_expand_px", 10)),
-        blur_px=int(cfg.get("align_paste_mask_blur_px", 10)),
-        top_extend=float(cfg.get("align_paste_mask_top", 0.55)),
-        side_extend=float(cfg.get("align_paste_mask_side", 0.35)),
-        bot_extend=float(cfg.get("align_paste_mask_bot", 0.25)),
+        expand_px=int(cfg.get("align_paste_mask_expand_px", 6)),
+        blur_px=int(cfg.get("align_paste_mask_blur_px", 8)),
+        top_extend=float(cfg.get("align_paste_mask_top", 0.28)),
+        side_extend=float(cfg.get("align_paste_mask_side", 0.28)),
+        bot_extend=float(cfg.get("align_paste_mask_bot", 0.18)),
         face_box=face_in_crop,
     )
     # Map other faces into crop space and carve them out.

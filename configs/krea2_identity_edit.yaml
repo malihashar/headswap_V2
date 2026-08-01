@@ -91,26 +91,30 @@ neighbor_crop_margin_frac: 0.18
 align_paste_krea2_refine: false
 align_paste_refine_steps: 6
 align_paste_seamless_clone: true
+# NORMAL_CLONE = Poisson lighting (safe). MIXED_CLONE smears on night/flash photos.
+align_paste_seamless_mode: normal
 # Full 6-DOF affine locks looking direction onto the destination.
 align_paste_full_affine: true
 # Pose relock only runs when refine is applied (see align_paste_swap.py).
 align_paste_pose_relock: true
 align_paste_crop_pad_frac: 1.15
-align_paste_mask_expand_px: 10
-align_paste_mask_blur_px: 10
-# Moderate top — preserve destination hairstyle when possible.
-align_paste_mask_top: 0.55
-align_paste_mask_side: 0.35
-align_paste_mask_bot: 0.25
-align_paste_stitch_feather_px: 10
-align_paste_post_color_match: 0.40
-pre_color_match_strength: 0.55
+align_paste_mask_expand_px: 6
+align_paste_mask_blur_px: 8
+# Face-only stitch mask — preserve hair; avoid night-sky halos.
+align_paste_mask_top: 0.28
+align_paste_mask_side: 0.28
+align_paste_mask_bot: 0.18
+align_paste_stitch_feather_px: 8
+align_paste_post_color_match: 0.35
+pre_color_match_strength: 0.65
 paste_core_min_alpha: 0.90
-paste_feather_px: 21
+paste_feather_px: 17
+paste_ellipse_scale_x: 1.85
+paste_ellipse_scale_y: 2.15
 # Clothing-free identity matte (align_paste path only).
-face_matte_top_pad: 0.35
-face_matte_bot_pad: 0.08
-face_matte_side_pad: 0.12
+face_matte_top_pad: 0.28
+face_matte_bot_pad: 0.06
+face_matte_side_pad: 0.10
 face_matte_force_ellipse: true
 
 # Multi-person (>1 detected face) modes when swap_mode=krea2_crop:

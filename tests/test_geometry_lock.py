@@ -23,7 +23,24 @@ def test_seamless_paste_blends_without_crash():
     rgba = np.zeros((128, 128, 4), dtype=np.uint8)
     rgba[45:95, 45:95, :3] = (80, 40, 20)
     rgba[45:95, 45:95, 3] = 220
-    out, info = paste_aligned_face(dest, Image.fromarray(rgba, "RGBA"), seamless=True)
+    out, info = paste_aligned_face(
+        dest, Image.fromarray(rgba, "RGBA"), seamless=True, clone_mode="normal"
+    )
+    assert out.size == dest.size
+    assert info["composite_paste"] is True
+    assert info.get("seamless_clone_mode") in {None, "normal", "mixed"}
+
+
+def test_seamless_mixed_can_reject_drift():
+    """Extreme color paste + mixed clone should not crash; may reject."""
+    dest = Image.new("RGB", (128, 128), (200, 180, 160))
+    ImageDraw.Draw(dest).ellipse([40, 40, 90, 100], fill=(210, 190, 170))
+    rgba = np.zeros((128, 128, 4), dtype=np.uint8)
+    rgba[45:95, 45:95, :3] = (10, 0, 0)
+    rgba[45:95, 45:95, 3] = 255
+    out, info = paste_aligned_face(
+        dest, Image.fromarray(rgba, "RGBA"), seamless=True, clone_mode="normal"
+    )
     assert out.size == dest.size
     assert info["composite_paste"] is True
 

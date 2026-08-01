@@ -1658,9 +1658,20 @@ def align_face_to_destination(
         borderValue=(0, 0, 0),
     )
     xs, ys = dest_lm[:, 0], dest_lm[:, 1]
-    cx, cy = float(xs.mean()), float(ys.mean() - 0.05 * (ys.max() - ys.min()))
-    span_x = float(max(48.0, (xs.max() - xs.min()) * float(ellipse_scale_x)))
-    span_y = float(max(60.0, (ys.max() - ys.min()) * float(ellipse_scale_y)))
+    # Landmark-anchored face oval: cover cheeks/jaw, stop before hair silhouette
+    # and dark night background (oversized ellipses cause flash halos).
+    eye_span = float(max(1.0, xs.max() - xs.min()))
+    mouth_y = float(ys[3:5].mean()) if ys.shape[0] >= 5 else float(ys.max())
+    eye_y = float(ys[0:2].mean()) if ys.shape[0] >= 2 else float(ys.min())
+    cx = float(xs.mean())
+    cy = float(0.45 * eye_y + 0.55 * mouth_y)
+    span_x = float(max(48.0, eye_span * float(ellipse_scale_x)))
+    span_y = float(max(60.0, (mouth_y - eye_y) * float(ellipse_scale_y) * 2.2))
+    # Cap vertical extent so top stays near brows, bottom near chin.
+    top_limit = eye_y - 0.55 * eye_span
+    bot_limit = mouth_y + 0.95 * eye_span
+    cy = float(0.5 * (top_limit + bot_limit))
+    span_y = float(min(span_y, max(60.0, bot_limit - top_limit)))
     alpha_u8, core, alpha_f = _ellipse_alpha(
         h,
         w,
@@ -1796,10 +1807,11 @@ def color_match_rgba_to_destination(
     strength: float = 0.55,
 ) -> Image.Image:
     """
-    Shift pasted-face LAB toward destination skin under the RGBA alpha.
+    Shift pasted-face LAB toward the destination face being replaced.
 
-    Done *before* Kontext refine so the model blends lighting instead of
-    fighting a strong color mismatch (which often reverts toward the original face).
+    Target stats come from destination pixels *under* the paste alpha (the
+    original face), not a dilated ring outside it. Night/group shots put
+    jacket/sky/bushes in that ring and pull skin toward dark reddish smears.
     """
     if aligned_rgba is None or strength <= 0:
         return aligned_rgba
@@ -1808,18 +1820,14 @@ def color_match_rgba_to_destination(
     rgba = np.asarray(aligned_rgba.convert("RGBA")).astype(np.float32)
     bod = pil_to_rgb_np(destination).astype(np.float32)
     alpha = rgba[:, :, 3] / 255.0
-    if (alpha > 0.4).sum() < 50:
-        return aligned_rgba
-    # Destination ring just outside the paste for target skin stats.
-    core = (alpha > 0.45).astype(np.uint8)
-    ring = cv2.dilate(core, np.ones((25, 25), np.uint8)) - core
-    if ring.sum() < 40:
+    core = alpha > 0.55
+    if int(core.sum()) < 50:
         return aligned_rgba
     face_lab = cv2.cvtColor(rgba[:, :, :3] / 255.0, cv2.COLOR_RGB2LAB)
     bod_lab = cv2.cvtColor(bod / 255.0, cv2.COLOR_RGB2LAB)
     for c in range(3):
-        src_vals = face_lab[:, :, c][alpha > 0.5]
-        tgt_vals = bod_lab[:, :, c][ring > 0]
+        src_vals = face_lab[:, :, c][core]
+        tgt_vals = bod_lab[:, :, c][core]
         if src_vals.size == 0 or tgt_vals.size == 0:
             continue
         shift = float(tgt_vals.mean() - src_vals.mean()) * float(strength)
@@ -1839,18 +1847,23 @@ def paste_aligned_face(
     aligned_rgba: Image.Image,
     *,
     seamless: bool = True,
+    clone_mode: str = "normal",
 ) -> tuple[Image.Image, dict]:
     """
     Composite aligned RGBA face onto destination RGB.
 
-    When ``seamless`` is True (default), follow alpha composite with OpenCV
-    ``seamlessClone`` (MIXED_CLONE) so lighting/texture match the destination
-    while identity texture from the warped donor is preserved.
+    When ``seamless`` is True, follow alpha composite with OpenCV
+    ``seamlessClone``. Default mode is ``NORMAL_CLONE`` (Poisson lighting).
+
+    ``MIXED_CLONE`` is available but unsafe on night/flash group photos — it
+    often paints dark reddish cheek/jaw smears. If the clone drifts too far
+    from the alpha composite, we discard it and keep the LAB-matched paste.
     """
     info: dict = {
         "composite_paste": False,
         "composite_paste_skip_reason": None,
         "seamless_clone": False,
+        "seamless_clone_mode": None,
     }
     if aligned_rgba is None:
         info["composite_paste_skip_reason"] = "aligned_rgba_none"
@@ -1864,16 +1877,24 @@ def paste_aligned_face(
     if not seamless:
         return out, info
 
+    mode = str(clone_mode or "normal").strip().lower()
+    if mode in {"off", "none", "false", "0"}:
+        return out, info
+    clone_flag = cv2.NORMAL_CLONE if mode != "mixed" else cv2.MIXED_CLONE
+    info["seamless_clone_mode"] = "mixed" if clone_flag == cv2.MIXED_CLONE else "normal"
+
     try:
         dest_rgb = pil_to_rgb_np(destination)
         face_rgb = pil_to_rgb_np(out)
         alpha = np.asarray(aligned_rgba.convert("RGBA"))[:, :, 3]
-        mask = (alpha >= 40).astype(np.uint8) * 255
+        # Inner face only — exclude soft feather halo that bleeds into night sky.
+        mask = (alpha >= 120).astype(np.uint8) * 255
         if int(mask.sum()) < 500:
             return out, info
-        # Shrink mask slightly so clone center sits in face interior.
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        mask_core = cv2.erode(mask, k, iterations=1)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        mask_core = cv2.erode(mask, k, iterations=2)
+        if int(mask_core.sum()) < 200:
+            mask_core = cv2.erode(mask, k, iterations=1)
         if int(mask_core.sum()) < 200:
             mask_core = mask
         ys, xs = np.where(mask_core > 0)
@@ -1881,17 +1902,26 @@ def paste_aligned_face(
             return out, info
         cx = int(np.median(xs))
         cy = int(np.median(ys))
-        # seamlessClone expects BGR
         src_bgr = cv2.cvtColor(face_rgb, cv2.COLOR_RGB2BGR)
         dst_bgr = cv2.cvtColor(dest_rgb, cv2.COLOR_RGB2BGR)
-        cloned = cv2.seamlessClone(
-            src_bgr, dst_bgr, mask_core, (cx, cy), cv2.MIXED_CLONE
-        )
-        # Only keep clone inside the original alpha footprint; outside = dest.
+        cloned = cv2.seamlessClone(src_bgr, dst_bgr, mask_core, (cx, cy), clone_flag)
         cloned_rgb = cv2.cvtColor(cloned, cv2.COLOR_BGR2RGB).astype(np.float32)
         a = (alpha.astype(np.float32) / 255.0)[..., None]
         dest_f = dest_rgb.astype(np.float32)
+        alpha_rgb = face_rgb.astype(np.float32)
         blended = cloned_rgb * a + dest_f * (1.0 - a)
+
+        # Guard: reject smear/halo clones that diverge hard from alpha paste.
+        core = alpha >= 120
+        if int(core.sum()) >= 80:
+            drift = float(
+                np.mean(np.abs(blended[core] - alpha_rgb[core]))
+            )
+            info["seamless_clone_drift"] = round(drift, 2)
+            if drift > 28.0:
+                info["seamless_clone_rejected"] = "drift_too_high"
+                return out, info
+
         info["seamless_clone"] = True
         return np_to_pil(np.clip(blended, 0, 255)), info
     except Exception as exc:  # noqa: BLE001 — alpha composite already succeeded
@@ -1902,7 +1932,11 @@ def paste_aligned_face(
 def lab_histogram_match_face(
     result: Image.Image, body: Image.Image, mask: Image.Image, strength: float = 0.35
 ) -> Image.Image:
-    """Mild LAB mean match inside mask to reduce neck/skin discontinuity."""
+    """Mild LAB mean match inside mask to reduce neck/skin discontinuity.
+
+    Target stats = original body pixels under the mask (the face being replaced),
+    not a dilated exterior ring (which on night shots is jacket/sky).
+    """
     if strength <= 0:
         return result
     res = pil_to_rgb_np(result).astype(np.float32)
@@ -1910,17 +1944,14 @@ def lab_histogram_match_face(
     m = np.asarray(mask.convert("L")).astype(np.float32) / 255.0
     if m.shape[:2] != res.shape[:2]:
         m = cv2.resize(m, (res.shape[1], res.shape[0]), interpolation=cv2.INTER_LINEAR)
-    # Ring just outside mask for target skin stats
-    ring = cv2.dilate((m > 0.4).astype(np.uint8), np.ones((21, 21), np.uint8)) - (m > 0.4).astype(
-        np.uint8
-    )
-    if ring.sum() < 50 or (m > 0.5).sum() < 50:
+    core = m > 0.5
+    if int(core.sum()) < 50:
         return result
     res_lab = cv2.cvtColor(res / 255.0, cv2.COLOR_RGB2LAB)
     bod_lab = cv2.cvtColor(bod / 255.0, cv2.COLOR_RGB2LAB)
     for c in range(3):
-        src_vals = res_lab[:, :, c][m > 0.5]
-        tgt_vals = bod_lab[:, :, c][ring > 0]
+        src_vals = res_lab[:, :, c][core]
+        tgt_vals = bod_lab[:, :, c][core]
         if src_vals.size == 0 or tgt_vals.size == 0:
             continue
         shift = float(tgt_vals.mean() - src_vals.mean()) * strength
