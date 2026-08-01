@@ -451,8 +451,9 @@ def detect_faces(
             )
         ]
 
-    # De-dupe overlaps, keep higher area*conf. IoU 0.4 catches near-duplicate
-    # detector boxes that inflate multi-person face counts (e.g. 5 on 3 people).
+    # De-dupe overlaps, keep higher area*conf. IoU stays at the standard 0.5:
+    # real adjacent faces in tight groups can overlap, and losing a real face
+    # silently breaks the neighbor carve/clamp locality guarantees downstream.
     faces.sort(key=lambda b: b.width * b.height * max(0.05, b.conf), reverse=True)
     kept: list[FaceBox] = []
     for f in faces:
@@ -462,20 +463,20 @@ def detect_faces(
             ix1, iy1 = min(f.x1, k.x1), min(f.y1, k.y1)
             inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
             union = f.width * f.height + k.width * k.height - inter
-            if union > 0 and inter / union > 0.4:
+            if union > 0 and inter / union > 0.5:
                 dup = True
                 break
-            # Also treat strong containment as a duplicate (nested boxes).
+            # Treat strong containment as a duplicate: the same face detected
+            # at two scales nests almost fully, unlike two distinct faces.
             smaller = min(f.width * f.height, k.width * k.height)
             if smaller > 0 and inter / smaller > 0.7:
                 dup = True
                 break
         if not dup:
             kept.append(f)
-    # Drop tiny false positives relative to the largest face (Haar/SSD noise).
-    if kept:
-        max_area = max(f.width * f.height for f in kept)
-        kept = [f for f in kept if f.width * f.height >= 0.12 * max_area]
+    # NOTE: no relative-area filter here. Far-away faces in group photos are
+    # legitimately much smaller than the closest face; dropping them would
+    # remove real neighbors from the locality guarantees.
     return kept
 
 
@@ -771,22 +772,36 @@ def clamp_crop_away_neighbors(
     other_faces: list[FaceBox],
     *,
     margin_frac: float = 0.18,
-    min_face_margin_frac: float = 0.35,
-    div_by: int = 16,
+    protect_top_frac: float = 1.55,
+    protect_side_frac: float = 0.60,
+    protect_bot_frac: float = 0.40,
+    protect_pad_px: int = 0,
 ) -> tuple[tuple[int, int, int, int], dict[str, float]]:
     """
     Shrink a crop window so neighboring face centers fall outside it.
 
-    This is the production locality mechanism for multi-person Krea2: keep the
-    diffusion canvas identical to the single-person recipe, but do not let a
-    second person enter the scene tensor. Prefer this over post-hoc neighbor
-    pixel freezes, which can erase the swapped head on tight groups.
+    Production locality mechanism for multi-person Krea2: keep the diffusion
+    canvas identical to the single-person recipe, but do not let a second
+    person enter the scene tensor. Prefer this over post-hoc neighbor pixel
+    freezes, which can erase the swapped head on tight groups.
+
+    ``protect_*_frac`` must mirror the head/hair mask extents so the clamp can
+    never slice into the stitch region (e.g. cut hair above the face). Pass
+    the mask's ``expand_px + blur_px`` as ``protect_pad_px``.
+
+    Neighbors whose center lies inside the protected head region cannot be
+    excluded geometrically; they are counted in ``neighbors_unexcludable``
+    and left to the mask carve / optional freeze.
+
+    Box divisibility is intentionally NOT enforced here — the VAE input is
+    evenified later by ``resize_long_side`` and stitching accepts any box.
     """
     iw, ih = image_size
     x0, y0, x1, y1 = [int(v) for v in box]
     info: dict[str, float] = {
         "clamped": 0.0,
         "neighbors_excluded": 0.0,
+        "neighbors_unexcludable": 0.0,
         "crop_w_before": float(max(1, x1 - x0)),
         "crop_h_before": float(max(1, y1 - y0)),
     }
@@ -797,13 +812,16 @@ def clamp_crop_away_neighbors(
 
     sx0, sy0, sx1, sy1 = selected.x0, selected.y0, selected.x1, selected.y1
     sw, sh = max(1, selected.width), max(1, selected.height)
-    # Never shrink past a margin around the selected face.
-    min_x0 = max(0, int(sx0 - min_face_margin_frac * sw))
-    min_y0 = max(0, int(sy0 - min_face_margin_frac * sh))
-    max_x1 = min(iw, int(sx1 + min_face_margin_frac * sw))
-    max_y1 = min(ih, int(sy1 + min_face_margin_frac * sh))
+    pad = max(0, int(protect_pad_px))
+    # Protected region = selected head+hair mask extents (+mask dilate/blur pad).
+    # The crop must always fully contain it, or the stitch loses coverage.
+    p_x0 = max(0, int(sx0 - protect_side_frac * sw) - pad)
+    p_y0 = max(0, int(sy0 - protect_top_frac * sh) - pad)
+    p_x1 = min(iw, int(sx1 + protect_side_frac * sw) + pad)
+    p_y1 = min(ih, int(sy1 + protect_bot_frac * sh) + pad)
 
     excluded = 0
+    unexcludable = 0
     for face in other_faces:
         if (
             face.x0 == selected.x0
@@ -823,53 +841,39 @@ def clamp_crop_away_neighbors(
         if not (x0 <= cx < x1 and y0 <= cy < y1):
             continue
         margin = int(margin_frac * max(1, face.width))
-        # Push the nearer crop edge inward past this neighbor center.
-        dist_l = cx - x0
-        dist_r = x1 - cx
-        dist_t = cy - y0
-        dist_b = y1 - cy
-        side = min(
-            (dist_l, "l"),
-            (dist_r, "r"),
-            (dist_t, "t"),
-            (dist_b, "b"),
-            key=lambda t: t[0],
-        )[1]
-        if side == "l":
-            x0 = min(max(x0, int(cx + margin)), max_x1 - 8)
-            x0 = max(x0, min_x0)
-        elif side == "r":
-            x1 = max(min(x1, int(cx - margin)), min_x0 + 8)
-            x1 = min(x1, max_x1)
-        elif side == "t":
-            y0 = min(max(y0, int(cy + margin)), max_y1 - 8)
-            y0 = max(y0, min_y0)
+        # Candidate edges that exclude this neighbor. Feasible only when the
+        # new edge stays outside the protected head region. Among feasible
+        # sides keep the one preserving the most crop area (least context loss).
+        candidates: list[tuple[str, int, int]] = []
+        nx0 = int(cx + margin)
+        if nx0 <= p_x0:
+            candidates.append(("x0", nx0, (x1 - max(x0, nx0)) * (y1 - y0)))
+        nx1 = int(cx - margin)
+        if nx1 >= p_x1:
+            candidates.append(("x1", nx1, (min(x1, nx1) - x0) * (y1 - y0)))
+        ny0 = int(cy + margin)
+        if ny0 <= p_y0:
+            candidates.append(("y0", ny0, (x1 - x0) * (y1 - max(y0, ny0))))
+        ny1 = int(cy - margin)
+        if ny1 >= p_y1:
+            candidates.append(("y1", ny1, (x1 - x0) * (min(y1, ny1) - y0)))
+        if not candidates:
+            unexcludable += 1
+            continue
+        edge, value, _area = max(candidates, key=lambda c: c[2])
+        if edge == "x0":
+            x0 = max(x0, value)
+        elif edge == "x1":
+            x1 = min(x1, value)
+        elif edge == "y0":
+            y0 = max(y0, value)
         else:
-            y1 = max(min(y1, int(cy - margin)), min_y0 + 8)
-            y1 = min(y1, max_y1)
+            y1 = min(y1, value)
         excluded += 1
-
-    # Keep VAE-friendly sizes. Prefer shrinking (never grow back toward neighbors).
-    cw, ch = x1 - x0, y1 - y0
-    if cw < 16 or ch < 16:
-        info["crop_w_after"] = info["crop_w_before"]
-        info["crop_h_after"] = info["crop_h_before"]
-        return box, info
-    x1 = min(iw, x0 + evenify(cw, div_by))
-    y1 = min(ih, y0 + evenify(ch, div_by))
-    # If evenify clipped, shrink origin — do not expand outward.
-    x0 = max(0, x1 - evenify(x1 - x0, div_by))
-    y0 = max(0, y1 - evenify(y1 - y0, div_by))
-    # Hard requirement: selected face must remain inside (no margin re-expansion).
-    x0 = min(x0, sx0)
-    y0 = min(y0, sy0)
-    x1 = max(x1, sx1)
-    y1 = max(y1, sy1)
-    x0, y0 = max(0, x0), max(0, y0)
-    x1, y1 = min(iw, x1), min(ih, y1)
 
     info["clamped"] = 1.0 if excluded else 0.0
     info["neighbors_excluded"] = float(excluded)
+    info["neighbors_unexcludable"] = float(unexcludable)
     info["crop_w_after"] = float(max(1, x1 - x0))
     info["crop_h_after"] = float(max(1, y1 - y0))
     return (x0, y0, x1, y1), info

@@ -83,9 +83,10 @@ multi_person_swap_mode: krea2_crop
 # OFF by default: hard-freezing neighbor faces after stitch can overwrite the
 # selected head/hair when protect ellipses overlap. Prefer clamp_crop_away_neighbors.
 multi_crop_hard_freeze_neighbors: false
+# Crop clamp protects the full head/hair mask extents (mask_top/side/bot_extend),
+# so it can never slice the stitch region; only margin_frac is tunable.
 clamp_crop_away_neighbors: true
 neighbor_crop_margin_frac: 0.18
-neighbor_crop_min_face_margin_frac: 0.35
 # Architecture B knobs (only when multi_person_swap_mode: align_paste)
 align_paste_krea2_refine: true
 align_paste_refine_steps: 6

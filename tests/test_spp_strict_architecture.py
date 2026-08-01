@@ -4,7 +4,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import numpy as np
 import yaml
 from PIL import Image, ImageDraw
 
@@ -106,21 +105,20 @@ def test_multi_build_matches_single_conditioning_recipe():
     assert not (box[0] <= ncx < box[2] and box[1] <= ncy < box[3])
 
 
-def test_detect_faces_drops_nested_duplicates():
-    rgb = np.zeros((200, 300, 3), dtype=np.uint8)
-    # Synthesize two overlapping boxes via detect path is hard without a real
-    # detector; exercise clamp helper containment contract instead.
+def test_clamp_ignores_selected_duplicates_but_excludes_real_neighbor():
     selected = FaceBox(150, 40, 220, 120, 0.9)
-    nested = FaceBox(160, 50, 210, 110, 0.4)
+    nested = FaceBox(160, 50, 210, 110, 0.4)  # duplicate detection of selected
     far = FaceBox(20, 40, 80, 120, 0.9)
     box, info = clamp_crop_away_neighbors(
         (300, 200),
         (0, 0, 300, 200),
         selected,
         [selected, nested, far],
-        div_by=8,
     )
     # Nested duplicate must not force a clamp by itself; far neighbor should.
-    assert info["neighbors_excluded"] >= 1.0
+    assert info["neighbors_excluded"] == 1.0
+    assert info["neighbors_unexcludable"] == 0.0
     fcx = 0.5 * (far.x0 + far.x1)
     assert not (box[0] <= fcx < box[2])
+    # Selected face plus a margin must still fit inside the clamped crop.
+    assert box[0] <= selected.x0 and box[2] >= selected.x1

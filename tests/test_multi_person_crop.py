@@ -22,14 +22,40 @@ def test_clamp_crop_excludes_neighbor_center():
         selected,
         [selected, neighbor],
         margin_frac=0.1,
-        min_face_margin_frac=0.2,
-        div_by=8,
     )
     assert info["neighbors_excluded"] >= 1.0
     ncx = 0.5 * (neighbor.x0 + neighbor.x1)
     assert not (new_box[0] <= ncx < new_box[2] and new_box[1] <= 90 < new_box[3])
     # Selected face must remain inside the crop.
     assert new_box[0] <= selected.x0 and new_box[2] >= selected.x1
+    # Clamp must stop just past the neighbor (cx + margin), not over-shrink
+    # all the way to the protected head boundary: context is precious.
+    assert new_box[0] == int(0.5 * (neighbor.x0 + neighbor.x1)) + int(
+        0.1 * neighbor.width
+    )
+    assert new_box[1:] == (0, 320, 200)
+
+
+def test_clamp_protects_full_head_mask_extents():
+    """A vertical clamp must never cut the hair region above the face."""
+    selected = FaceBox(200, 300, 280, 400, 0.9)
+    # Neighbor above, center inside hair protection band (1.55 x face height).
+    neighbor_in_hair = FaceBox(210, 180, 270, 240, 0.9)
+    box = (100, 100, 380, 480)
+    new_box, info = clamp_crop_away_neighbors(
+        (640, 640),
+        box,
+        selected,
+        [selected, neighbor_in_hair],
+        margin_frac=0.18,
+        protect_top_frac=1.55,
+        protect_side_frac=0.60,
+        protect_bot_frac=0.40,
+    )
+    # Cannot exclude without slicing the hair mask — box must stay unchanged.
+    assert new_box == box
+    assert info["neighbors_excluded"] == 0.0
+    assert info["neighbors_unexcludable"] == 1.0
 
 
 def test_expand_crop_reduces_face_fill_and_grows_long_side():

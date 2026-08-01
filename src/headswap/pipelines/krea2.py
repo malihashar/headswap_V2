@@ -693,10 +693,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 selected_face,
                 all_faces,
                 margin_frac=float(self.cfg.get("neighbor_crop_margin_frac", 0.18)),
-                min_face_margin_frac=float(
-                    self.cfg.get("neighbor_crop_min_face_margin_frac", 0.35)
-                ),
-                div_by=div_by,
+                # Protect exactly what the stitch mask covers so the clamp can
+                # never cut into the selected head/hair region.
+                protect_top_frac=top_ext,
+                protect_side_frac=side_ext,
+                protect_bot_frac=bot_ext,
+                protect_pad_px=expand_px + int(self.cfg.get("mask_blur_px", 12)),
             )
             crop_img = body_full.crop(box)
             if neighbor_clamp_info.get("neighbors_excluded", 0) > 0:
