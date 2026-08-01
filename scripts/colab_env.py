@@ -49,6 +49,28 @@ def default_paths(*, use_drive: bool = True) -> dict[str, Path]:
     }
 
 
+def ensure_import_path(repo: Path | str | None = None) -> Path:
+    """
+    Put ``src/`` on ``sys.path`` so ``import headswap`` works in notebook cells.
+
+    Colab clears ``sys.path`` on runtime restart; calling this at the top of any
+    cell that imports headswap avoids ``ModuleNotFoundError``.
+    """
+    repo = Path(repo or default_paths()["repo"])
+    src = repo / "src"
+    pkg = src / "headswap"
+    if not pkg.is_dir():
+        raise FileNotFoundError(
+            f"headswap package not found at {pkg}. "
+            "Run §2 Setup first (git clone + bash scripts/setup_colab.sh), "
+            "or: pip install -q -e /content/headswap_V2"
+        )
+    src_str = str(src)
+    if src_str not in sys.path:
+        sys.path.insert(0, src_str)
+    return repo
+
+
 def apply_env(paths: dict[str, Path] | None = None) -> dict[str, Path]:
     """Export COMFYUI_PATH / HEADSWAP_* and ensure directories exist."""
     paths = paths or default_paths()
@@ -61,9 +83,7 @@ def apply_env(paths: dict[str, Path] | None = None) -> dict[str, Path]:
     repo = paths["repo"]
     if repo.exists():
         os.chdir(repo)
-        src = str(repo / "src")
-        if src not in sys.path:
-            sys.path.insert(0, src)
+        ensure_import_path(repo)
     return paths
 
 

@@ -98,9 +98,10 @@ echo "[1/3] ComfyUI → $COMFYUI_PATH"
 bash "$REPO_ROOT/scripts/setup_comfyui.sh"
 echo
 
-echo "[2/3] Python dependencies (requirements.txt)"
+echo "[2/3] Python dependencies (requirements.txt + editable headswap)"
 echo "  Note: do not install hf_xet; setup forces HF_HUB_DISABLE_XET=1."
 python3 -m pip install -q -r "$REPO_ROOT/requirements.txt"
+python3 -m pip install -q -e "$REPO_ROOT"
 echo "  Done."
 echo
 
