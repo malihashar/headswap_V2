@@ -23,6 +23,11 @@ else
   git clone --depth 1 https://github.com/Sanoojan/REFace.git "$REFACE_ROOT"
 fi
 
+# Colab is Python 3.12+; upstream still has dead ``import imp`` etc.
+if [[ -f "$REPO/scripts/patch_reface_py312.py" ]]; then
+  python "$REPO/scripts/patch_reface_py312.py" --reface-root "$REFACE_ROOT"
+fi
+
 # --- pip deps (Colab torch is usually fine; avoid forcing cu117) ---
 pip install -q -U pip setuptools wheel
 pip install -q huggingface_hub gdown
@@ -33,7 +38,7 @@ pip install -q "pytorch-lightning>=1.9,<2.2" || pip install -q pytorch-lightning
 pip install -q "omegaconf>=2.1,<2.4" "einops" "albumentations" "kornia" \
   "transformers>=4.30,<4.45" "diffusers>=0.24,<0.32" "torchmetrics" \
   "face_alignment" "opencv-python-headless" "scikit-image" "tqdm" "Pillow" \
-  "natsort" "ftfy" "regex" "lpips" "timm" "pytorch-fid" || true
+  "natsort" "ftfy" "regex" "lpips" "timm" "pytorch-fid" "bezier" || true
 
 # dlib is optional-ish (landmarks); try wheels first.
 pip install -q dlib || pip install -q dlib==19.24.2 || echo "⚠ dlib install failed — may still work with face_alignment"
