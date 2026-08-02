@@ -82,18 +82,21 @@ def main() -> None:
     if not reface_root.is_dir():
         raise SystemExit(f"REFACE_ROOT not found: {reface_root}")
 
-    # Colab Python 3.12 removes ``imp``; patch upstream before calling it.
+    # Vendor taming/CLIP, apply Colab patches, verify the real import chain.
     try:
         scripts_dir = Path(__file__).resolve().parent
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
-        from patch_reface_py312 import patch_reface_tree
+        from ensure_reface_runtime import ensure
 
-        touched = patch_reface_tree(reface_root)
-        if touched:
-            print(f"→ patched REFace for Colab ({len(touched)} file(s))", flush=True)
+        pythonpath = ensure(reface_root, do_smoke=True)
+    except SystemExit:
+        raise
     except Exception as exc:  # noqa: BLE001
-        print(f"⚠ REFace Colab patch skipped: {exc}", flush=True)
+        raise SystemExit(
+            f"REFace runtime ensure failed: {exc}\n"
+            "Run: python /content/headswap_V2/scripts/ensure_reface_runtime.py"
+        ) from exc
 
     # Import headswap face detector (optional; fall back to full-frame).
     headswap_src = Path(__file__).resolve().parents[1] / "src"
@@ -169,7 +172,8 @@ def main() -> None:
     ]
     print("→", " ".join(cmd), flush=True)
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(reface_root) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = pythonpath
+    env["REFACE_ROOT"] = str(reface_root)
     proc = subprocess.run(
         cmd,
         cwd=str(reface_root),

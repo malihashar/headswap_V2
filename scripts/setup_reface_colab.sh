@@ -39,13 +39,13 @@ pip install -q --force-reinstall "pytorch-lightning==1.9.5"
 pip install -q "omegaconf>=2.1,<2.4" "einops" "albumentations" "kornia" \
   "transformers>=4.30,<4.45" "diffusers>=0.24,<0.32" "torchmetrics==0.11.4" \
   "face_alignment" "opencv-python-headless" "scikit-image" "tqdm" "Pillow" \
-  "natsort" "ftfy" "regex" "lpips" "timm" "pytorch-fid" "bezier" || true
+  "natsort" "ftfy" "regex" "lpips" "timm" "pytorch-fid" "bezier"
 
 # dlib is optional-ish (landmarks); try wheels first.
 pip install -q dlib || pip install -q dlib==19.24.2 || echo "⚠ dlib install failed — may still work with face_alignment"
 
-pip install -q -e "git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers" || true
-pip install -q -e "git+https://github.com/openai/CLIP.git@main#egg=clip" || true
+# taming + CLIP: clone + PYTHONPATH (pip -e alone often fails silently on Colab).
+# Editable REFace install is optional.
 pip install -q -e "$REFACE_ROOT" || true
 
 # Editable headswap
@@ -53,32 +53,8 @@ if [[ -f "$REPO/pyproject.toml" || -f "$REPO/setup.py" ]]; then
   pip install -q -e "$REPO"
 fi
 
-python - <<'PY'
-import importlib
-import pytorch_lightning as pl
-
-required = ["pytorch_lightning", "omegaconf", "einops", "torch"]
-missing = []
-for name in required:
-    try:
-        importlib.import_module(name)
-        print(f"✓ import {name}")
-    except Exception as exc:
-        missing.append(f"{name}: {exc}")
-try:
-    from pytorch_lightning.utilities.distributed import rank_zero_only  # noqa: F401
-    print("✓ rank_zero_only via utilities.distributed")
-except Exception:
-    try:
-        from pytorch_lightning.utilities.rank_zero import rank_zero_only  # noqa: F401
-        print("✓ rank_zero_only via utilities.rank_zero (will use patched import)")
-    except Exception as exc:
-        missing.append(f"rank_zero_only: {exc}")
-print(f"✓ pytorch_lightning={pl.__version__}")
-if missing:
-    raise SystemExit("REFace deps missing:\n  - " + "\n  - ".join(missing))
-print("✓ REFace Python deps OK")
-PY
+# Vendor taming/CLIP, patch sources, and smoke-import the real inference chain.
+python "$REPO/scripts/ensure_reface_runtime.py" --reface-root "$REFACE_ROOT"
 
 # --- HuggingFace assets (last.ckpt + Other_dependencies) ---
 export WEIGHTS_CACHE="$WEIGHTS_CACHE"
