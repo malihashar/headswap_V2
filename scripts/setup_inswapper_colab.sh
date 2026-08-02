@@ -6,15 +6,25 @@ set -euo pipefail
 REPO_ROOT="${HEADSWAP_REPO:-/content/headswap_V2}"
 CACHE_DIR="${INSWAP_CACHE:-/content/drive/MyDrive/headswap_inswap}"
 LOCAL_CACHE="${INSWAP_LOCAL_CACHE:-/content/inswap_cache}"
+BRANCH="${INSWAP_REPO_BRANCH:-ab/identity-scale-match-spp}"
 
 echo "=== InSwapper Colab setup ==="
 echo "  REPO_ROOT=$REPO_ROOT"
+echo "  BRANCH=$BRANCH"
 echo "  CACHE_DIR=$CACHE_DIR"
 echo "  LOCAL_CACHE=$LOCAL_CACHE"
 
 cd "$REPO_ROOT"
 
+# Ensure this checkout actually contains the inswap package (main may not).
+if [[ ! -d "$REPO_ROOT/src/headswap/inswap" ]]; then
+  echo "→ inswap package missing; checking out $BRANCH…"
+  git fetch origin "$BRANCH"
+  git checkout -B "$BRANCH" "origin/$BRANCH"
+fi
+
 python3 -m pip install -q -U pip
+python3 -m pip install -q -e "$REPO_ROOT"
 # Minimal deps for T4: insightface + CUDA onnxruntime + imaging extras
 python3 -m pip install -q \
   "insightface>=0.7.3" \
@@ -55,6 +65,15 @@ python3 "$REPO_ROOT/scripts/download_inswapper.py" \
       --device cpu \
       --with-gfpgan
   }
+
+python3 - <<'PY'
+import sys
+from pathlib import Path
+repo = Path("/content/headswap_V2")
+sys.path.insert(0, str(repo / "src"))
+import headswap.inswap
+print("✓ verify import headswap.inswap OK")
+PY
 
 echo "✓ InSwapper setup complete"
 echo "  Models: $INSWAP_CACHE_DIR"
