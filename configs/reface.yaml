@@ -1,0 +1,16 @@
+name: reface
+pipeline: reface
+
+reface_root: /content/REFace
+
+output_long_side: 1024
+body_face_policy: largest   # largest | rightmost | leftmost | index
+body_face_index: 0
+
+# REFace sampling (diffusion face-swap)
+ddim_steps: 50
+guidance_scale: 3.5
+seed: 42
+
+save_debug: false
+verbose: false

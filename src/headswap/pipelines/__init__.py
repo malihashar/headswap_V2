@@ -17,6 +17,10 @@ try:
 except ImportError:  # pragma: no cover
     Ghost2HeadSwapPipeline = None  # type: ignore[misc, assignment]
 try:
+    from headswap.pipelines.reface import REFacePipeline
+except ImportError:  # pragma: no cover
+    REFacePipeline = None  # type: ignore[misc, assignment]
+try:
     from headswap.pipelines.step1x_edit import Step1XEditPipeline
 except ImportError:  # pragma: no cover
     Step1XEditPipeline = None  # type: ignore[misc, assignment]
@@ -38,6 +42,9 @@ PIPELINES: dict[str, type[BasePipeline]] = {
 if Ghost2HeadSwapPipeline is not None:
     PIPELINES["ghost2"] = Ghost2HeadSwapPipeline
     PIPELINES["ghost2_head_swap"] = Ghost2HeadSwapPipeline
+if REFacePipeline is not None:
+    PIPELINES["reface"] = REFacePipeline
+    PIPELINES["reface_face_swap"] = REFacePipeline
 if Step1XEditPipeline is not None:
     PIPELINES["step1x_edit"] = Step1XEditPipeline
 
