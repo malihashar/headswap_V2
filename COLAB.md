@@ -1,12 +1,25 @@
 # Running headswap_V2 on Google Colab
 
-Internal **production demo** for Krea 2 Identity Edit (Magic Hour engineers).
+Internal demos for Magic Hour engineers.
 
-## Open & run
+| Notebook | Engine | Notes |
+| --- | --- | --- |
+| `notebooks/krea2_identity_edit.ipynb` | Krea2 (diffusion edit) | Production identity-edit path |
+| `notebooks/inswapper_face_swap.ipynb` | InsightFace InSwapper | Deterministic local face swap (T4-friendly); does **not** use Krea2 |
+
+## Open & run (Krea2)
 
 1. Upload `notebooks/krea2_identity_edit.ipynb` to Colab.
 2. **Runtime → Change runtime type → GPU** (prefer **A100**).
 3. Edit §1 knobs if needed → **Runtime → Run all**.
+
+## Open & run (InSwapper)
+
+1. Upload `notebooks/inswapper_face_swap.ipynb` to Colab.
+2. **Runtime → Change runtime type → GPU** (**T4** is enough).
+3. Edit §1 knobs → **Runtime → Run all**.
+4. Models cache under Drive: `/content/drive/MyDrive/headswap_inswap/`
+5. Outputs: `/content/inswap_outputs/`
 
 ### Expected runtime (warm)
 

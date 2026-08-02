@@ -27,6 +27,10 @@ try:
     from headswap.pipelines.step1x_edit import Step1XEditPipeline
 except ImportError:  # pragma: no cover
     Step1XEditPipeline = None  # type: ignore[misc, assignment]
+try:
+    from headswap.pipelines.inswapper import InSwapperPipeline
+except ImportError:  # pragma: no cover
+    InSwapperPipeline = None  # type: ignore[misc, assignment]
 
 
 PIPELINES: dict[str, type[BasePipeline]] = {
@@ -51,6 +55,9 @@ if REFacePipeline is not None:
     PIPELINES["reface_face_swap"] = REFacePipeline
 if Step1XEditPipeline is not None:
     PIPELINES["step1x_edit"] = Step1XEditPipeline
+if InSwapperPipeline is not None:
+    PIPELINES["inswapper"] = InSwapperPipeline
+    PIPELINES["inswap"] = InSwapperPipeline
 
 
 def create_pipeline(cfg: dict[str, Any], runtime=None, force_mock: bool = False) -> BasePipeline:

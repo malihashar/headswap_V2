@@ -1,0 +1,27 @@
+# Deterministic local face swap (InsightFace InSwapper).
+# Separate experiment from Krea2 — does not regenerate the scene.
+name: inswapper
+pipeline: inswapper
+
+engine: inswapper          # pluggable: inswapper | (future: reface, ghost, …)
+device: cuda               # cuda | cpu
+
+# Multi-person body: which face to replace
+body_face_policy: largest  # largest | rightmost | leftmost | index
+body_face_index: 0
+
+# Identity donor image
+source_face_policy: largest
+source_face_index: 0
+
+# Blend / lighting
+blend_strength: 1.0
+color_match_strength: 0.25
+reblend_after_engine: true
+
+# Optional face-only restoration (none | gfpgan | codeformer)
+restorer: none
+restore_fidelity: 0.5
+
+save_debug: true
+verbose: false
