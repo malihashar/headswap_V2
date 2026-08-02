@@ -541,7 +541,9 @@ class MockHeadSwapPipeline(BasePipeline):
             side=float(self.cfg.get("face_side_pad", 0.22)),
             white_bg=bool(self.cfg.get("identity_white_bg", True)),
             square_fill=bool(self.cfg.get("identity_square_fill", True)),
-            fill_frac=float(self.cfg.get("identity_fill_frac", 0.92)),
+            fill_frac=float(self.cfg.get("identity_fill_frac", 0.90)),
+            use_head_crop=bool(self.cfg.get("identity_use_head_crop", True)),
+            head_fill=float(self.cfg.get("identity_head_fill", 0.88)),
         )
 
         import numpy as np

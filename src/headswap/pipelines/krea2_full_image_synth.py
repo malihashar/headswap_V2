@@ -3,15 +3,12 @@
 Isolated from the production localized pipeline. Regenerates the entire frame
 via dual-ref Krea2 Identity Edit and returns the raw model output as final.
 
-Identity-path fixes (evidence-backed):
-  - Do NOT letterbox identity into the scene canvas (was ~23% face pixels →
-    scene geometry dominated dual-ref VAE tokens). Pass a face-filled square;
-    v1.2 fit_mode handles AR mismatch.
-  - Prompt uses trained head/face/hair *replace* vocabulary; never asks to
-    preserve the target's hair/beard/jaw.
-  - ref_boost_a = 1.0 (do not boost scene); ref_boost elevated for image-2 ID.
-  - grounding_px = 768 (docs: lower → stronger edit adherence for changes).
-  - Optional ref_boost_mask focuses image-2 attention on the face ellipse.
+Identity conditioning:
+  - Landmark-based FULL HEAD crop (hair/beard/ears/jaw/neck), not tight face box
+  - Face-filled square person canvas; v1.2 fit_mode handles AR vs scene
+  - Replace head/face/hair prompt vocabulary
+  - ref_boost on image-2; neutral ref_boost_a on scene
+  - No stitch/freeze/blend — compositing cannot restore original hair/beard
 """
 from __future__ import annotations
 
@@ -27,6 +24,8 @@ from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 from headswap.pipelines.krea2 import Krea2IdentityEditPipeline, get_shared_krea2_runtime
 from headswap.preprocess import (
+    crop_identity_head,
+    draw_identity_head_debug,
     identity_face_boost_mask,
     prepare_krea2_identity_person,
     resize_max_keep_ar,
@@ -113,7 +112,7 @@ class Krea2FullImageSynthPipeline(BasePipeline):
                 prompt = f"{str(self.cfg['prompt_prefix']).strip()} {prompt}".strip()
 
             scene = resize_max_keep_ar(body_rgb, max_dim, div_by=div_by)
-            # Face-dominant identity canvas (NOT letterboxed into scene size).
+            # Landmark-based full-head identity canvas (NOT tight face box).
             person, face_crop, id_prep = prepare_krea2_identity_person(
                 face,
                 self.cache_dir,
@@ -124,11 +123,27 @@ class Krea2FullImageSynthPipeline(BasePipeline):
                 side=float(self.cfg.get("face_side_pad", 0.22)),
                 white_bg=bool(self.cfg.get("identity_white_bg", True)),
                 square_fill=bool(self.cfg.get("identity_square_fill", True)),
-                fill_frac=float(self.cfg.get("identity_fill_frac", 0.92)),
+                fill_frac=float(self.cfg.get("identity_fill_frac", 0.90)),
+                use_head_crop=bool(self.cfg.get("identity_use_head_crop", True)),
+                head_fill=float(self.cfg.get("identity_head_fill", 0.88)),
             )
+            head_dbg = dict(id_prep.get("head_crop") or {})
+            if not head_dbg.get("crop_box"):
+                _hc, head_dbg = crop_identity_head(
+                    face,
+                    self.cache_dir,
+                    square=True,
+                    head_fill=float(self.cfg.get("identity_head_fill", 0.88)),
+                    div_by=max(2, div_by),
+                )
+            head_overlay = draw_identity_head_debug(face.convert("RGB"), head_dbg)
             ref_boost_mask = None
             if bool(self.cfg.get("use_ref_boost_mask", True)):
-                ref_boost_mask = identity_face_boost_mask(person, self.cache_dir)
+                ref_boost_mask = identity_face_boost_mask(
+                    person,
+                    self.cache_dir,
+                    include_hair=True,
+                )
             timings["preprocessing"] = time.perf_counter() - t_pre
 
             if id_prep.get("identity_starved"):
@@ -172,7 +187,8 @@ class Krea2FullImageSynthPipeline(BasePipeline):
             )
             out = sample["edited"]
 
-            # Intentionally no freeze / stitch / color match / head-scale clamp.
+            # No freeze / stitch / color match / head-scale clamp after generation.
+            # Compositing therefore cannot restore original hair/beard.
             t_save = time.perf_counter()
             if out_dir is not None:
                 out_dir = Path(out_dir)
@@ -186,6 +202,9 @@ class Krea2FullImageSynthPipeline(BasePipeline):
                         "debug_person": self._save_debug(out_dir, "debug_person.png", person),
                         "debug_face_crop": self._save_debug(
                             out_dir, "debug_face_crop.png", face_crop
+                        ),
+                        "debug_identity_head_overlay": self._save_debug(
+                            out_dir, "debug_identity_head_overlay.png", head_overlay
                         ),
                         "debug_faces_overlay": self._save_debug(
                             out_dir, "debug_faces_overlay.png", overlay
@@ -212,6 +231,12 @@ class Krea2FullImageSynthPipeline(BasePipeline):
                     "prompt": prompt,
                     "scene_description": desc.to_dict(),
                     "identity_prep": id_prep,
+                    "identity_head_geometry": head_dbg,
+                    "compositing_restores_original_hair": False,
+                    "compositing_note": (
+                        "full_image_synth returns raw Krea2 output; no stitch/"
+                        "freeze/blend stage can restore original hair/beard"
+                    ),
                     "faces_detected": len(all_faces),
                     "selected_face": (
                         None

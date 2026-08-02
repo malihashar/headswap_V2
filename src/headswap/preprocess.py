@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import cv2
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 
 @dataclass
@@ -683,6 +684,251 @@ def crop_face_reference(
     return face_pil.crop((expanded.x0, expanded.y0, expanded.x1, expanded.y1)).convert("RGB")
 
 
+def _clamp_xyxy(
+    x0: float, y0: float, x1: float, y1: float, w: int, h: int
+) -> tuple[int, int, int, int]:
+    xx0 = int(max(0, min(w - 1, round(x0))))
+    yy0 = int(max(0, min(h - 1, round(y0))))
+    xx1 = int(max(xx0 + 1, min(w, round(x1))))
+    yy1 = int(max(yy0 + 1, min(h, round(y1))))
+    return xx0, yy0, xx1, yy1
+
+
+def estimate_identity_head_box(
+    rgb: np.ndarray,
+    cache_dir,
+    *,
+    # Multiples of inter-ocular distance (IOD) — robust across face sizes.
+    hair_above_eyes_iod: float = 2.15,
+    below_mouth_iod: float = 2.05,
+    side_beyond_eyes_iod: float = 1.55,
+    # Fallback multiples of detector face height/width when landmarks weak.
+    top_face_h: float = 1.15,
+    bot_face_h: float = 0.70,
+    side_face_w: float = 0.55,
+) -> dict[str, Any]:
+    """
+    Estimate a full-head box (hair + beard + ears + upper neck) from landmarks.
+
+    Uses InsightFace 5-point landmarks when available. Does **not** use the raw
+    detector box as the crop — only as a prior / fallback scale.
+    """
+    h, w = rgb.shape[:2]
+    det = detect_best_face(rgb, cache_dir)
+    lm, lm_backend, lm_note = get_face_landmarks5(rgb, cache_dir, prefer_box=det)
+
+    info: dict[str, Any] = {
+        "landmark_backend": lm_backend,
+        "landmark_note": lm_note,
+        "detector_box": None if det is None else [det.x0, det.y0, det.x1, det.y1],
+        "policy": "landmark_iod",
+    }
+
+    if lm is not None:
+        # kps: left_eye, right_eye, nose, left_mouth, right_mouth
+        le, re, nose, lmouth, rmouth = lm
+        iod = float(np.linalg.norm(re - le))
+        if iod < 1.0 and det is not None:
+            iod = float(max(1.0, 0.35 * det.width))
+        elif iod < 1.0:
+            iod = float(max(1.0, 0.08 * min(w, h)))
+        eye_y = float(0.5 * (le[1] + re[1]))
+        eye_l = float(min(le[0], re[0]))
+        eye_r = float(max(le[0], re[0]))
+        mouth_y = float(0.5 * (lmouth[1] + rmouth[1]))
+        # Chin proxy: below mouth; prefer detector bottom if it extends further
+        # (beard often sits under the mouth landmarks).
+        chin_y = mouth_y + 0.85 * iod
+        if det is not None:
+            chin_y = max(chin_y, float(det.y1))
+
+        x0 = eye_l - side_beyond_eyes_iod * iod
+        x1 = eye_r + side_beyond_eyes_iod * iod
+        y0 = eye_y - hair_above_eyes_iod * iod
+        y1 = chin_y + below_mouth_iod * iod * 0.55  # upper neck below chin
+        # Keep nose / mouth inside with margin.
+        x0 = min(x0, float(nose[0]) - 1.2 * iod, float(lmouth[0]) - 1.1 * iod)
+        x1 = max(x1, float(nose[0]) + 1.2 * iod, float(rmouth[0]) + 1.1 * iod)
+        info.update(
+            {
+                "iod": round(iod, 2),
+                "eye_y": round(eye_y, 2),
+                "mouth_y": round(mouth_y, 2),
+                "chin_y": round(chin_y, 2),
+            }
+        )
+    elif det is not None:
+        info["policy"] = "detector_expanded_fallback"
+        fw, fh = float(det.width), float(det.height)
+        x0 = det.x0 - side_face_w * fw
+        x1 = det.x1 + side_face_w * fw
+        y0 = det.y0 - top_face_h * fh
+        y1 = det.y1 + bot_face_h * fh
+    else:
+        info["policy"] = "full_frame_fallback"
+        return {
+            **info,
+            "head_box": [0, 0, w, h],
+            "head_box_clamped": [0, 0, w, h],
+        }
+
+    # Optionally enlarge with 106-pt landmarks (jaw / brow extremes) when present.
+    app = ensure_insightface_app(cache_dir)
+    if app is not None and lm is not None:
+        try:
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            faces = app.get(bgr)
+            if faces:
+                face = max(
+                    faces,
+                    key=lambda f: float(
+                        (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+                    ),
+                )
+                pts106 = getattr(face, "landmark_2d_106", None)
+                if pts106 is not None:
+                    pts = np.asarray(pts106, dtype=np.float32)
+                    if pts.ndim == 2 and pts.shape[0] >= 16:
+                        x0 = min(x0, float(pts[:, 0].min()) - 0.15 * (
+                            float(pts[:, 0].max() - pts[:, 0].min())
+                        ))
+                        x1 = max(x1, float(pts[:, 0].max()) + 0.15 * (
+                            float(pts[:, 0].max() - pts[:, 0].min())
+                        ))
+                        y0 = min(y0, float(pts[:, 1].min()) - 0.35 * (
+                            float(pts[:, 1].max() - pts[:, 1].min())
+                        ))
+                        y1 = max(y1, float(pts[:, 1].max()) + 0.25 * (
+                            float(pts[:, 1].max() - pts[:, 1].min())
+                        ))
+                        info["used_landmark_2d_106"] = True
+        except Exception:
+            info["used_landmark_2d_106"] = False
+
+    raw = [float(x0), float(y0), float(x1), float(y1)]
+    clamped = _clamp_xyxy(x0, y0, x1, y1, w, h)
+    info["head_box"] = [round(v, 2) for v in raw]
+    info["head_box_clamped"] = list(clamped)
+    return info
+
+
+def crop_identity_head(
+    face_pil: Image.Image,
+    cache_dir,
+    *,
+    square: bool = True,
+    head_fill: float = 0.88,
+    div_by: int = 16,
+    **head_box_kwargs: Any,
+) -> tuple[Image.Image, dict[str, Any]]:
+    """
+    Crop a complete head (hair, forehead, ears, beard, jaw, upper neck).
+
+    Returns (crop_rgb, debug_info) where debug_info includes detector_box,
+    head_box, and geometry used for consistent head scale.
+    """
+    im = face_pil.convert("RGB")
+    w, h = im.size
+    rgb = pil_to_rgb_np(im)
+    geom = estimate_identity_head_box(rgb, cache_dir, **head_box_kwargs)
+    hx0, hy0, hx1, hy1 = [int(v) for v in geom["head_box_clamped"]]
+    hw, hh = max(1, hx1 - hx0), max(1, hy1 - hy0)
+
+    if square:
+        # Consistent head scale: square window with head filling ``head_fill``.
+        fill = float(min(0.96, max(0.70, head_fill)))
+        side = int(round(max(hw, hh) / fill))
+        side = max(side, max(hw, hh) + 2)
+        if div_by > 1:
+            side = max(div_by, ((side + div_by - 1) // div_by) * div_by)
+        cx = 0.5 * (hx0 + hx1)
+        cy = 0.5 * (hy0 + hy1)
+        # Bias slightly upward so hair isn't clipped when clamping to image.
+        cy = cy - 0.04 * hh
+        x0 = int(round(cx - side / 2.0))
+        y0 = int(round(cy - side / 2.0))
+        x1, y1 = x0 + side, y0 + side
+        # Shift into frame without shrinking (prefer keep full head).
+        if x0 < 0:
+            x1 -= x0
+            x0 = 0
+        if y0 < 0:
+            y1 -= y0
+            y0 = 0
+        if x1 > w:
+            shift = x1 - w
+            x0 = max(0, x0 - shift)
+            x1 = w
+        if y1 > h:
+            shift = y1 - h
+            y0 = max(0, y0 - shift)
+            y1 = h
+        # Re-evenify after clamp.
+        x0, y0, x1, y1 = _clamp_xyxy(x0, y0, x1, y1, w, h)
+        if div_by > 1:
+            cw = evenify(x1 - x0, div_by)
+            ch = evenify(y1 - y0, div_by)
+            x1 = min(w, x0 + cw)
+            y1 = min(h, y0 + ch)
+    else:
+        x0, y0, x1, y1 = hx0, hy0, hx1, hy1
+        if div_by > 1:
+            x1 = min(w, x0 + evenify(x1 - x0, div_by))
+            y1 = min(h, y0 + evenify(y1 - y0, div_by))
+
+    crop = im.crop((x0, y0, x1, y1)).convert("RGB")
+    head_in_crop = [
+        hx0 - x0,
+        hy0 - y0,
+        hx1 - x0,
+        hy1 - y0,
+    ]
+    det = geom.get("detector_box")
+    det_in_crop = None
+    if det is not None:
+        det_in_crop = [
+            int(det[0]) - x0,
+            int(det[1]) - y0,
+            int(det[2]) - x0,
+            int(det[3]) - y0,
+        ]
+    info = {
+        **geom,
+        "crop_box": [x0, y0, x1, y1],
+        "crop_size": list(crop.size),
+        "head_box_in_crop": head_in_crop,
+        "detector_box_in_crop": det_in_crop,
+        "square": bool(square),
+        "head_fill": float(head_fill) if square else None,
+        "head_area_frac_in_crop": round(
+            (hw * hh) / float(max(1, crop.size[0] * crop.size[1])), 4
+        ),
+    }
+    return crop, info
+
+
+def draw_identity_head_debug(
+    face_pil: Image.Image,
+    info: dict[str, Any],
+) -> Image.Image:
+    """Overlay detector (red), head estimate (lime), final crop (cyan)."""
+    vis = face_pil.convert("RGB").copy()
+    draw = ImageDraw.Draw(vis)
+    det = info.get("detector_box")
+    if det is not None:
+        draw.rectangle(det, outline=(255, 64, 64), width=3)
+        draw.text((int(det[0]) + 2, max(0, int(det[1]) - 14)), "detector", fill=(255, 64, 64))
+    head = info.get("head_box_clamped") or info.get("head_box")
+    if head is not None:
+        draw.rectangle(head, outline=(80, 255, 80), width=3)
+        draw.text((int(head[0]) + 2, max(0, int(head[1]) - 14)), "head", fill=(80, 255, 80))
+    crop = info.get("crop_box")
+    if crop is not None:
+        draw.rectangle(crop, outline=(64, 200, 255), width=3)
+        draw.text((int(crop[0]) + 2, max(0, int(crop[1]) - 14)), "crop", fill=(64, 200, 255))
+    return vis
+
+
 def identity_face_only_matte(
     face_pil: Image.Image,
     cache_dir,
@@ -1130,27 +1376,32 @@ def identity_face_boost_mask(
     cache_dir,
     *,
     expand: float = 1.35,
+    include_hair: bool = True,
 ) -> Image.Image:
     """
-    L-mask over the identity face on the person/reference canvas.
+    L-mask over the identity head on the person/reference canvas.
 
     For Krea2 ``ref_boost_mask`` (last-ref attention boost only — not an edit
-    freeze). Comfy MASK expects float later; this returns an 8-bit L image.
+    freeze). When ``include_hair`` is True, expand upward/sideways so hair and
+    beard stay inside the boosted region (tight face ellipses starved hair ID).
     """
     rgb = pil_to_rgb_np(person)
     h, w = rgb.shape[:2]
     box = detect_best_face(rgb, cache_dir)
     mask = np.zeros((h, w), dtype=np.uint8)
     if box is None:
-        cx, cy = w // 2, int(h * 0.35)
-        axes = (max(8, int(w * 0.22)), max(8, int(h * 0.28)))
+        cx, cy = w // 2, int(h * 0.42)
+        axes = (max(8, int(w * 0.38)), max(8, int(h * 0.46)))
         cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
     else:
         cx = (box.x0 + box.x1) // 2
-        cy = (box.y0 + box.y1) // 2
+        # Shift center slightly up so hair is covered.
+        cy = int((box.y0 + box.y1) / 2 - (0.12 * box.height if include_hair else 0.0))
+        ex = float(expand) * (1.25 if include_hair else 1.0)
+        ey = float(expand) * (1.45 if include_hair else 1.0)
         axes = (
-            max(4, int(0.5 * expand * box.width)),
-            max(4, int(0.55 * expand * box.height)),
+            max(4, int(0.55 * ex * box.width)),
+            max(4, int(0.70 * ey * box.height)),
         )
         cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
     return Image.fromarray(mask)
@@ -1330,26 +1581,41 @@ def prepare_krea2_identity_person(
     white_bg: bool = True,
     square_fill: bool = True,
     fill_frac: float = 0.92,
-) -> tuple[Image.Image, Image.Image, dict[str, float | int | bool | list[int]]]:
+    use_head_crop: bool = True,
+    head_fill: float = 0.88,
+) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
     """
-    Build a face-dominant identity ref for Krea2 dual-ref conditioning.
+    Build a head-dominant identity ref for Krea2 dual-ref conditioning.
 
-    Critical: do **not** letterbox the face into the full scene canvas. On wide
-    group photos that leaves ~20–30% identity pixels and mostly empty VAE tokens,
-    so scene geometry dominates. v1.2 ``fit_mode`` already handles mismatched
-    scene/person aspect ratios — pass a tight, high-res face canvas instead.
+    Default policy: landmark-based **full head** crop (hair/beard/ears/neck),
+    then scale to a consistent square. Do not letterbox into the scene canvas.
     """
-    face_crop = crop_face_reference(
-        face,
-        cache_dir,
-        top=float(top),
-        bot=float(bot),
-        side=float(side),
-        include_shoulders=False,
-    )
+    head_info: dict[str, Any] = {}
+    if use_head_crop:
+        face_crop, head_info = crop_identity_head(
+            face,
+            cache_dir,
+            square=True,
+            head_fill=float(head_fill),
+            div_by=max(2, int(div_by)),
+        )
+    else:
+        # Legacy tight face pads (kept for A/B only).
+        face_crop = crop_face_reference(
+            face,
+            cache_dir,
+            top=float(top),
+            bot=float(bot),
+            side=float(side),
+            include_shoulders=False,
+        )
+        head_info = {"policy": "legacy_face_pads"}
+
     person = face_crop.convert("RGB")
     applied_white = False
     if white_bg:
+        # Soft matte: black-studio cutout preferred. Avoid force_ellipse — it
+        # clips hair/beard on full-head crops.
         person = face_on_white_background(
             person, cache_dir=cache_dir, force_ellipse=False
         )
@@ -1366,7 +1632,6 @@ def prepare_krea2_identity_person(
     else:
         person = resize_long_side(person, side_px, div_by=int(div_by))
     frac = identity_content_frac(person)
-    # For white-bg stickers, occupancy is near-white+face; use face detector area.
     rgb = pil_to_rgb_np(person)
     box = detect_best_face(rgb, cache_dir)
     face_area_frac = 0.0
@@ -1374,7 +1639,7 @@ def prepare_krea2_identity_person(
         face_area_frac = float(box.width * box.height) / float(
             max(1, person.size[0] * person.size[1])
         )
-    info: dict[str, float | int | bool | list[int]] = {
+    info: dict[str, Any] = {
         "person_size": list(person.size),
         "face_crop_size": list(face_crop.size),
         "identity_content_frac": round(frac, 4),
@@ -1382,8 +1647,10 @@ def prepare_krea2_identity_person(
         "identity_long_side": int(long_side),
         "white_bg": bool(applied_white),
         "square_fill": bool(square_fill),
+        "use_head_crop": bool(use_head_crop),
         "letterboxed_to_scene": False,
-        "identity_starved": bool(face_area_frac < 0.20 and frac < 0.40),
+        "identity_starved": bool(face_area_frac < 0.12 and frac < 0.40),
+        "head_crop": head_info,
     }
     return person, face_crop, info
 

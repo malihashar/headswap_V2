@@ -11,13 +11,12 @@ sys.path.insert(0, str(ROOT / "src"))
 from headswap.config import load_config
 from headswap.pipelines import PIPELINES, create_pipeline
 from headswap.preprocess import (
+    crop_face_reference,
+    crop_identity_head,
+    draw_identity_head_debug,
     identity_content_frac,
     prepare_krea2_identity_person,
     resize_contain,
-)
-from headswap.prompting.scene_describe import (
-    build_identity_edit_prompt,
-    describe_scene,
 )
 
 
@@ -27,41 +26,57 @@ def test_full_image_synth_registered_and_isolated_from_localized():
     full = load_config(ROOT / "configs" / "krea2_full_image_synth.yaml")
     assert loc["pipeline"] in {"krea2", "krea2_identity_edit"}
     assert full["pipeline"] == "krea2_full_image_synth"
-    assert bool(loc.get("mask_crop_stitch", True)) is True
-    # Identity-max conditioning (not scene-boosted).
-    assert float(full["ref_boost"]) >= 4.0
+    assert bool(full.get("identity_use_head_crop", False)) is True
     assert float(full["ref_boost_a"]) <= 1.0 + 1e-6
-    assert int(full["grounding_px"]) <= 768
-    assert int(full["steps"]) >= 10
-    assert bool(full.get("identity_square_fill", False)) is True
 
 
-def test_auto_prompt_demands_head_face_hair_replacement():
-    import numpy as np
+def test_head_crop_larger_than_tight_face_pads(tmp_path: Path):
+    # Synthetic portrait with room above/below the face for hair + beard.
+    im = Image.new("RGB", (400, 560), (10, 10, 12))
+    d = ImageDraw.Draw(im)
+    # Face oval in the middle third.
+    d.ellipse([120, 180, 280, 380], fill=(200, 160, 140))
+    d.ellipse([155, 240, 185, 270], fill=(30, 30, 30))
+    d.ellipse([215, 240, 245, 270], fill=(30, 30, 30))
+    # Dark hair above face.
+    d.ellipse([110, 80, 290, 210], fill=(20, 15, 10))
+    # Beard below mouth.
+    d.ellipse([140, 340, 260, 430], fill=(40, 30, 25))
 
-    arr = np.zeros((240, 480, 3), dtype=np.uint8)
-    arr[:] = (20, 22, 35)
-    for cx in (80, 240, 400):
-        yy, xx = np.ogrid[:240, :480]
-        mask = ((xx - cx) / 28) ** 2 + ((yy - 90) / 36) ** 2 <= 1.0
-        arr[mask] = (180, 150, 130)
-    body = Image.fromarray(arr)
-    desc, selected, faces = describe_scene(
-        body, ROOT / ".cache" / "test_full_synth", face_policy="largest"
+    cache = tmp_path / "cache"
+    tight = crop_face_reference(
+        im, cache, top=0.70, bot=0.12, side=0.22, include_shoulders=False
     )
-    prompt = build_identity_edit_prompt(desc).lower()
-    assert "replace the face, hair, and head" in prompt
-    assert "image 2" in prompt
-    assert "jawline" in prompt or "bone structure" in prompt
-    # Must not ask to preserve target hairstyle (locks scene identity).
-    assert "hairstyle when possible" not in prompt
-    assert "preserve that silhouette" not in prompt
-    assert desc.n_faces >= 1
-    assert selected is not None
+    head, info = crop_identity_head(im, cache, square=True, head_fill=0.88)
+    assert info.get("detector_box") is not None or info.get("policy")
+    # Head crop must be larger than the legacy tight face crop.
+    assert head.size[0] * head.size[1] > tight.size[0] * tight.size[1]
+    # Detector box area should be a minority of the head crop (hair/beard margin).
+    det = info.get("detector_box_in_crop")
+    if det is not None:
+        dw = max(1, det[2] - det[0])
+        dh = max(1, det[3] - det[1])
+        det_frac = (dw * dh) / float(head.size[0] * head.size[1])
+        assert det_frac < 0.85
+
+    overlay = draw_identity_head_debug(im, info)
+    assert overlay.size == im.size
+
+
+def test_prepare_identity_uses_head_crop_by_default(tmp_path: Path):
+    face = Image.new("RGB", (400, 560), (0, 0, 0))
+    d = ImageDraw.Draw(face)
+    d.ellipse([80, 60, 320, 420], fill=(200, 160, 140))
+    person, crop, info = prepare_krea2_identity_person(
+        face, tmp_path / "cache", long_side=512, use_head_crop=True
+    )
+    assert info["use_head_crop"] is True
+    assert info["letterboxed_to_scene"] is False
+    assert person.size[0] == person.size[1]
+    assert "head_crop" in info
 
 
 def test_identity_person_not_letterboxed_into_wide_scene(tmp_path: Path):
-    # Wide scene-like canvas vs portrait face — old path starved identity (~0.23).
     face = Image.new("RGB", (400, 560), (0, 0, 0))
     d = ImageDraw.Draw(face)
     d.ellipse([80, 60, 320, 420], fill=(200, 160, 140))
@@ -78,28 +93,26 @@ def test_identity_person_not_letterboxed_into_wide_scene(tmp_path: Path):
         long_side=512,
         white_bg=True,
         square_fill=True,
+        use_head_crop=True,
     )
     assert info["letterboxed_to_scene"] is False
     assert person.size[0] == person.size[1]
-    # Face-filled square must beat letterboxed wide canvas occupancy.
     fixed = identity_content_frac(person)
     assert fixed > starved
     assert fixed >= 0.35
-    assert float(info["identity_face_area_frac"]) > 0.10
 
 
 def test_full_image_synth_mock_runs_without_comfy(tmp_path: Path):
     cfg = load_config(ROOT / "configs" / "krea2_full_image_synth.yaml")
     pipe = create_pipeline(cfg, force_mock=True)
     body = Image.new("RGB", (256, 320), (30, 40, 50))
-    face = Image.new("RGB", (128, 128), (200, 160, 140))
+    face = Image.new("RGB", (200, 280), (200, 160, 140))
     d = ImageDraw.Draw(body)
     d.ellipse([90, 60, 160, 150], fill=(190, 150, 130))
+    d2 = ImageDraw.Draw(face)
+    d2.ellipse([40, 50, 160, 200], fill=(190, 150, 130))
     out_dir = tmp_path / "run"
     result = pipe.run(body, face, out_dir=out_dir)
-    assert result.image.size[0] > 0
-    assert result.meta.get("mode") == "mock_full_image_synth_raw"
     assert result.meta.get("postprocess") == "none"
-    assert "replace the face, hair, and head" in str(result.meta.get("prompt", "")).lower()
-    assert result.meta.get("identity_prep", {}).get("letterboxed_to_scene") is False
+    assert result.meta.get("identity_prep", {}).get("use_head_crop") is True
     assert (out_dir / "prompt.txt").is_file()

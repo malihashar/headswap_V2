@@ -4,12 +4,12 @@ pipeline: krea2_full_image_synth
 # Experimental: full-image Krea2 Identity Edit with ZERO post-localization.
 # Does NOT modify configs/krea2_identity_edit.yaml (localized production path).
 #
-# Identity-path design (see pipeline docstring):
-#   - Face-filled identity canvas (NOT letterboxed into scene) — fit_mode handles AR
-#   - Replace head/face/hair prompt (trained swap vocabulary)
+# Identity-path design:
+#   - Landmark-based FULL HEAD crop (hair/beard/ears/neck) — not tight face box
+#   - Face-filled square canvas (fit_mode handles AR vs scene)
+#   - Replace head/face/hair prompt
 #   - ref_boost high on image-2; ref_boost_a neutral on scene
-#   - grounding_px 768 for stronger edit adherence on replacement
-#   - ref_boost_mask focuses image-2 attention on the face
+#   - No stitch/freeze/blend after generation (cannot restore original hair)
 
 unet_name: krea2_turbo_fp8_scaled.safetensors
 clip_name: qwen3vl_4b_fp8_scaled.safetensors
@@ -37,21 +37,19 @@ torch_compile: false
 save_debug: true
 verbose: true
 
-# Image-2 identity boost (author/community strong range ~2–6).
-# Image-1 scene boost stays neutral — boosting scene locks target geometry.
 ref_boost: 5.0
 ref_boost_a: 1.0
-# Docs: lower grounding → stronger edit adherence; higher → more ref likeness.
-# For replacement edits, 768 balances change vs likeness better than 1024.
 grounding_px: 768
 fit_mode: fit
 max_dim: 1024
 div_by: 16
 
-# Face-dominant identity canvas (critical — do not letterbox into scene).
+# Full-head identity canvas
+identity_use_head_crop: true
+identity_head_fill: 0.88
 identity_long_side: 768
 identity_square_fill: true
-identity_fill_frac: 0.92
+identity_fill_frac: 0.90
 identity_white_bg: true
 use_ref_boost_mask: true
 
@@ -59,7 +57,7 @@ use_ref_boost_mask: true
 face_select_policy: largest
 face_index: 0
 
-# Tight identity crop — match production krea2 pads (include donor hair, no jersey).
+# Legacy face-pad path only (identity_use_head_crop: false).
 face_side_pad: 0.22
 face_top_pad: 0.70
 face_bot_pad: 0.12
