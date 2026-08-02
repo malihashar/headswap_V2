@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -11,12 +12,17 @@ import numpy as np
 
 from headswap.inswap.engines.base import DetectedFace, SwapEngine, SwapEngineResult
 
-# Public mirror used by FaceFusion / many OSS face-swap projects.
-INSWAPPER_URL = (
-    "https://github.com/facefusion/facefusion-assets/releases/download/models/"
-    "inswapper_128.onnx"
+# FaceFusion renamed the release tag from ``models`` → ``models-3.0.0`` (old URL 404s).
+# Keep multiple mirrors so Colab stays resilient.
+INSWAPPER_URLS: tuple[str, ...] = (
+    "https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/inswapper_128.onnx",
+    "https://huggingface.co/crw-dev/Deepinsightinswapper/resolve/main/inswapper_128.onnx",
+    "https://huggingface.co/evenedge/face-swap/resolve/main/inswapper_128.onnx",
+    "https://huggingface.co/mikestealth/inswapper/resolve/main/inswapper_128.onnx",
 )
 INSWAPPER_FILENAME = "inswapper_128.onnx"
+# Official InSwapper-128 is ~554–555 MB; reject truncated HTML/error bodies.
+_MIN_MODEL_BYTES = 100_000_000
 
 
 def download_inswapper_model(cache_dir: Path, *, force: bool = False) -> Path:
@@ -24,14 +30,73 @@ def download_inswapper_model(cache_dir: Path, *, force: bool = False) -> Path:
     models = Path(cache_dir) / "models"
     models.mkdir(parents=True, exist_ok=True)
     dest = models / INSWAPPER_FILENAME
-    if dest.is_file() and dest.stat().st_size > 1_000_000 and not force:
+    if dest.is_file() and dest.stat().st_size > _MIN_MODEL_BYTES and not force:
         return dest
-    tmp = dest.with_suffix(".onnx.partial")
-    print(f"[inswapper] downloading {INSWAPPER_FILENAME} → {dest}", flush=True)
-    urllib.request.urlretrieve(INSWAPPER_URL, tmp)
-    tmp.replace(dest)
-    return dest
+    if dest.is_file():
+        dest.unlink()
 
+    errors: list[str] = []
+
+    # Prefer huggingface_hub when present (handles HF Xet / redirects cleanly).
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore
+
+        for repo_id, filename in (
+            ("crw-dev/Deepinsightinswapper", "inswapper_128.onnx"),
+            ("evenedge/face-swap", "inswapper_128.onnx"),
+            ("mikestealth/inswapper", "inswapper_128.onnx"),
+        ):
+            try:
+                print(f"[inswapper] hf_hub_download {repo_id}/{filename}…", flush=True)
+                cached = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    local_dir=str(models),
+                    local_dir_use_symlinks=False,
+                )
+                cached_path = Path(cached)
+                if cached_path.is_file() and cached_path.stat().st_size > _MIN_MODEL_BYTES:
+                    if cached_path.resolve() != dest.resolve():
+                        shutil.copy2(cached_path, dest)
+                    print(
+                        f"[inswapper] ready {dest} ({dest.stat().st_size / 1e6:.1f} MB)",
+                        flush=True,
+                    )
+                    return dest
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"hf:{repo_id}: {exc}")
+    except ImportError:
+        errors.append("huggingface_hub not installed")
+
+    tmp = dest.with_suffix(".onnx.partial")
+    for url in INSWAPPER_URLS:
+        try:
+            print(f"[inswapper] downloading {url} → {dest}", flush=True)
+            if tmp.exists():
+                tmp.unlink()
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "headswap-v2-inswapper/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as out:
+                shutil.copyfileobj(resp, out)
+            if tmp.stat().st_size <= _MIN_MODEL_BYTES:
+                raise RuntimeError(f"download too small ({tmp.stat().st_size} bytes)")
+            tmp.replace(dest)
+            print(
+                f"[inswapper] ready {dest} ({dest.stat().st_size / 1e6:.1f} MB)",
+                flush=True,
+            )
+            return dest
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"url:{url}: {exc}")
+            if tmp.exists():
+                tmp.unlink()
+
+    raise RuntimeError(
+        "Failed to download inswapper_128.onnx from all mirrors:\n  - "
+        + "\n  - ".join(errors)
+    )
 
 def _onnx_providers(device: str) -> list[str]:
     providers = ["CPUExecutionProvider"]
