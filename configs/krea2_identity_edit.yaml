@@ -216,9 +216,10 @@ isolate_crop_pad: 14
 multi_stitch_feather_px: 14
 multi_stitch_mask_dilate_px: 14
 multi_post_color_match_strength: 0.55
-# SPP-CC: OFF — use full-bleed resize_contain like single-person.
-# Legacy multi stickers: set true and single_person_parity: false.
-identity_scale_match: false
+# Match donor face height to measured scene face height via place_face_at_height_frac.
+# Re-enabled under SPP (krea2_crop) for oversized-head A/B — single-person still
+# uses resize_contain (scale_match requires multi_person or isolate_selected).
+identity_scale_match: true
 identity_scale_factor: 0.95
 identity_hair_height_boost: 1.30
 clamp_edited_head_scale: true

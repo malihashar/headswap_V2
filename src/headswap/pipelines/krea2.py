@@ -742,10 +742,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             face_h_frac_native = float(selected_face.height) / float(crop_h)
             face_h_frac_scene = min(0.70, face_h_frac_native * hair_boost)
 
-        # SPP-CC: always full-bleed resize_contain (same as single-person).
+        # Match donor face-to-canvas ratio to measured scene face height.
+        # Allowed under SPP (krea2_crop) for oversized-head A/B — gated only by
+        # identity_scale_match + multi/isolate, not by single_person_parity.
         scale_match = (
-            (not spp)
-            and bool(self.cfg.get("identity_scale_match", True))
+            bool(self.cfg.get("identity_scale_match", True))
             and (multi_person or isolate_selected)
         )
         scale_factor = float(self.cfg.get("identity_scale_factor", 0.90))

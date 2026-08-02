@@ -43,7 +43,7 @@ def test_production_config_is_single_path_multi():
     assert cfg["multi_person_edit_mode"] == "crop_stitch"
     assert cfg["single_person_parity"] is True
     assert cfg["clamp_crop_away_neighbors"] is True
-    assert cfg["identity_scale_match"] is False
+    assert cfg["identity_scale_match"] is True
     assert cfg["face_white_bg"] is False
     assert cfg["multi_extra_prompt"] is False
     # align_paste knobs may remain for A/B but must not be the default.
@@ -105,6 +105,40 @@ def test_multi_build_matches_single_conditioning_recipe():
     ncx = 0.5 * (faces[0].x0 + faces[0].x1)
     ncy = 0.5 * (faces[0].y0 + faces[0].y1)
     assert not (box[0] <= ncx < box[2] and box[1] <= ncy < box[3])
+
+
+def test_spp_identity_scale_match_uses_place_face_at_height_frac():
+    """Under SPP, identity_scale_match must drive place_face_at_height_frac on multi."""
+    pipe = _Pipe(identity_scale_match=True)
+    body = Image.new("RGB", (480, 320), (25, 25, 25))
+    d = ImageDraw.Draw(body)
+    d.ellipse([40, 60, 120, 160], fill=(200, 160, 140))
+    d.ellipse([300, 60, 380, 160], fill=(190, 150, 130))
+    faces = [
+        FaceBox(40, 60, 120, 160, 0.9),
+        FaceBox(300, 60, 380, 160, 0.9),
+    ]
+    donor = Image.new("RGB", (96, 120), (10, 10, 10))
+    ImageDraw.Draw(donor).ellipse([10, 10, 86, 100], fill=(80, 40, 20))
+
+    multi = pipe._build_scene_person(
+        body,
+        donor,
+        faces[1],
+        div_by=8,
+        use_tight=False,
+        top_ext=1.55,
+        side_ext=0.60,
+        bot_ext=0.40,
+        expand_px=18,
+        crop_pad=12,
+        all_faces=faces,
+        isolate_selected=False,
+    )
+    assert multi["diag"]["single_person_parity"] is True
+    assert multi["diag"]["identity_scale_match"] is True
+    assert multi["diag"]["person_prep"] == "place_face_at_height_frac"
+    assert multi["diag"]["face_height_frac_scene"] > 0.0
 
 
 def test_clamp_ignores_selected_duplicates_but_excludes_real_neighbor():
