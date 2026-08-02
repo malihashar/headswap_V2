@@ -41,8 +41,24 @@ class REFacePipeline(BasePipeline):
         body.convert("RGB").save(body_path)
         face.convert("RGB").save(face_path)
 
-        repo_root = Path(__file__).resolve().parents[2]
+        # reface.py → pipelines → headswap → src → repo root
+        repo_root = Path(__file__).resolve().parents[3]
         script = repo_root / "scripts" / "run_reface_swap.py"
+        if not script.is_file():
+            # Fallback: walk up looking for the runner script.
+            here = Path(__file__).resolve().parent
+            script = None
+            for parent in [here, *here.parents]:
+                candidate = parent / "scripts" / "run_reface_swap.py"
+                if candidate.is_file():
+                    script = candidate
+                    repo_root = parent
+                    break
+            if script is None:
+                raise PipelineRunError(
+                    "Cannot find scripts/run_reface_swap.py relative to "
+                    f"{Path(__file__).resolve()}"
+                )
         cmd = [
             sys.executable,
             str(script),

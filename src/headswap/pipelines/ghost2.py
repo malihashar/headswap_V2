@@ -42,8 +42,23 @@ class Ghost2HeadSwapPipeline(BasePipeline):
         body.convert("RGB").save(body_path)
         face.convert("RGB").save(face_path)
 
-        repo_root = Path(__file__).resolve().parents[2]
+        # ghost2.py → pipelines → headswap → src → repo root
+        repo_root = Path(__file__).resolve().parents[3]
         script = repo_root / "scripts" / "run_ghost2_swap.py"
+        if not script.is_file():
+            here = Path(__file__).resolve().parent
+            script = None
+            for parent in [here, *here.parents]:
+                candidate = parent / "scripts" / "run_ghost2_swap.py"
+                if candidate.is_file():
+                    script = candidate
+                    repo_root = parent
+                    break
+            if script is None:
+                raise PipelineRunError(
+                    "Cannot find scripts/run_ghost2_swap.py relative to "
+                    f"{Path(__file__).resolve()}"
+                )
         cmd = [
             sys.executable,
             str(script),
