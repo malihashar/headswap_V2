@@ -7,11 +7,14 @@ from headswap.pipelines.base import BasePipeline, MockHeadSwapPipeline
 from headswap.pipelines.klein import KleinMaskCropPipeline
 from headswap.pipelines.kontext import FluxKontextPipeline
 from headswap.pipelines.krea2 import Krea2IdentityEditPipeline
-from headswap.pipelines.krea2_full_image_synth import Krea2FullImageSynthPipeline
 from headswap.pipelines.omnigen2 import OmniGen2PipelineRunner
 from headswap.pipelines.qwen import QwenBaselinePipeline, QwenImprovedPipeline
 
 # Optional experimental pipelines — missing modules must not break imports.
+try:
+    from headswap.pipelines.krea2_full_image_synth import Krea2FullImageSynthPipeline
+except ImportError:  # pragma: no cover
+    Krea2FullImageSynthPipeline = None  # type: ignore[misc, assignment]
 try:
     from headswap.pipelines.ghost2 import Ghost2HeadSwapPipeline
 except ImportError:  # pragma: no cover
@@ -32,13 +35,14 @@ PIPELINES: dict[str, type[BasePipeline]] = {
     "flux_kontext": FluxKontextPipeline,
     "krea2": Krea2IdentityEditPipeline,
     "krea2_identity_edit": Krea2IdentityEditPipeline,
-    "krea2_full_image_synth": Krea2FullImageSynthPipeline,
     "qwen_baseline": QwenBaselinePipeline,
     "qwen_improved": QwenImprovedPipeline,
     "qwen_improved_mask_crop": QwenImprovedPipeline,
     "omnigen2": OmniGen2PipelineRunner,
     "mock": MockHeadSwapPipeline,
 }
+if Krea2FullImageSynthPipeline is not None:
+    PIPELINES["krea2_full_image_synth"] = Krea2FullImageSynthPipeline
 if Ghost2HeadSwapPipeline is not None:
     PIPELINES["ghost2"] = Ghost2HeadSwapPipeline
     PIPELINES["ghost2_head_swap"] = Ghost2HeadSwapPipeline
