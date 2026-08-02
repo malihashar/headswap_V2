@@ -140,13 +140,87 @@ def test_pipeline_group_photo_only_selected_changes(tmp_path: Path):
     assert result.meta["faces_detected"] == 2
     assert result.meta["full_scene_regenerated"] is False
     assert (tmp_path / "run" / "result.png").is_file()
+    assert (tmp_path / "run" / "inswapper_only.png").is_file()
     assert (tmp_path / "run" / "intermediates" / "01_detection.png").is_file()
-    assert (tmp_path / "run" / "intermediates" / "09_difference.png").is_file()
+    assert (tmp_path / "run" / "intermediates" / "07_inswapper_blended.png").is_file()
+    assert (tmp_path / "run" / "intermediates" / "15_difference.png").is_file()
+    assert result.meta.get("krea2_refine_requested") is False
 
     out = np.asarray(result.image)[:, :, ::-1]  # RGB→BGR
     # Face B region should differ; far background should match original.
     assert not np.array_equal(out[30:50, 140:170], body[30:50, 140:170])
     assert np.array_equal(out[100:110, 90:100], body[100:110, 90:100])
+
+
+def test_hybrid_krea2_refine_mock(tmp_path: Path):
+    """InSwapper + mock Krea2 refine writes head-crop intermediates."""
+    body = np.full((120, 160, 3), 40, dtype=np.uint8)
+    body[30:80, 50:110] = (100, 100, 100)
+    selected = _face((50, 30, 110, 80))
+    source = _face((0, 0, 40, 40))
+
+    pipe = InSwapPipeline(
+        cache_dir=tmp_path / "cache",
+        engine=_FakeEngine(),
+        restorer="none",
+        device="cpu",
+        color_match_strength=0.0,
+        krea2_refine=True,
+        krea2_force_mock=True,
+    )
+    pipe.detector = _FakeDetector([selected], source)  # type: ignore[assignment]
+    pipe._loaded = True
+    # Refiner load still needed for mock Krea2
+    pipe.krea2_refiner.load()
+
+    body_pil = Image.fromarray(body[:, :, ::-1])
+    face_pil = Image.fromarray(np.full((64, 64, 3), 200, dtype=np.uint8))
+    result = pipe.run(
+        body_pil,
+        face_pil,
+        out_dir=tmp_path / "hybrid",
+        save_intermediates=True,
+        krea2_refine=True,
+    )
+    assert result.meta.get("krea2_refine_requested") is True
+    assert result.meta.get("krea2_refine_applied") is True
+    assert result.meta.get("pipeline") == "inswap_hybrid"
+    inter = tmp_path / "hybrid" / "intermediates"
+    assert (inter / "08_inswapper_result.png").is_file()
+    assert (inter / "11_head_crop_for_krea2.png").is_file()
+    assert (inter / "12_krea2_refined_head.png").is_file() or (
+        inter / "14_final_hybrid.png"
+    ).is_file()
+
+
+def test_hybrid_can_disable_per_run(tmp_path: Path):
+    body = np.full((80, 80, 3), 30, dtype=np.uint8)
+    body[20:60, 20:60] = 90
+    selected = _face((20, 20, 60, 60))
+    source = _face((0, 0, 30, 30))
+    pipe = InSwapPipeline(
+        cache_dir=tmp_path / "cache",
+        engine=_FakeEngine(),
+        restorer="none",
+        device="cpu",
+        krea2_refine=True,
+        krea2_force_mock=True,
+    )
+    pipe.detector = _FakeDetector([selected], source)  # type: ignore[assignment]
+    pipe._loaded = True
+    pipe.krea2_refiner.load()
+
+    body_pil = Image.fromarray(body[:, :, ::-1])
+    face_pil = Image.fromarray(np.full((32, 32, 3), 180, dtype=np.uint8))
+    off = pipe.run(
+        body_pil,
+        face_pil,
+        out_dir=tmp_path / "off",
+        krea2_refine=False,
+        save_intermediates=False,
+    )
+    assert off.meta.get("krea2_refine_requested") is False
+    assert off.meta.get("pipeline") == "inswap"
 
 
 def test_difference_map_and_overlay():

@@ -1,5 +1,5 @@
-# Deterministic local face swap (InsightFace InSwapper).
-# Separate experiment from Krea2 — does not regenerate the scene.
+# Hybrid face swap: InsightFace InSwapper (primary) + optional Krea2 head refine.
+# InSwapper transfers facial identity; Krea2 completes hair/beard/ears/hairline.
 name: inswapper
 pipeline: inswapper
 
@@ -14,14 +14,23 @@ body_face_index: 0
 source_face_policy: largest
 source_face_index: 0
 
-# Blend / lighting
+# Blend / lighting (InSwapper stage)
 blend_strength: 1.0
 color_match_strength: 0.25
 reblend_after_engine: true
 
-# Optional face-only restoration (none | gfpgan | codeformer)
+# Optional face-only restoration before Krea2 (none | gfpgan | codeformer)
 restorer: none
 restore_fidelity: 0.5
+
+# --- Hybrid Krea2 head refine (A/B toggle) ---
+# false = InSwapper only (fast, face ID strong, donor hair may remain)
+# true  = InSwapper then Krea2 head completion (needs ComfyUI + Krea2 nodes)
+krea2_refine: false
+krea2_refine_required: false   # if true, fail when Comfy/Krea2 missing
+krea2_force_mock: false        # CI / offline: use MockHeadSwapPipeline
+krea2_steps: 8
+krea2_seed: 46
 
 save_debug: true
 verbose: false

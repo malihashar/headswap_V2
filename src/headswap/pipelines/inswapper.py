@@ -1,6 +1,6 @@
-"""BasePipeline adapter for the modular InsightFace InSwapper experiment.
+"""BasePipeline adapter for InsightFace InSwapper (+ optional Krea2 head refine).
 
-Does not touch Krea2. Use configs/inswapper.yaml or create_pipeline(pipeline=inswapper).
+InSwapper is always primary. Set ``krea2_refine: true`` for the hybrid path.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from headswap.pipelines.base import BasePipeline, PipelineResult
 
 
 class InSwapperPipeline(BasePipeline):
-    """Local ArcFace + InSwapper face swap (deterministic, face-only)."""
+    """Local ArcFace + InSwapper face swap, optional Krea2 head completion."""
 
     name = "inswapper"
 
@@ -32,6 +32,16 @@ class InSwapperPipeline(BasePipeline):
             color_match_strength=float(cfg.get("color_match_strength", 0.25)),
             restore_fidelity=float(cfg.get("restore_fidelity", 0.5)),
             reblend_after_engine=bool(cfg.get("reblend_after_engine", True)),
+            krea2_refine=bool(cfg.get("krea2_refine", False)),
+            krea2_force_mock=bool(cfg.get("krea2_force_mock", False)),
+            krea2_required=bool(cfg.get("krea2_refine_required", False)),
+            krea2_steps=(
+                int(cfg["krea2_steps"]) if cfg.get("krea2_steps") is not None else None
+            ),
+            krea2_seed=(
+                int(cfg["krea2_seed"]) if cfg.get("krea2_seed") is not None else None
+            ),
+            krea2_runtime=runtime,
         )
         self._loaded = False
 
@@ -51,6 +61,7 @@ class InSwapperPipeline(BasePipeline):
             source_face_policy=str(self.cfg.get("source_face_policy", "largest")),
             source_face_index=int(self.cfg.get("source_face_index", 0)),
             save_intermediates=bool(self.cfg.get("save_debug", True)),
+            krea2_refine=bool(self.cfg.get("krea2_refine", False)),
         )
         return PipelineResult(
             image=result.image,
