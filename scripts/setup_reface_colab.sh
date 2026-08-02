@@ -48,32 +48,68 @@ export WEIGHTS_CACHE="$WEIGHTS_CACHE"
 export REFACE_ROOT="$REFACE_ROOT"
 python - <<'PY'
 import os
+import shutil
 from pathlib import Path
+
 from huggingface_hub import hf_hub_download, snapshot_download
 
 cache = Path(os.environ.get("WEIGHTS_CACHE", "/content/drive/MyDrive/headswap_reface/weights"))
 cache.mkdir(parents=True, exist_ok=True)
 reface = Path(os.environ.get("REFACE_ROOT", "/content/REFace"))
+hf_dir = cache / "hf"
+hf_dir.mkdir(parents=True, exist_ok=True)
 
 print("→ downloading REFace last.ckpt (≈6GB, Drive-cached)…")
 ckpt = hf_hub_download(
     repo_id="Sanoojan/REFace",
     filename="last.ckpt",
-    local_dir=str(cache / "hf"),
+    local_dir=str(hf_dir),
     local_dir_use_symlinks=False,
 )
 print("✓", ckpt)
 
-print("→ downloading Other_dependencies…")
-deps = snapshot_download(
-    repo_id="Sanoojan/REFace",
-    allow_patterns=["Other_dependencies/**"],
-    local_dir=str(cache / "hf"),
-    local_dir_use_symlinks=False,
-)
-print("✓", deps)
+print("→ downloading Other_dependencies (face parsing, arcface, …)…")
+try:
+    snapshot_download(
+        repo_id="Sanoojan/REFace",
+        allow_patterns=["Other_dependencies/**"],
+        local_dir=str(hf_dir),
+        local_dir_use_symlinks=False,
+    )
+except Exception as exc:
+    print(f"⚠ snapshot_download Other_dependencies failed: {exc}")
 
-# Wire into REFace tree
+# Explicit face-parsing weight (required for inference).
+face_parse_rel = "Other_dependencies/face_parsing/79999_iter.pth"
+try:
+    face_parse = hf_hub_download(
+        repo_id="Sanoojan/REFace",
+        filename=face_parse_rel,
+        local_dir=str(hf_dir),
+        local_dir_use_symlinks=False,
+    )
+    print("✓ face parsing", face_parse)
+except Exception as exc:
+    print(f"⚠ HF face_parsing download failed: {exc}")
+    face_parse = None
+
+# ArcFace + DLIB if present on HF
+for rel in (
+    "Other_dependencies/arcface/model_ir_se50.pth",
+    "Other_dependencies/DLIB_landmark_det/shape_predictor_68_face_landmarks.dat",
+):
+    try:
+        p = hf_hub_download(
+            repo_id="Sanoojan/REFace",
+            filename=rel,
+            local_dir=str(hf_dir),
+            local_dir_use_symlinks=False,
+        )
+        print("✓", p)
+    except Exception as exc:
+        print(f"⚠ optional miss {rel}: {exc}")
+
+# Wire checkpoints
 ckpt_dir = reface / "models" / "REFace" / "checkpoints"
 ckpt_dir.mkdir(parents=True, exist_ok=True)
 target_ckpt = ckpt_dir / "last.ckpt"
@@ -81,35 +117,69 @@ if not target_ckpt.exists():
     try:
         target_ckpt.symlink_to(ckpt)
     except Exception:
-        import shutil
         shutil.copy2(ckpt, target_ckpt)
-# Scripts historically look for saved.ckpt
 saved = ckpt_dir / "saved.ckpt"
 if not saved.exists():
     try:
         saved.symlink_to(target_ckpt.resolve())
     except Exception:
-        import shutil
         shutil.copy2(target_ckpt, saved)
 
-# Other_dependencies
-src_deps = Path(deps) / "Other_dependencies"
+# Merge Other_dependencies into REFace tree (never skip if dest partially exists).
+src_deps = hf_dir / "Other_dependencies"
 dst_deps = reface / "Other_dependencies"
-if src_deps.is_dir():
-    if dst_deps.exists() or dst_deps.is_symlink():
-        if dst_deps.is_symlink() or dst_deps.is_file():
-            dst_deps.unlink()
+dst_deps.mkdir(parents=True, exist_ok=True)
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() or dst.is_symlink():
+        return
+    try:
+        dst.symlink_to(src.resolve())
+    except Exception:
+        if src.is_dir():
+            shutil.copytree(src, dst)
         else:
-            # Keep existing; overlay missing files via symlink of whole tree if empty-ish
-            pass
-    if not dst_deps.exists():
+            shutil.copy2(src, dst)
+
+if src_deps.is_dir():
+    for path in src_deps.rglob("*"):
+        if path.is_file():
+            rel = path.relative_to(src_deps)
+            _link_or_copy(path, dst_deps / rel)
+
+# Ensure face parsing file specifically
+parse_dst = dst_deps / "face_parsing" / "79999_iter.pth"
+if not parse_dst.is_file():
+    if face_parse and Path(face_parse).is_file():
+        _link_or_copy(Path(face_parse), parse_dst)
+    else:
+        # Google Drive fallback (official README link).
+        print("→ gdown face parsing 79999_iter.pth …")
         try:
-            dst_deps.symlink_to(src_deps)
-        except Exception:
-            import shutil
-            shutil.copytree(src_deps, dst_deps)
+            import gdown  # type: ignore
+        except ImportError:
+            import subprocess, sys
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "gdown"])
+            import gdown  # type: ignore
+        parse_dst.parent.mkdir(parents=True, exist_ok=True)
+        gdown.download(
+            id="154JgKpzCPW82qINcVieuPH3fZ2e0P812",
+            output=str(parse_dst),
+            quiet=False,
+        )
+
+if parse_dst.is_file() and parse_dst.stat().st_size > 1_000_000:
+    print(f"✓ face parsing ready ({parse_dst.stat().st_size} bytes)")
+else:
+    raise SystemExit(
+        f"Face parsing weight still missing at {parse_dst}. "
+        "Re-run setup or download manually."
+    )
 print("✓ REFace weights linked")
 PY
+
+pip install -q gdown || true
 
 # DLIB landmark fallback if HF folder incomplete
 DLIB_DIR="$REFACE_ROOT/Other_dependencies/DLIB_landmark_det"
