@@ -4,14 +4,12 @@ pipeline: krea2_full_image_synth
 # Experimental: full-image Krea2 Identity Edit with ZERO post-localization.
 # Does NOT modify configs/krea2_identity_edit.yaml (localized production path).
 #
-# Settings follow conradlocke/krea2-identity-edit recommendations for
-# maximizing identity transfer on full-frame two-ref edits:
-#   Turbo + CFG 1.0
-#   12 steps (upper end of 8–12; more steps → face detail)
-#   ref_boost 4.0 (author strong-likeness starting point)
-#   grounding_px 1024 (higher → stronger identity/likeness)
-#   fit_mode fit (v1.2 geometry)
-#   long side 1024 (~1MP class; multi-person card suggests ~1–1.5MP)
+# Identity-path design (see pipeline docstring):
+#   - Face-filled identity canvas (NOT letterboxed into scene) — fit_mode handles AR
+#   - Replace head/face/hair prompt (trained swap vocabulary)
+#   - ref_boost high on image-2; ref_boost_a neutral on scene
+#   - grounding_px 768 for stronger edit adherence on replacement
+#   - ref_boost_mask focuses image-2 attention on the face
 
 unet_name: krea2_turbo_fp8_scaled.safetensors
 clip_name: qwen3vl_4b_fp8_scaled.safetensors
@@ -39,28 +37,34 @@ torch_compile: false
 save_debug: true
 verbose: true
 
-# Identity-max dials (distinct from localized crop defaults: 3.5 / 768 / 8).
-ref_boost: 4.0
-ref_boost_a: 1.2
-grounding_px: 1024
+# Image-2 identity boost (author/community strong range ~2–6).
+# Image-1 scene boost stays neutral — boosting scene locks target geometry.
+ref_boost: 5.0
+ref_boost_a: 1.0
+# Docs: lower grounding → stronger edit adherence; higher → more ref likeness.
+# For replacement edits, 768 balances change vs likeness better than 1024.
+grounding_px: 768
 fit_mode: fit
 max_dim: 1024
 div_by: 16
+
+# Face-dominant identity canvas (critical — do not letterbox into scene).
+identity_long_side: 768
+identity_square_fill: true
+identity_fill_frac: 0.92
+identity_white_bg: true
+use_ref_boost_mask: true
 
 # Target face selection for multi-person scenes.
 face_select_policy: largest
 face_index: 0
 
-# Identity reference crop pads (head only — no shoulders).
-face_side_pad: 0.35
-face_top_pad: 0.65
-face_bot_pad: 0.15
+# Tight identity crop — match production krea2 pads (include donor hair, no jersey).
+face_side_pad: 0.22
+face_top_pad: 0.70
+face_bot_pad: 0.12
 
-# Optional VLM caption (off by default — heuristic scene describe is enough).
 use_vlm_caption: false
-
-# Optional override appended after auto scene description.
-# Leave null to use the built-in identity-replacement instruction.
 instruction_suffix: null
 prompt_prefix: null
 

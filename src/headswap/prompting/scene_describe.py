@@ -389,30 +389,41 @@ def build_identity_edit_prompt(
     *,
     instruction_suffix: str | None = None,
 ) -> str:
-    """Assemble a full-image identity-replacement prompt from scene facts."""
+    """Assemble a full-image head/face/hair *replacement* prompt.
+
+    Matches the trained Identity Edit swap vocabulary (replace face/hair/head
+    from image 2) and the production ``krea2_identity_edit.yaml`` wording.
+    Intentionally does **not** describe the target person's hair/beard/jaw as
+    things to preserve — that locks scene identity geometry.
+    """
     scene_bits = [
         f"Photograph description: {desc.composition}.",
         f"Lighting: {desc.lighting}.",
         f"Camera: {desc.camera}.",
         f"Background: {desc.background_guess}.",
-        f"Target subject ({desc.selected_role}): {desc.pose_guess}, "
-        f"{desc.expression_guess}, wearing {desc.clothing_guess}, "
-        f"with {desc.hair_guess}.",
+        f"Edit target: {desc.selected_role} — keep {desc.pose_guess} and "
+        f"{desc.expression_guess}; keep body clothing ({desc.clothing_guess}).",
         f"Other people: {desc.other_people}.",
     ]
     if desc.vlm_caption:
         scene_bits.insert(0, f"Scene caption: {desc.vlm_caption}.")
 
     suffix = instruction_suffix or (
-        "Replace only the selected person's identity with the reference person in "
-        "image 2 while preserving the pose, facial expression, head size, head "
-        "orientation, hairstyle when possible, clothing, lighting, composition, "
-        "camera angle, background, and all other people. Keep the result looking "
-        "like a real photograph. Do not restyle the scene."
+        f"Replace the face, hair, and head of {desc.selected_role} in image 1 "
+        "with the person from image 2. Preserve the exact facial identity of "
+        "image 2 — bone structure, jawline, facial hair / beard or clean-shaven "
+        "look, eyebrows, eyes, nose, mouth, skin, hairline, hairstyle, hair "
+        "length, and hair color. Completely remove the original face, facial "
+        "hair, and hair of that person in image 1; do not blend them with image 2. "
+        "CRITICAL: copy the facial expression from image 1 only — smile / no-smile, "
+        "mouth shape, eye gaze, and micro-expressions must stay from image 1, "
+        "never from image 2. Keep body, clothing, pose, head rotation, head size, "
+        "camera angle, lighting, and background from image 1. If other people are "
+        "visible, leave them completely unchanged. Photorealistic, natural skin, "
+        "lighting matched to image 1."
     )
     target_line = (
-        f"Image 1 is the full scene. Image 2 is the identity reference. "
-        f"Edit image 1 so that only {desc.selected_role} receives the identity "
-        f"from image 2."
+        "Image 1 is the full scene. Image 2 is the identity reference. "
+        f"Perform a head/face/hair swap on {desc.selected_role} only."
     )
     return " ".join(scene_bits + [target_line, suffix]).strip()

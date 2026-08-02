@@ -68,6 +68,12 @@ def resize_contain(
     return out
 
 
+def identity_content_frac(im: Image.Image, *, thresh: float = 12.0) -> float:
+    """Fraction of pixels that are not near-black (identity signal occupancy)."""
+    arr = np.asarray(im.convert("RGB"))
+    return float((arr.max(axis=-1) > thresh).mean())
+
+
 def place_face_at_height_frac(
     face: Image.Image,
     canvas_size: tuple[int, int],
@@ -1310,6 +1316,76 @@ def face_on_white_background(
             out = rgb.astype(np.float32) * alpha[..., None] + white * (1.0 - alpha[..., None])
             return np_to_pil(np.clip(out, 0, 255))
     return face.convert("RGB")
+
+
+def prepare_krea2_identity_person(
+    face: Image.Image,
+    cache_dir,
+    *,
+    long_side: int = 768,
+    div_by: int = 16,
+    top: float = 0.70,
+    bot: float = 0.12,
+    side: float = 0.22,
+    white_bg: bool = True,
+    square_fill: bool = True,
+    fill_frac: float = 0.92,
+) -> tuple[Image.Image, Image.Image, dict[str, float | int | bool | list[int]]]:
+    """
+    Build a face-dominant identity ref for Krea2 dual-ref conditioning.
+
+    Critical: do **not** letterbox the face into the full scene canvas. On wide
+    group photos that leaves ~20–30% identity pixels and mostly empty VAE tokens,
+    so scene geometry dominates. v1.2 ``fit_mode`` already handles mismatched
+    scene/person aspect ratios — pass a tight, high-res face canvas instead.
+    """
+    face_crop = crop_face_reference(
+        face,
+        cache_dir,
+        top=float(top),
+        bot=float(bot),
+        side=float(side),
+        include_shoulders=False,
+    )
+    person = face_crop.convert("RGB")
+    applied_white = False
+    if white_bg:
+        person = face_on_white_background(
+            person, cache_dir=cache_dir, force_ellipse=False
+        )
+        applied_white = True
+    side_px = int(long_side)
+    if square_fill:
+        person = fit_face_on_square(
+            person,
+            side_px,
+            fill_frac=float(fill_frac),
+            bg=(255, 255, 255) if applied_white else (0, 0, 0),
+            div_by=int(div_by),
+        )
+    else:
+        person = resize_long_side(person, side_px, div_by=int(div_by))
+    frac = identity_content_frac(person)
+    # For white-bg stickers, occupancy is near-white+face; use face detector area.
+    rgb = pil_to_rgb_np(person)
+    box = detect_best_face(rgb, cache_dir)
+    face_area_frac = 0.0
+    if box is not None:
+        face_area_frac = float(box.width * box.height) / float(
+            max(1, person.size[0] * person.size[1])
+        )
+    info: dict[str, float | int | bool | list[int]] = {
+        "person_size": list(person.size),
+        "face_crop_size": list(face_crop.size),
+        "identity_content_frac": round(frac, 4),
+        "identity_face_area_frac": round(face_area_frac, 4),
+        "identity_long_side": int(long_side),
+        "white_bg": bool(applied_white),
+        "square_fill": bool(square_fill),
+        "letterboxed_to_scene": False,
+        "identity_starved": bool(face_area_frac < 0.20 and frac < 0.40),
+    }
+    return person, face_crop, info
 
 
 def fit_face_on_square(

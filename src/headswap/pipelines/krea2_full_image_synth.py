@@ -3,13 +3,15 @@
 Isolated from the production localized pipeline. Regenerates the entire frame
 via dual-ref Krea2 Identity Edit and returns the raw model output as final.
 
-Official Identity Edit guidance used here (conradlocke/krea2-identity-edit):
-  - Turbo + CFG 1.0 for edits
-  - 10–12 steps: more steps favor face detail (we use 12)
-  - ref_boost ≈ 4 for strong likeness
-  - grounding_px 1024 for stronger identity/likeness
-  - fit geometry for mismatched AR
-  - ≤2MP; multi-person prefers ~1–1.5MP long-side sizing
+Identity-path fixes (evidence-backed):
+  - Do NOT letterbox identity into the scene canvas (was ~23% face pixels →
+    scene geometry dominated dual-ref VAE tokens). Pass a face-filled square;
+    v1.2 fit_mode handles AR mismatch.
+  - Prompt uses trained head/face/hair *replace* vocabulary; never asks to
+    preserve the target's hair/beard/jaw.
+  - ref_boost_a = 1.0 (do not boost scene); ref_boost elevated for image-2 ID.
+  - grounding_px = 768 (docs: lower → stronger edit adherence for changes).
+  - Optional ref_boost_mask focuses image-2 attention on the face ellipse.
 """
 from __future__ import annotations
 
@@ -25,8 +27,8 @@ from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 from headswap.pipelines.krea2 import Krea2IdentityEditPipeline, get_shared_krea2_runtime
 from headswap.preprocess import (
-    crop_face_reference,
-    resize_contain,
+    identity_face_boost_mask,
+    prepare_krea2_identity_person,
     resize_max_keep_ar,
 )
 from headswap.prompting.scene_describe import (
@@ -111,27 +113,42 @@ class Krea2FullImageSynthPipeline(BasePipeline):
                 prompt = f"{str(self.cfg['prompt_prefix']).strip()} {prompt}".strip()
 
             scene = resize_max_keep_ar(body_rgb, max_dim, div_by=div_by)
-            face_crop = crop_face_reference(
+            # Face-dominant identity canvas (NOT letterboxed into scene size).
+            person, face_crop, id_prep = prepare_krea2_identity_person(
                 face,
                 self.cache_dir,
-                top=float(self.cfg.get("face_top_pad", 0.65)),
-                bot=float(self.cfg.get("face_bot_pad", 0.15)),
-                side=float(self.cfg.get("face_side_pad", 0.35)),
-                include_shoulders=False,
+                long_side=int(self.cfg.get("identity_long_side", 768)),
+                div_by=div_by,
+                top=float(self.cfg.get("face_top_pad", 0.70)),
+                bot=float(self.cfg.get("face_bot_pad", 0.12)),
+                side=float(self.cfg.get("face_side_pad", 0.22)),
+                white_bg=bool(self.cfg.get("identity_white_bg", True)),
+                square_fill=bool(self.cfg.get("identity_square_fill", True)),
+                fill_frac=float(self.cfg.get("identity_fill_frac", 0.92)),
             )
-            # Dual-ref training layout: person ref same canvas as scene (contain).
-            person = resize_contain(
-                face_crop.convert("RGB"), scene.size, fill=(0, 0, 0)
-            )
+            ref_boost_mask = None
+            if bool(self.cfg.get("use_ref_boost_mask", True)):
+                ref_boost_mask = identity_face_boost_mask(person, self.cache_dir)
             timings["preprocessing"] = time.perf_counter() - t_pre
+
+            if id_prep.get("identity_starved"):
+                print(
+                    "[krea2_full_image_synth] WARNING identity canvas still weak: "
+                    f"{id_prep}",
+                    file=sys.__stdout__,
+                    flush=True,
+                )
 
             overlay = self._draw_face_overlay(body_rgb, selected, all_faces)
             print(
                 f"[krea2_full_image_synth] faces={len(all_faces)} "
                 f"selected={desc.selected_role} scene={scene.size} "
-                f"ref_boost={self.cfg.get('ref_boost')} "
+                f"person={person.size} id_frac={id_prep.get('identity_face_area_frac')} "
+                f"ref_boost={self.cfg.get('ref_boost')}/"
+                f"{self.cfg.get('ref_boost_a')} "
                 f"grounding_px={self.cfg.get('grounding_px')} "
-                f"steps={self.cfg.get('steps')}",
+                f"steps={self.cfg.get('steps')} "
+                f"ref_boost_mask={ref_boost_mask is not None}",
                 file=sys.__stdout__,
                 flush=True,
             )
@@ -151,7 +168,7 @@ class Krea2FullImageSynthPipeline(BasePipeline):
                 prompt=prompt,
                 edit_cache_info=edit_cache_info,
                 seed=int(self.cfg.get("seed", 46)),
-                ref_boost_mask=None,
+                ref_boost_mask=ref_boost_mask,
             )
             out = sample["edited"]
 
@@ -173,6 +190,13 @@ class Krea2FullImageSynthPipeline(BasePipeline):
                         "debug_faces_overlay": self._save_debug(
                             out_dir, "debug_faces_overlay.png", overlay
                         ),
+                        "debug_ref_boost_mask": (
+                            self._save_debug(
+                                out_dir, "debug_ref_boost_mask.png", ref_boost_mask
+                            )
+                            if ref_boost_mask is not None
+                            else None
+                        ),
                         "result_raw": self._save_debug(out_dir, "result_raw.png", out),
                     }.items()
                     if v
@@ -187,6 +211,7 @@ class Krea2FullImageSynthPipeline(BasePipeline):
                     "loras_loaded": list(load_meta.get("loras_loaded") or []),
                     "prompt": prompt,
                     "scene_description": desc.to_dict(),
+                    "identity_prep": id_prep,
                     "faces_detected": len(all_faces),
                     "selected_face": (
                         None
@@ -195,9 +220,10 @@ class Krea2FullImageSynthPipeline(BasePipeline):
                     ),
                     "scene_size": list(scene.size),
                     "person_size": list(person.size),
-                    "ref_boost": float(self.cfg.get("ref_boost", 4.0)),
+                    "ref_boost": float(self.cfg.get("ref_boost", 5.0)),
                     "ref_boost_a": float(self.cfg.get("ref_boost_a", 1.0)),
-                    "grounding_px": int(self.cfg.get("grounding_px", 1024)),
+                    "ref_boost_mask_used": bool(sample.get("ref_boost_mask_used")),
+                    "grounding_px": int(self.cfg.get("grounding_px", 768)),
                     "steps": int(self.cfg.get("steps", 12)),
                     "cfg": float(self.cfg.get("cfg", 1.0)),
                     "fit_mode": str(self.cfg.get("fit_mode", "fit")),

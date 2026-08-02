@@ -511,7 +511,10 @@ class MockHeadSwapPipeline(BasePipeline):
         t0: float,
     ) -> PipelineResult:
         """CPU stand-in: auto prompt + full-frame drift (no Comfy / Krea2)."""
-        from headswap.preprocess import resize_contain, resize_max_keep_ar
+        from headswap.preprocess import (
+            prepare_krea2_identity_person,
+            resize_max_keep_ar,
+        )
         from headswap.prompting.scene_describe import (
             build_identity_edit_prompt,
             describe_scene,
@@ -528,15 +531,18 @@ class MockHeadSwapPipeline(BasePipeline):
             cfg=self.cfg,
         )
         prompt = build_identity_edit_prompt(desc)
-        face_crop = crop_face_reference(
+        person, face_crop, id_prep = prepare_krea2_identity_person(
             face,
             self.cache_dir,
-            top=float(self.cfg.get("face_top_pad", 0.65)),
-            bot=float(self.cfg.get("face_bot_pad", 0.15)),
-            side=float(self.cfg.get("face_side_pad", 0.35)),
-            include_shoulders=False,
+            long_side=min(int(self.cfg.get("identity_long_side", 768)), 512),
+            div_by=div_by,
+            top=float(self.cfg.get("face_top_pad", 0.70)),
+            bot=float(self.cfg.get("face_bot_pad", 0.12)),
+            side=float(self.cfg.get("face_side_pad", 0.22)),
+            white_bg=bool(self.cfg.get("identity_white_bg", True)),
+            square_fill=bool(self.cfg.get("identity_square_fill", True)),
+            fill_frac=float(self.cfg.get("identity_fill_frac", 0.92)),
         )
-        person = resize_contain(face_crop.convert("RGB"), body_work.size, fill=(0, 0, 0))
 
         import numpy as np
 
@@ -580,14 +586,16 @@ class MockHeadSwapPipeline(BasePipeline):
             "postprocess": "none",
             "prompt": prompt,
             "scene_description": desc.to_dict(),
+            "identity_prep": id_prep,
             "faces_detected": len(all_faces),
             "selected_face": (
                 None
                 if selected is None
                 else [selected.x0, selected.y0, selected.x1, selected.y1]
             ),
-            "ref_boost": float(self.cfg.get("ref_boost", 4.0)),
-            "grounding_px": int(self.cfg.get("grounding_px", 1024)),
+            "ref_boost": float(self.cfg.get("ref_boost", 5.0)),
+            "ref_boost_a": float(self.cfg.get("ref_boost_a", 1.0)),
+            "grounding_px": int(self.cfg.get("grounding_px", 768)),
             "steps": int(self.cfg.get("steps", 12)),
             "features": {"comfy": False, "full_image_raw": True},
         }
