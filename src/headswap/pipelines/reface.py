@@ -16,6 +16,38 @@ from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 
 
+def _find_run_reface_script() -> Path:
+    """Locate scripts/run_reface_swap.py regardless of editable-install layout."""
+    candidates: list[Path] = []
+    env_repo = os.environ.get("HEADSWAP_REPO") or os.environ.get("REPO")
+    if env_repo:
+        candidates.append(Path(env_repo) / "scripts" / "run_reface_swap.py")
+    candidates.extend(
+        [
+            Path("/content/headswap_V2/scripts/run_reface_swap.py"),
+            Path(__file__).resolve().parents[3] / "scripts" / "run_reface_swap.py",
+            Path(__file__).resolve().parents[2] / "scripts" / "run_reface_swap.py",
+        ]
+    )
+    here = Path(__file__).resolve().parent
+    for parent in here.parents:
+        candidates.append(parent / "scripts" / "run_reface_swap.py")
+
+    seen: set[str] = set()
+    for cand in candidates:
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        if cand.is_file():
+            return cand.resolve()
+    raise PipelineRunError(
+        "Cannot find scripts/run_reface_swap.py. Tried:\n  - "
+        + "\n  - ".join(str(c) for c in list(seen)[:12])
+        + "\nRun: cd /content/headswap_V2 && git pull && pip install -e ."
+    )
+
+
 class REFacePipeline(BasePipeline):
     name = "reface"
 
@@ -41,24 +73,8 @@ class REFacePipeline(BasePipeline):
         body.convert("RGB").save(body_path)
         face.convert("RGB").save(face_path)
 
-        # reface.py → pipelines → headswap → src → repo root
-        repo_root = Path(__file__).resolve().parents[3]
-        script = repo_root / "scripts" / "run_reface_swap.py"
-        if not script.is_file():
-            # Fallback: walk up looking for the runner script.
-            here = Path(__file__).resolve().parent
-            script = None
-            for parent in [here, *here.parents]:
-                candidate = parent / "scripts" / "run_reface_swap.py"
-                if candidate.is_file():
-                    script = candidate
-                    repo_root = parent
-                    break
-            if script is None:
-                raise PipelineRunError(
-                    "Cannot find scripts/run_reface_swap.py relative to "
-                    f"{Path(__file__).resolve()}"
-                )
+        script = _find_run_reface_script()
+        print(f"[reface] using runner {script}", flush=True)
         cmd = [
             sys.executable,
             str(script),
