@@ -1,0 +1,18 @@
+name: ghost2_head_swap
+pipeline: ghost2_head_swap
+
+# Upstream checkout (Colab setup sets GHOST2_ROOT; this is the fallback).
+ghost2_root: /content/ghost-2.0
+
+# Body / scene long side before swap (0 = native resolution).
+output_long_side: 1024
+
+# Which body face to swap when multiple are detected.
+body_face_policy: largest   # largest | rightmost | leftmost | index
+body_face_index: 0
+
+# Optional Kandinsky post-inpaint (slower, more VRAM).
+use_kandi: false
+
+save_debug: false
+verbose: false
