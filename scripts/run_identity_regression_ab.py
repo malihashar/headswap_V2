@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Colab / local A/B harness for multi-person identity architectures.
 
-Exp A — production geometry lock (default):
+Exp A — production single-path multi (default):
+  multi_person_swap_mode: krea2_crop
+  single_person_parity: true
+
+Exp B — deprecated align_paste paste-only isolation:
   multi_person_swap_mode: align_paste
   align_paste_krea2_refine: false
-  align_paste_seamless_clone: true
 
-Exp B — legacy dual-ref crop (krea2_crop SPP):
-  multi_person_swap_mode: krea2_crop
-
-Exp C — geometry lock + Krea2 refine (no pose relock):
+Exp C — deprecated align_paste + Krea2 refine (no pose relock):
   align_paste_krea2_refine: true
   align_paste_pose_relock: false
 
@@ -40,20 +40,20 @@ def _cfg_for_exp(exp: str) -> dict:
     if exp == "A":
         base.update(
             {
-                "multi_person_swap_mode": "align_paste",
-                "align_paste_krea2_refine": False,
-                "align_paste_seamless_clone": True,
-                "align_paste_full_affine": True,
-            }
-        )
-    elif exp == "B":
-        base.update(
-            {
                 "multi_person_swap_mode": "krea2_crop",
                 "multi_person_edit_mode": "crop_stitch",
                 "single_person_parity": True,
                 "clamp_crop_away_neighbors": True,
                 "multi_crop_hard_freeze_neighbors": False,
+            }
+        )
+    elif exp == "B":
+        base.update(
+            {
+                "multi_person_swap_mode": "align_paste",
+                "align_paste_krea2_refine": False,
+                "align_paste_seamless_clone": True,
+                "align_paste_full_affine": True,
             }
         )
     elif exp == "C":

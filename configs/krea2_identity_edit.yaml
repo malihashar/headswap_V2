@@ -73,12 +73,13 @@ mask_bot_extend: 0.40
 stitch_feather_px: 10
 post_color_match_strength: 0.35
 
-# Multi-person production path (geometry-locked identity paste):
-#   align_paste / geometry_lock (default) — InsightFace landmark affine paste
-#   locks pose/expression, then masked Krea2 refine restores donor identity.
-#   Paste-only (refine=false) preserves geometry but caps identity ~0.5 ArcFace.
-#   krea2_crop — legacy dual-ref restage (strong ID, weak geometry) for A/B only.
-multi_person_swap_mode: align_paste
+# Multi-person production (decision-gate YES_ARCHITECTURE):
+#   detect faces → select one → SAME single-person crop recipe → Krea2 → stitch.
+#   Allowed multi-only logic: face select + neighbor exclusion from crop.
+#   krea2_crop + single_person_parity (default) — production path.
+#   align_paste / geometry_lock — DEPRECATED A/B control only (different
+#   conditioning; cannot reach single-person quality by construction).
+multi_person_swap_mode: krea2_crop
 # OFF by default: hard-freezing neighbor faces after stitch can overwrite the
 # selected head/hair when protect ellipses overlap. Prefer clamp_crop_away_neighbors.
 multi_crop_hard_freeze_neighbors: false
@@ -86,11 +87,7 @@ multi_crop_hard_freeze_neighbors: false
 # so it can never slice the stitch region; only margin_frac is tunable.
 clamp_crop_away_neighbors: true
 neighbor_crop_margin_frac: 0.18
-# Geometry-lock production path:
-#   1) InsightFace affine paste locks pose/expression/scale
-#   2) Masked Krea2 refine boosts donor identity (required — paste alone caps ~0.5 ArcFace)
-#   3) Soft-stitch keeps neighbors exact
-# Set false only for A/B of paste-only geometry.
+# DEPRECATED align_paste knobs (A/B only; do not tune for production identity):
 align_paste_krea2_refine: true
 align_paste_refine_steps: 6
 align_paste_seamless_clone: true

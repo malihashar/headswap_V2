@@ -24,14 +24,13 @@ CACHE = ROOT / "results" / "_cache"
 CFG_PATH = ROOT / "configs" / "krea2_identity_edit.yaml"
 
 
-def test_exp_a_config_default_is_geometry_lock():
-    """Exp A: default multi path = geometry-locked paste + masked Krea2 identity refine."""
+def test_exp_a_config_default_is_krea2_crop_spp():
+    """Exp A / decision-gate YES: production multi = single-person crop path."""
     cfg = yaml.safe_load(CFG_PATH.read_text())
-    assert cfg.get("multi_person_swap_mode") == "align_paste"
-    # Paste alone caps ArcFace ~0.5; refine is required for celebrity identity.
-    assert cfg.get("align_paste_krea2_refine") is True
-    assert cfg.get("align_paste_seamless_clone") is True
+    assert cfg.get("multi_person_swap_mode") == "krea2_crop"
     assert cfg.get("single_person_parity") is True
+    assert cfg.get("clamp_crop_away_neighbors") is True
+    assert cfg.get("multi_person_edit_mode") == "crop_stitch"
 
 
 def test_exp_b_paste_only_config_knobs_exist():

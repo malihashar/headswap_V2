@@ -37,16 +37,17 @@ class _Pipe(Krea2IdentityEditPipeline):
         self.cache_dir = ROOT / "results" / "_cache"
 
 
-def test_production_config_is_geometry_lock():
+def test_production_config_is_single_path_multi():
     cfg = yaml.safe_load(CFG_PATH.read_text())
-    assert cfg["multi_person_swap_mode"] == "align_paste"
-    # Paste locks geometry; masked Krea2 refine is required for donor identity.
-    assert cfg["align_paste_krea2_refine"] is True
-    assert cfg["align_paste_seamless_clone"] is True
+    assert cfg["multi_person_swap_mode"] == "krea2_crop"
+    assert cfg["multi_person_edit_mode"] == "crop_stitch"
     assert cfg["single_person_parity"] is True
+    assert cfg["clamp_crop_away_neighbors"] is True
     assert cfg["identity_scale_match"] is False
     assert cfg["face_white_bg"] is False
     assert cfg["multi_extra_prompt"] is False
+    # align_paste knobs may remain for A/B but must not be the default.
+    assert cfg.get("align_paste_krea2_refine") is True
 
 
 def test_multi_build_matches_single_conditioning_recipe():

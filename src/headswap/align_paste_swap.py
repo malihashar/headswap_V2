@@ -1,9 +1,9 @@
-"""Geometry-locked identity paste (production multi-person path).
+"""DEPRECATED: geometry-locked identity paste (A/B control only).
 
-Locks expression / pose / head scale from the target via InsightFace landmarks
-+ full affine warp, pastes a clothing-free identity face matte, optionally runs
-masked Krea2 refine (OFF by default — rewrite destroys geometry), then
-seamless-clones for lighting. Neighbors outside the face mask stay exact.
+Production multi-person swaps use ``multi_person_swap_mode: krea2_crop`` with
+``single_person_parity`` — the same crop/sample/stitch path as single-person.
+This module remains for divergence-control experiments; do not tune it for
+production identity quality.
 """
 from __future__ import annotations
 

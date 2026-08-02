@@ -1,0 +1,44 @@
+{
+  "rca": "identity_transfer_regression",
+  "date": "2026-08-02",
+  "decision_gate": {
+    "question": "Can Krea2 match single quality on multi selected face under identical conditioning?",
+    "phase1_conditioning_parity": "PASS",
+    "phase2_quality": "PENDING_GPU (mock-only locally)",
+    "architectural_decision": "YES_ARCHITECTURE",
+    "production": "detect → select → krea2_crop SPP single path → stitch",
+    "deprecated": "align_paste (A/B control only)",
+    "report": "results/_conditioning_parity/DECISION.md"
+  },
+  "experiments": {
+    "A": {
+      "name": "krea2_crop_spp_production",
+      "config": {
+        "multi_person_swap_mode": "krea2_crop",
+        "single_person_parity": true,
+        "clamp_crop_away_neighbors": true
+      },
+      "result": "PRODUCTION_DEFAULT",
+      "evidence": "configs/krea2_identity_edit.yaml; test_exp_a_config_default_is_krea2_crop_spp; test_conditioning_parity_decision"
+    },
+    "B": {
+      "name": "align_paste_deprecated_control",
+      "config": {
+        "multi_person_swap_mode": "align_paste",
+        "align_paste_krea2_refine": false
+      },
+      "result": "DEPRECATED_AB_ONLY",
+      "evidence": "Different conditioning by construction; not a production candidate"
+    },
+    "D_RC4": {
+      "name": "stitch_mask_contract",
+      "result": "BUG_CONFIRMED_AND_FIXED",
+      "evidence": "test_rc4_crop_mask_leaks_original_face"
+    }
+  },
+  "hybrid_restore": {
+    "default_path": "krea2_crop",
+    "neighbor_locality": "clamp_crop_away_neighbors + mask carve",
+    "align_paste": "deprecated A/B only"
+  }
+}

@@ -1947,11 +1947,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
                 ).strip().lower()
                 multi_swap_mode = str(
-                    self.cfg.get("multi_person_swap_mode", "align_paste")
-                    or "align_paste"
+                    self.cfg.get("multi_person_swap_mode", "krea2_crop")
+                    or "krea2_crop"
                 ).strip().lower()
-                # Production multi: geometry-locked landmark paste (align_paste).
-                # krea2_crop remains available for A/B (dual-ref restage).
+                # DEPRECATED A/B only: geometry-locked landmark paste.
+                # Production default is krea2_crop + single_person_parity.
                 if (
                     len(all_faces) > 1
                     and not swap_all

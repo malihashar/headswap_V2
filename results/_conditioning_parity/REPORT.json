@@ -1,0 +1,829 @@
+{
+  "question": "Can Krea2 produce single-person quality on a selected face from a multi-person image if conditioning after face selection is effectively identical to the single-person pipeline?",
+  "inputs": {
+    "solo_body": "data/custom/body.png",
+    "multi_body": "data/custom/body.png",
+    "face": "data/custom/face.png",
+    "synthesize_multi": true
+  },
+  "detection": {
+    "A_faces": 1,
+    "A_selected": [
+      286,
+      118,
+      499,
+      436
+    ],
+    "B_faces": 3,
+    "B_selected": [
+      368,
+      142,
+      444,
+      331
+    ]
+  },
+  "metrics": {
+    "A_solo": {
+      "case": "A_solo",
+      "path": "krea2_crop_spp",
+      "person_prep": "resize_contain",
+      "use_tight": false,
+      "isolate_selected": false,
+      "single_person_parity": true,
+      "multi_person": false,
+      "faces_detected": 1,
+      "crop_box": [
+        122,
+        0,
+        650,
+        592
+      ],
+      "crop_native_size": [
+        528,
+        592
+      ],
+      "scene_size": [
+        672,
+        768
+      ],
+      "person_size": [
+        672,
+        768
+      ],
+      "scene_ar": 0.875,
+      "face_area_frac_crop": 0.2167,
+      "face_height_frac_scene": 0.6983,
+      "head_to_canvas": 0.6983,
+      "person_nonblack_frac": 0.3341,
+      "scene_sha": "a99687fd1745efc8",
+      "person_sha": "72e80830f3128c39",
+      "mask_sha": "958c85a1a3d03421",
+      "prompt_sha1_12": "c046c89dfcc6",
+      "prompt_len": 1249,
+      "mask_top_ext": 1.55,
+      "mask_side_ext": 0.6,
+      "mask_bot_ext": 0.4,
+      "mask_expand_px": 18,
+      "neighbor_crop_clamp": {
+        "clamped": 0.0,
+        "neighbors_excluded": 0.0
+      },
+      "scene_eyes": {
+        "landmarks_backend": "insightface",
+        "landmarks_note": null,
+        "landmarks": [
+          [
+            275.0395202636719,
+            309.7366027832031
+          ],
+          [
+            413.06854248046875,
+            305.4327697753906
+          ],
+          [
+            346.58477783203125,
+            385.54986572265625
+          ],
+          [
+            273.3072204589844,
+            444.4871520996094
+          ],
+          [
+            414.35479736328125,
+            441.3019104003906
+          ]
+        ],
+        "left_eye": [
+          275.0395202636719,
+          309.7366027832031
+        ],
+        "right_eye": [
+          413.06854248046875,
+          305.4327697753906
+        ],
+        "iod": 138.096,
+        "eye_line_deg": -1.786
+      },
+      "person_eyes": {
+        "landmarks_backend": "insightface",
+        "landmarks_note": null,
+        "landmarks": [
+          [
+            262.6082458496094,
+            437.973876953125
+          ],
+          [
+            410.7042541503906,
+            439.4818115234375
+          ],
+          [
+            335.4947814941406,
+            515.0491333007812
+          ],
+          [
+            273.5811767578125,
+            596.3765258789062
+          ],
+          [
+            404.10693359375,
+            597.8709716796875
+          ]
+        ],
+        "left_eye": [
+          262.6082458496094,
+          437.973876953125
+        ],
+        "right_eye": [
+          410.7042541503906,
+          439.4818115234375
+        ],
+        "iod": 148.104,
+        "eye_line_deg": 0.583
+      },
+      "steps": 8,
+      "cfg": 1.0,
+      "seed": 46,
+      "denoise": 1.0,
+      "ref_boost": 3.5,
+      "ref_boost_a": 1.6,
+      "grounding_px": 768,
+      "fit_mode": "fit",
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "crop_long_side": 768
+    },
+    "A_ctrl": {
+      "case": "A_ctrl_selected_only",
+      "path": "krea2_crop_spp",
+      "person_prep": "resize_contain",
+      "use_tight": false,
+      "isolate_selected": false,
+      "single_person_parity": true,
+      "multi_person": false,
+      "faces_detected": 1,
+      "crop_box": [
+        286,
+        0,
+        510,
+        432
+      ],
+      "crop_native_size": [
+        224,
+        432
+      ],
+      "scene_size": [
+        384,
+        768
+      ],
+      "person_size": [
+        384,
+        768
+      ],
+      "scene_ar": 0.5,
+      "face_area_frac_crop": 0.1484,
+      "face_height_frac_scene": 0.5687,
+      "head_to_canvas": 0.5687,
+      "person_nonblack_frac": 0.4165,
+      "scene_sha": "69378a5072b934fc",
+      "person_sha": "3c5d4ed20feb9863",
+      "mask_sha": "67212cb820459499",
+      "prompt_sha1_12": "c046c89dfcc6",
+      "prompt_len": 1249,
+      "mask_top_ext": 1.55,
+      "mask_side_ext": 0.6,
+      "mask_bot_ext": 0.4,
+      "mask_expand_px": 18,
+      "neighbor_crop_clamp": {
+        "clamped": 0.0,
+        "neighbors_excluded": 0.0
+      },
+      "scene_eyes": {
+        "landmarks_backend": "insightface",
+        "landmarks_note": null,
+        "landmarks": [
+          [
+            176.20574951171875,
+            381.6208190917969
+          ],
+          [
+            230.81996154785156,
+            374.8436584472656
+          ],
+          [
+            199.7567596435547,
+            439.8802795410156
+          ],
+          [
+            182.0877685546875,
+            498.0531921386719
+          ],
+          [
+            233.15538024902344,
+            492.140380859375
+          ]
+        ],
+        "left_eye": [
+          176.20574951171875,
+          381.6208190917969
+        ],
+        "right_eye": [
+          230.81996154785156,
+          374.8436584472656
+        ],
+        "iod": 55.033,
+        "eye_line_deg": -7.074
+      },
+      "person_eyes": {
+        "landmarks_backend": "insightface",
+        "landmarks_note": null,
+        "landmarks": [
+          [
+            127.67276000976562,
+            430.1064147949219
+          ],
+          [
+            255.61611938476562,
+            428.6070556640625
+          ],
+          [
+            191.50808715820312,
+            492.82025146484375
+          ],
+          [
+            136.63192749023438,
+            561.4480590820312
+          ],
+          [
+            250.66152954101562,
+            560.3411865234375
+          ]
+        ],
+        "left_eye": [
+          127.67276000976562,
+          430.1064147949219
+        ],
+        "right_eye": [
+          255.61611938476562,
+          428.6070556640625
+        ],
+        "iod": 127.952,
+        "eye_line_deg": -0.671
+      },
+      "steps": 8,
+      "cfg": 1.0,
+      "seed": 46,
+      "denoise": 1.0,
+      "ref_boost": 3.5,
+      "ref_boost_a": 1.6,
+      "grounding_px": 768,
+      "fit_mode": "fit",
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "crop_long_side": 768
+    },
+    "B": {
+      "case": "B_multi_spp",
+      "path": "krea2_crop_spp",
+      "person_prep": "resize_contain",
+      "use_tight": false,
+      "isolate_selected": false,
+      "single_person_parity": true,
+      "multi_person": true,
+      "faces_detected": 3,
+      "crop_box": [
+        286,
+        0,
+        510,
+        432
+      ],
+      "crop_native_size": [
+        224,
+        432
+      ],
+      "scene_size": [
+        384,
+        768
+      ],
+      "person_size": [
+        384,
+        768
+      ],
+      "scene_ar": 0.5,
+      "face_area_frac_crop": 0.1484,
+      "face_height_frac_scene": 0.5687,
+      "head_to_canvas": 0.5687,
+      "person_nonblack_frac": 0.4165,
+      "scene_sha": "69378a5072b934fc",
+      "person_sha": "3c5d4ed20feb9863",
+      "mask_sha": "67212cb820459499",
+      "prompt_sha1_12": "c046c89dfcc6",
+      "prompt_len": 1249,
+      "mask_top_ext": 1.55,
+      "mask_side_ext": 0.6,
+      "mask_bot_ext": 0.4,
+      "mask_expand_px": 18,
+      "neighbor_crop_clamp": {
+        "clamped": 0.0,
+        "neighbors_excluded": 0.0,
+        "neighbors_unexcludable": 0.0,
+        "crop_w_before": 224.0,
+        "crop_h_before": 432.0,
+        "crop_w_after": 224.0,
+        "crop_h_after": 432.0
+      },
+      "scene_eyes": {
+        "landmarks_backend": "insightface",
+        "landmarks_note": null,
+        "landmarks": [
+          [
+            176.20574951171875,
+            381.6208190917969
+          ],
+          [
+            230.81996154785156,
+            374.8436584472656
+          ],
+          [
+            199.7567596435547,
+            439.8802795410156
+          ],
+          [
+            182.0877685546875,
+            498.0531921386719
+          ],
+          [
+            233.15538024902344,
+            492.140380859375
+          ]
+        ],
+        "left_eye": [
+          176.20574951171875,
+          381.6208190917969
+        ],
+        "right_eye": [
+          230.81996154785156,
+          374.8436584472656
+        ],
+        "iod": 55.033,
+        "eye_line_deg": -7.074
+      },
+      "person_eyes": {
+        "landmarks_backend": "insightface",
+        "landmarks_note": null,
+        "landmarks": [
+          [
+            127.67276000976562,
+            430.1064147949219
+          ],
+          [
+            255.61611938476562,
+            428.6070556640625
+          ],
+          [
+            191.50808715820312,
+            492.82025146484375
+          ],
+          [
+            136.63192749023438,
+            561.4480590820312
+          ],
+          [
+            250.66152954101562,
+            560.3411865234375
+          ]
+        ],
+        "left_eye": [
+          127.67276000976562,
+          430.1064147949219
+        ],
+        "right_eye": [
+          255.61611938476562,
+          428.6070556640625
+        ],
+        "iod": 127.952,
+        "eye_line_deg": -0.671
+      },
+      "steps": 8,
+      "cfg": 1.0,
+      "seed": 46,
+      "denoise": 1.0,
+      "ref_boost": 3.5,
+      "ref_boost_a": 1.6,
+      "grounding_px": 768,
+      "fit_mode": "fit",
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "crop_long_side": 768
+    },
+    "C": {
+      "case": "C_align_paste",
+      "path": "align_paste",
+      "person_prep": "identity_face_only_matte",
+      "use_tight": false,
+      "isolate_selected": false,
+      "single_person_parity": false,
+      "multi_person": true,
+      "faces_detected": 3,
+      "crop_box": [
+        281,
+        0,
+        521,
+        544
+      ],
+      "crop_native_size": [
+        240,
+        544
+      ],
+      "scene_size": [
+        240,
+        544
+      ],
+      "person_size": [
+        385,
+        594
+      ],
+      "scene_ar": 0.4412,
+      "face_area_frac_crop": 0.11,
+      "face_height_frac_scene": 0.3474,
+      "head_to_canvas": 0.3474,
+      "refine_mask_frac_approx": 0.2506,
+      "align_paste_mask_top": 0.28,
+      "align_paste_mask_side": 0.28,
+      "align_paste_mask_bot": 0.18,
+      "person_nonblack_frac": 0.8506,
+      "scene_sha": "704f845b857ce9e4",
+      "person_sha": "507094e51a8eb41f",
+      "matte_info": {
+        "identity_face_only": true,
+        "face_matte_top": 0.28,
+        "face_matte_bot": 0.06,
+        "face_matte_side": 0.1,
+        "matte_size": [
+          385,
+          594
+        ]
+      },
+      "prompt_sha1_12": null,
+      "steps": 6,
+      "ref_boost": 3.5,
+      "crop_long_side": null
+    }
+  },
+  "conditioning_parity": {
+    "parity_ok": true,
+    "recipe_ok": true,
+    "geometry_ok": true,
+    "recipe_checks": [
+      {
+        "key": "person_prep",
+        "A": "resize_contain",
+        "B": "resize_contain",
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "crop_long_side",
+        "A": 768,
+        "B": 768,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "mask_top_ext",
+        "A": 1.55,
+        "B": 1.55,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "mask_side_ext",
+        "A": 0.6,
+        "B": 0.6,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "mask_bot_ext",
+        "A": 0.4,
+        "B": 0.4,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "mask_expand_px",
+        "A": 18,
+        "B": 18,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "prompt_sha1_12",
+        "A": "c046c89dfcc6",
+        "B": "c046c89dfcc6",
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "steps",
+        "A": 8,
+        "B": 8,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "cfg",
+        "A": 1.0,
+        "B": 1.0,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "ref_boost",
+        "A": 3.5,
+        "B": 3.5,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "ref_boost_a",
+        "A": 1.6,
+        "B": 1.6,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "grounding_px",
+        "A": 768,
+        "B": 768,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "fit_mode",
+        "A": "fit",
+        "B": "fit",
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "use_tight",
+        "A": false,
+        "B": false,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "isolate_selected",
+        "A": false,
+        "B": false,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "single_person_parity",
+        "A": true,
+        "B": true,
+        "ok": true,
+        "kind": "exact"
+      }
+    ],
+    "geometry_checks": [
+      {
+        "key": "person_prep",
+        "A": "resize_contain",
+        "B": "resize_contain",
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "crop_long_side",
+        "A": 768,
+        "B": 768,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "mask_top_ext",
+        "A": 1.55,
+        "B": 1.55,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "mask_side_ext",
+        "A": 0.6,
+        "B": 0.6,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "mask_bot_ext",
+        "A": 0.4,
+        "B": 0.4,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "mask_expand_px",
+        "A": 18,
+        "B": 18,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "prompt_sha1_12",
+        "A": "c046c89dfcc6",
+        "B": "c046c89dfcc6",
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "steps",
+        "A": 8,
+        "B": 8,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "cfg",
+        "A": 1.0,
+        "B": 1.0,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "ref_boost",
+        "A": 3.5,
+        "B": 3.5,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "ref_boost_a",
+        "A": 1.6,
+        "B": 1.6,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "grounding_px",
+        "A": 768,
+        "B": 768,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "fit_mode",
+        "A": "fit",
+        "B": "fit",
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "use_tight",
+        "A": false,
+        "B": false,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "isolate_selected",
+        "A": false,
+        "B": false,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "single_person_parity",
+        "A": true,
+        "B": true,
+        "ok": true,
+        "kind": "exact"
+      },
+      {
+        "key": "face_area_frac_crop",
+        "A": 0.1484,
+        "B": 0.1484,
+        "ok": true,
+        "kind": "tolerance",
+        "atol": 0.04,
+        "rtol": 0.25
+      },
+      {
+        "key": "face_height_frac_scene",
+        "A": 0.5687,
+        "B": 0.5687,
+        "ok": true,
+        "kind": "tolerance",
+        "atol": 0.05,
+        "rtol": 0.2
+      },
+      {
+        "key": "person_nonblack_frac",
+        "A": 0.4165,
+        "B": 0.4165,
+        "ok": true,
+        "kind": "tolerance",
+        "atol": 0.08,
+        "rtol": 0.15
+      },
+      {
+        "key": "head_to_canvas",
+        "A": 0.5687,
+        "B": 0.5687,
+        "ok": true,
+        "kind": "tolerance",
+        "atol": 0.05,
+        "rtol": 0.2
+      },
+      {
+        "key": "scene_size",
+        "A": [
+          384,
+          768
+        ],
+        "B": [
+          384,
+          768
+        ],
+        "ok": true,
+        "kind": "tolerance"
+      },
+      {
+        "key": "scene_eye_line_deg",
+        "A": -7.074,
+        "B": -7.074,
+        "ok": true,
+        "kind": "soft",
+        "note": "informational; not required for Phase-1 pass"
+      }
+    ],
+    "failed_keys": [],
+    "neighbor_clamp_B": {
+      "clamped": 0.0,
+      "neighbors_excluded": 0.0,
+      "neighbors_unexcludable": 0.0,
+      "crop_w_before": 224.0,
+      "crop_h_before": 432.0,
+      "crop_w_after": 224.0,
+      "crop_h_after": 432.0
+    },
+    "note": "Recipe: A_solo vs B exact keys. Geometry: A_ctrl (same multi body, selected-only faces) vs B (neighbors) \u2014 isolates neighbor exclusion."
+  },
+  "align_paste_divergence_Actrl_vs_C": {
+    "person_prep": {
+      "A_ctrl": "resize_contain",
+      "C": "identity_face_only_matte"
+    },
+    "face_area_frac_crop": {
+      "A_ctrl": 0.1484,
+      "C": 0.11
+    },
+    "scene_size": {
+      "A_ctrl": [
+        384,
+        768
+      ],
+      "C": [
+        240,
+        544
+      ]
+    },
+    "path": {
+      "A_ctrl": "krea2_crop_spp",
+      "C": "align_paste"
+    }
+  },
+  "quality": {
+    "ran": true,
+    "mock_only": true,
+    "A": {
+      "identity_cosine": 0.8588,
+      "gaze_eye_line_delta_deg": 1.729,
+      "body_eye_line_deg": -2.119,
+      "result_eye_line_deg": -0.39,
+      "head_height_ratio_body": 0.3105,
+      "neighbor_outside_selected_psnr": 15.283,
+      "edit_mode": null,
+      "scene_size": null,
+      "mock": true
+    },
+    "B": {
+      "identity_cosine": 0.9415,
+      "gaze_eye_line_delta_deg": 1.251,
+      "body_eye_line_deg": 1.791,
+      "result_eye_line_deg": 0.54,
+      "head_height_ratio_body": 0.2953,
+      "neighbor_outside_selected_psnr": 18.962,
+      "edit_mode": null,
+      "scene_size": null,
+      "mock": true
+    }
+  },
+  "decision": {
+    "decision": "YES_ARCHITECTURE",
+    "reason": "Conditioning parity holds. Quality metrics are mock-only and not decisive. Production multi must use select\u2192single-person crop path so a real GPU gate can answer YES/NO on Krea2 capability. align_paste demoted to A/B control only.",
+    "action": "simplify_to_krea2_crop_spp",
+    "quality_note": "re-run --run-krea2 without --force-mock on Colab/GPU"
+  }
+}

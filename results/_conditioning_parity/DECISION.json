@@ -1,0 +1,6 @@
+{
+  "decision": "YES_ARCHITECTURE",
+  "reason": "Conditioning parity holds. Quality metrics are mock-only and not decisive. Production multi must use select\u2192single-person crop path so a real GPU gate can answer YES/NO on Krea2 capability. align_paste demoted to A/B control only.",
+  "action": "simplify_to_krea2_crop_spp",
+  "quality_note": "re-run --run-krea2 without --force-mock on Colab/GPU"
+}
