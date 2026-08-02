@@ -33,6 +33,7 @@ from headswap.comfy.runtime import (
 from headswap.pipelines.base import BasePipeline, PipelineResult
 from headswap.pipelines.errors import PipelineRunError
 from headswap.profiling.identity_stage_trace import IdentityStageTrace
+from headswap.profiling.head_scale_trace import HeadScaleTrace
 from headswap.preprocess import (
     FaceBox,
     clamp_crop_away_neighbors,
@@ -2126,6 +2127,32 @@ class Krea2IdentityEditPipeline(BasePipeline):
         save_debug = bool(self.cfg.get("save_debug", False))
         verbose = bool(self.cfg.get("verbose", False))
         base_seed = int(self.cfg.get("seed", 46))
+        # Geometry RCA only — does not alter conditioning / sampling / stitch math.
+        want_head_scale = bool(self.cfg.get("head_scale_trace", False)) or save_debug
+        head_scale_trace: HeadScaleTrace | None = None
+        if (
+            want_head_scale
+            and edit_mode == "crop_stitch"
+            and body_full is not None
+            and box is not None
+            and out_dir is not None
+        ):
+            head_scale_trace = HeadScaleTrace(
+                Path(out_dir) / "head_scale_trace",
+                cache_dir=self.cache_dir,
+                enabled=True,
+                body_full=body_full,
+                selected=selected_face,
+                crop_box=box,
+            )
+            head_scale_trace.record_prep(
+                body_full=body_full,
+                selected=selected_face,
+                mask=mask,
+                crop_box=box,
+                scene=scene,
+                person=person,
+            )
 
         if edit_mode == "align_paste" and body_full is not None:
             return self._run_multi_align_paste(
@@ -2282,6 +2309,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 ref_boost_mask=ref_boost_mask_img if edit_mode == "full_frame" else None,
             )
             edited = sample_meta["edited"]
+            if head_scale_trace is not None:
+                head_scale_trace.record_edited(edited)
             with _stage(timings, "postprocessing"):
                 out = edited
                 if (
@@ -2301,6 +2330,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         original_scene=scene,
                         debug_stages=stitch_debug,
                     )
+                    if head_scale_trace is not None:
+                        head_scale_trace.record_stitched(out)
+                        hs_report = head_scale_trace.finalize()
+                        face_prep_diag["head_scale_trace"] = {
+                            "verdict": hs_report.get("verdict"),
+                            "dir": str(Path(out_dir) / "head_scale_trace")
+                            if out_dir
+                            else None,
+                        }
                     # Optional post-stitch neighbor restore. OFF by default —
                     # production locality is crop-window exclusion + mask carve.
                     if (

@@ -1,0 +1,369 @@
+{
+  "enabled": true,
+  "meta": {
+    "affine_matrix": null,
+    "affine_note": "N/A on krea2_crop production path (no landmark affine)",
+    "path": "krea2_crop_spp"
+  },
+  "crop_box_body": [
+    221,
+    12,
+    381,
+    188
+  ],
+  "selected_box": [
+    279,
+    73,
+    324,
+    127
+  ],
+  "stages": {
+    "S0_original": {
+      "name": "S0_original",
+      "image_size": [
+        384,
+        304
+      ],
+      "face_box": [
+        279,
+        73,
+        324,
+        127
+      ],
+      "head_box": null,
+      "face_w": 45.0,
+      "face_h": 54.0,
+      "head_w": null,
+      "head_h": null,
+      "face_w_frac": 0.1172,
+      "face_h_frac": 0.1776,
+      "head_w_frac": null,
+      "head_h_frac": null,
+      "face_area_frac": 0.0208,
+      "face_box_body": [
+        279,
+        73,
+        324,
+        127
+      ],
+      "head_box_body": null,
+      "face_w_body": 45.0,
+      "face_h_body": 54.0,
+      "head_w_body": null,
+      "head_h_body": null,
+      "iod": 19.621,
+      "eye_line_deg": -6.004,
+      "landmarks5": [
+        [
+          290.49493408203125,
+          91.21143341064453
+        ],
+        [
+          310.0084533691406,
+          89.1590576171875
+        ],
+        [
+          300.3349609375,
+          103.61381530761719
+        ],
+        [
+          295.68096923828125,
+          113.70420837402344
+        ],
+        [
+          310.5511779785156,
+          111.9390640258789
+        ]
+      ],
+      "landmarks_backend": "insightface",
+      "notes": {
+        "coord": "body_full"
+      },
+      "overlay_path": "results/_head_scale_trace/night_group_offline/head_scale_trace/S0_original_overlay.png"
+    },
+    "S1_crop": {
+      "name": "S1_crop",
+      "image_size": [
+        160,
+        176
+      ],
+      "face_box": [
+        58,
+        61,
+        103,
+        115
+      ],
+      "head_box": null,
+      "face_w": 45.0,
+      "face_h": 54.0,
+      "head_w": null,
+      "head_h": null,
+      "face_w_frac": 0.2812,
+      "face_h_frac": 0.3068,
+      "head_w_frac": null,
+      "head_h_frac": null,
+      "face_area_frac": 0.0863,
+      "face_box_body": [
+        279,
+        73,
+        324,
+        127
+      ],
+      "head_box_body": null,
+      "face_w_body": 45.0,
+      "face_h_body": 54.0,
+      "head_w_body": null,
+      "head_h_body": null,
+      "iod": 20.492,
+      "eye_line_deg": -6.329,
+      "landmarks5": [
+        [
+          67.8741455078125,
+          79.41211700439453
+        ],
+        [
+          88.24097442626953,
+          77.1533432006836
+        ],
+        [
+          77.96454620361328,
+          91.5259017944336
+        ],
+        [
+          73.33406066894531,
+          101.62201690673828
+        ],
+        [
+          88.93898010253906,
+          99.72232818603516
+        ]
+      ],
+      "landmarks_backend": "insightface",
+      "notes": {
+        "coord": "crop_native",
+        "crop_box_body": [
+          221,
+          12,
+          381,
+          188
+        ],
+        "crop_native_size": [
+          160,
+          176
+        ]
+      },
+      "overlay_path": "results/_head_scale_trace/night_group_offline/head_scale_trace/S1_crop_overlay.png"
+    },
+    "S2_scene": {
+      "name": "S2_scene",
+      "image_size": [
+        160,
+        176
+      ],
+      "face_box": [
+        56,
+        71,
+        103,
+        129
+      ],
+      "head_box": null,
+      "face_w": 47.0,
+      "face_h": 58.0,
+      "head_w": null,
+      "head_h": null,
+      "face_w_frac": 0.2938,
+      "face_h_frac": 0.3295,
+      "head_w_frac": null,
+      "head_h_frac": null,
+      "face_area_frac": 0.0968,
+      "face_box_body": [
+        277,
+        83,
+        324,
+        141
+      ],
+      "head_box_body": null,
+      "face_w_body": 47.0,
+      "face_h_body": 58.0,
+      "head_w_body": null,
+      "head_h_body": null,
+      "iod": 21.265,
+      "eye_line_deg": -7.312,
+      "landmarks5": [
+        [
+          67.61286163330078,
+          92.59213256835938
+        ],
+        [
+          88.70465850830078,
+          89.88569641113281
+        ],
+        [
+          78.60726928710938,
+          104.74459075927734
+        ],
+        [
+          72.91976928710938,
+          114.69757843017578
+        ],
+        [
+          89.78248596191406,
+          112.50480651855469
+        ]
+      ],
+      "landmarks_backend": "insightface",
+      "notes": {
+        "coord": "scene_inference",
+        "scene_size": [
+          160,
+          176
+        ],
+        "scale_x": 1.0,
+        "scale_y": 1.0
+      },
+      "overlay_path": "results/_head_scale_trace/night_group_offline/head_scale_trace/S2_scene_overlay.png"
+    },
+    "S3_edited": {
+      "name": "S3_edited",
+      "image_size": [
+        160,
+        176
+      ],
+      "face_box": [
+        48,
+        27,
+        112,
+        99
+      ],
+      "head_box": null,
+      "face_w": 64.0,
+      "face_h": 72.0,
+      "head_w": null,
+      "head_h": null,
+      "face_w_frac": 0.4,
+      "face_h_frac": 0.4091,
+      "head_w_frac": null,
+      "head_h_frac": null,
+      "face_area_frac": 0.1636,
+      "face_box_body": [
+        269,
+        39,
+        333,
+        111
+      ],
+      "head_box_body": null,
+      "face_w_body": 64.0,
+      "face_h_body": 72.0,
+      "head_w_body": null,
+      "head_h_body": null,
+      "iod": 25.6,
+      "eye_line_deg": 0.0,
+      "landmarks5": [
+        [
+          67.19999694824219,
+          54.36000061035156
+        ],
+        [
+          92.80000305175781,
+          54.36000061035156
+        ],
+        [
+          80.0,
+          66.5999984741211
+        ],
+        [
+          70.4000015258789,
+          81.0
+        ],
+        [
+          89.5999984741211,
+          81.0
+        ]
+      ],
+      "landmarks_backend": "box_prior",
+      "notes": {
+        "coord": "edited_crop_after_krea2",
+        "edited_face_h_over_scene_face_h": 1.2414
+      },
+      "overlay_path": "results/_head_scale_trace/night_group_offline/head_scale_trace/S3_edited_overlay.png"
+    },
+    "S4_stitched": {
+      "name": "S4_stitched",
+      "image_size": [
+        384,
+        304
+      ],
+      "face_box": [
+        251,
+        62,
+        354,
+        160
+      ],
+      "head_box": null,
+      "face_w": 103.0,
+      "face_h": 98.0,
+      "head_w": null,
+      "head_h": null,
+      "face_w_frac": 0.2682,
+      "face_h_frac": 0.3224,
+      "head_w_frac": null,
+      "head_h_frac": null,
+      "face_area_frac": 0.0865,
+      "face_box_body": [
+        251,
+        62,
+        354,
+        160
+      ],
+      "head_box_body": null,
+      "face_w_body": 103.0,
+      "face_h_body": 98.0,
+      "head_w_body": null,
+      "head_h_body": null,
+      "iod": 48.878,
+      "eye_line_deg": -0.869,
+      "landmarks5": [
+        [
+          276.9580078125,
+          100.20354461669922
+        ],
+        [
+          325.8299560546875,
+          99.46222686767578
+        ],
+        [
+          301.3321228027344,
+          116.86073303222656
+        ],
+        [
+          278.69757080078125,
+          133.86300659179688
+        ],
+        [
+          326.1730651855469,
+          133.19960021972656
+        ]
+      ],
+      "landmarks_backend": "insightface",
+      "notes": {
+        "coord": "body_full_after_stitch",
+        "matched_to_selected": true,
+        "stitched_face_h_over_original": 1.8148
+      },
+      "overlay_path": "results/_head_scale_trace/night_group_offline/head_scale_trace/S4_stitched_overlay.png"
+    }
+  },
+  "verdict": {
+    "FIRST_ENLARGEMENT_STAGE": "S3_edited",
+    "tol": 1.12,
+    "s0_face_h_body": 54.0,
+    "ratios_vs_s0": {
+      "S1_crop": 1.0,
+      "S2_scene": 1.0741,
+      "S3_vs_S2_local": 1.2414,
+      "S3_edited": 1.3333,
+      "S4_stitched": 1.8148
+    },
+    "s3_vs_s2_local": 1.2414
+  }
+}

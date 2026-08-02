@@ -224,6 +224,8 @@ identity_hair_height_boost: 1.30
 clamp_edited_head_scale: true
 max_edited_head_height_ratio: 1.08
 target_edited_head_height_ratio: 0.98
+# Geometry RCA: dump S0–S4 face/head boxes (no recipe changes). Also on when save_debug.
+head_scale_trace: false
 multi_head_scale_prompt: true
 # Force hairstyle transfer (body hair often survives without this).
 multi_hair_replace_prompt: true
