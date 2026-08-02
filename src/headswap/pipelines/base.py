@@ -73,6 +73,8 @@ class MockHeadSwapPipeline(BasePipeline):
             return self._run_step1x_mock(body, face, out_dir, t0)
         if pipeline_key == "omnigen2":
             return self._run_omnigen2_mock(body, face, out_dir, t0)
+        if pipeline_key == "krea2_full_image_synth":
+            return self._run_krea2_full_image_synth_mock(body, face, out_dir, t0)
 
         face_crop = crop_face_reference(
             face,
@@ -496,6 +498,101 @@ class MockHeadSwapPipeline(BasePipeline):
         }
         return PipelineResult(
             image=stitched,
+            latency_s=time.perf_counter() - t0,
+            meta=meta,
+            debug_paths=dbg,
+        )
+
+    def _run_krea2_full_image_synth_mock(
+        self,
+        body: Image.Image,
+        face: Image.Image,
+        out_dir: Path | None,
+        t0: float,
+    ) -> PipelineResult:
+        """CPU stand-in: auto prompt + full-frame drift (no Comfy / Krea2)."""
+        from headswap.preprocess import resize_contain, resize_max_keep_ar
+        from headswap.prompting.scene_describe import (
+            build_identity_edit_prompt,
+            describe_scene,
+        )
+
+        max_dim = int(self.cfg.get("max_dim", 1024))
+        div_by = int(self.cfg.get("div_by", 16))
+        body_work = resize_max_keep_ar(body.convert("RGB"), min(max_dim, 768), div_by)
+        desc, selected, all_faces = describe_scene(
+            body_work,
+            self.cache_dir,
+            face_index=int(self.cfg.get("face_index", 0)),
+            face_policy=str(self.cfg.get("face_select_policy", "largest")),
+            cfg=self.cfg,
+        )
+        prompt = build_identity_edit_prompt(desc)
+        face_crop = crop_face_reference(
+            face,
+            self.cache_dir,
+            top=float(self.cfg.get("face_top_pad", 0.65)),
+            bot=float(self.cfg.get("face_bot_pad", 0.15)),
+            side=float(self.cfg.get("face_side_pad", 0.35)),
+            include_shoulders=False,
+        )
+        person = resize_contain(face_crop.convert("RGB"), body_work.size, fill=(0, 0, 0))
+
+        import numpy as np
+
+        # Simulate full-image regeneration (global drift + soft identity paste).
+        arr = np.asarray(body_work).astype("float32")
+        arr = np.clip(arr * 0.94 + 10.0, 0, 255)
+        drifted = Image.fromarray(arr.astype("uint8"))
+        mask = head_hair_mask_from_face(
+            body_work, self.cache_dir, expand_px=18, blur_px=12
+        )
+        crop_img, crop_mask, box = crop_with_mask(drifted, mask, pad=8, div_by=8)
+        donor = face_crop.resize(crop_img.size, Image.Resampling.LANCZOS)
+        a = np.asarray(crop_mask.convert("L")).astype("float32") / 255.0
+        a = a[..., None]
+        out_crop = np.asarray(crop_img).astype("float32") * (1 - a) + np.asarray(
+            donor
+        ).astype("float32") * a
+        edited = Image.fromarray(out_crop.clip(0, 255).astype("uint8"))
+        # Full-synth contract: model output is final — mock returns drifted canvas
+        # after a soft identity hint, without production stitch postprocess.
+        out = soft_composite(drifted, edited, mask, box)
+
+        if out_dir is not None:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            (Path(out_dir) / "prompt.txt").write_text(prompt, encoding="utf-8")
+        dbg = {
+            k: v
+            for k, v in {
+                "debug_body": self._save_debug(out_dir, "debug_body.png", body_work),
+                "debug_person": self._save_debug(out_dir, "debug_person.png", person),
+                "debug_face_crop": self._save_debug(
+                    out_dir, "debug_face_crop.png", face_crop
+                ),
+                "result_raw": self._save_debug(out_dir, "result_raw.png", out),
+            }.items()
+            if v
+        }
+        meta = {
+            "pipeline": "krea2_full_image_synth",
+            "mode": "mock_full_image_synth_raw",
+            "postprocess": "none",
+            "prompt": prompt,
+            "scene_description": desc.to_dict(),
+            "faces_detected": len(all_faces),
+            "selected_face": (
+                None
+                if selected is None
+                else [selected.x0, selected.y0, selected.x1, selected.y1]
+            ),
+            "ref_boost": float(self.cfg.get("ref_boost", 4.0)),
+            "grounding_px": int(self.cfg.get("grounding_px", 1024)),
+            "steps": int(self.cfg.get("steps", 12)),
+            "features": {"comfy": False, "full_image_raw": True},
+        }
+        return PipelineResult(
+            image=out,
             latency_s=time.perf_counter() - t0,
             meta=meta,
             debug_paths=dbg,
