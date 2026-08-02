@@ -25,14 +25,18 @@ fi
 
 # --- pip deps (Colab torch is usually fine; avoid forcing cu117) ---
 pip install -q -U pip setuptools wheel
-pip install -q huggingface_hub
-# Core REFace deps (best-effort pins; Colab may already have newer torch).
-pip install -q \
-  "pytorch-lightning==1.9.5" "transformers==4.30.2" "omegaconf==2.1.1" \
-  "einops==0.4.1" "kornia==0.6.12" "albumentations==1.3.1" \
-  "face_alignment==1.4.1" "dlib==19.24.2" "opencv-python-headless" \
-  "scikit-image" "lpips" "tqdm" "Pillow" "natsort" "ftfy" "regex" \
-  "diffusers==0.30.3" "torchmetrics==0.11.4" || true
+pip install -q huggingface_hub gdown
+
+# Critical runtime imports for scripts/inference_swap_selected.py — must succeed.
+echo "→ installing REFace Python deps (required)…"
+pip install -q "pytorch-lightning>=1.9,<2.2" || pip install -q pytorch-lightning
+pip install -q "omegaconf>=2.1,<2.4" "einops" "albumentations" "kornia" \
+  "transformers>=4.30,<4.45" "diffusers>=0.24,<0.32" "torchmetrics" \
+  "face_alignment" "opencv-python-headless" "scikit-image" "tqdm" "Pillow" \
+  "natsort" "ftfy" "regex" "lpips" "timm" "pytorch-fid" || true
+
+# dlib is optional-ish (landmarks); try wheels first.
+pip install -q dlib || pip install -q dlib==19.24.2 || echo "⚠ dlib install failed — may still work with face_alignment"
 
 pip install -q -e "git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers" || true
 pip install -q -e "git+https://github.com/openai/CLIP.git@main#egg=clip" || true
@@ -42,6 +46,21 @@ pip install -q -e "$REFACE_ROOT" || true
 if [[ -f "$REPO/pyproject.toml" || -f "$REPO/setup.py" ]]; then
   pip install -q -e "$REPO"
 fi
+
+python - <<'PY'
+import importlib
+required = ["pytorch_lightning", "omegaconf", "einops", "torch"]
+missing = []
+for name in required:
+    try:
+        importlib.import_module(name)
+        print(f"✓ import {name}")
+    except Exception as exc:
+        missing.append(f"{name}: {exc}")
+if missing:
+    raise SystemExit("REFace deps missing:\n  - " + "\n  - ".join(missing))
+print("✓ REFace Python deps OK")
+PY
 
 # --- HuggingFace assets (last.ckpt + Other_dependencies) ---
 export WEIGHTS_CACHE="$WEIGHTS_CACHE"
