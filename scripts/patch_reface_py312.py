@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Patch REFace sources for modern Colab (Python 3.12 + current transformers).
+"""Patch REFace sources for modern Colab (Python 3.12 + current transformers/Lightning).
 
 Upstream still has:
   - dead ``import imp`` (removed in 3.12)
   - unused ``from turtle import …`` (breaks headless)
   - CompVis safety-checker load that fails on current transformers
+  - ``pytorch_lightning.utilities.distributed.rank_zero_only`` (moved in PL 2.x)
 """
 from __future__ import annotations
 
@@ -52,6 +53,19 @@ def check_safety(x_image):
 """
 
 
+_RANK_ZERO_IMPORT = re.compile(
+    r"^from pytorch_lightning\.utilities\.distributed import rank_zero_only\s*$",
+    re.MULTILINE,
+)
+
+_RANK_ZERO_REPLACEMENT = """\
+try:
+    from pytorch_lightning.utilities.distributed import rank_zero_only
+except ImportError:  # pytorch-lightning >= 1.8 / 2.x
+    from pytorch_lightning.utilities.rank_zero import rank_zero_only
+"""
+
+
 def _patch_drop_lines(text: str) -> tuple[str, bool]:
     lines = text.splitlines(keepends=True)
     kept: list[str] = []
@@ -62,6 +76,15 @@ def _patch_drop_lines(text: str) -> tuple[str, bool]:
             continue
         kept.append(line)
     return "".join(kept), changed
+
+
+def _patch_rank_zero_import(text: str) -> tuple[str, bool]:
+    if "from pytorch_lightning.utilities.rank_zero import rank_zero_only" in text and \
+       "except ImportError" in text:
+        return text, False
+    if not _RANK_ZERO_IMPORT.search(text):
+        return text, False
+    return _RANK_ZERO_IMPORT.sub(_RANK_ZERO_REPLACEMENT.rstrip("\n"), text), True
 
 
 def _patch_safety_checker(text: str) -> tuple[str, bool]:
@@ -92,14 +115,14 @@ def _patch_safety_checker(text: str) -> tuple[str, bool]:
 def patch_file(path: Path) -> bool:
     text = path.read_text(encoding="utf-8", errors="replace")
     original = text
-    text, c1 = _patch_drop_lines(text)
-    c2 = False
+    text, _ = _patch_drop_lines(text)
+    text, _ = _patch_rank_zero_import(text)
     if path.name == "inference_swap_selected.py" or "safety_model_id" in text:
-        text, c2 = _patch_safety_checker(text)
+        text, _ = _patch_safety_checker(text)
     if text == original:
         return False
     path.write_text(text, encoding="utf-8")
-    return c1 or c2
+    return True
 
 
 def patch_reface_tree(root: Path) -> list[str]:

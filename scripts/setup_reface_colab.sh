@@ -34,9 +34,10 @@ pip install -q huggingface_hub gdown
 
 # Critical runtime imports for scripts/inference_swap_selected.py — must succeed.
 echo "→ installing REFace Python deps (required)…"
-pip install -q "pytorch-lightning>=1.9,<2.2" || pip install -q pytorch-lightning
+# REFace LDM code expects PL 1.x import paths; force a known-good pin.
+pip install -q --force-reinstall "pytorch-lightning==1.9.5"
 pip install -q "omegaconf>=2.1,<2.4" "einops" "albumentations" "kornia" \
-  "transformers>=4.30,<4.45" "diffusers>=0.24,<0.32" "torchmetrics" \
+  "transformers>=4.30,<4.45" "diffusers>=0.24,<0.32" "torchmetrics==0.11.4" \
   "face_alignment" "opencv-python-headless" "scikit-image" "tqdm" "Pillow" \
   "natsort" "ftfy" "regex" "lpips" "timm" "pytorch-fid" "bezier" || true
 
@@ -54,6 +55,8 @@ fi
 
 python - <<'PY'
 import importlib
+import pytorch_lightning as pl
+
 required = ["pytorch_lightning", "omegaconf", "einops", "torch"]
 missing = []
 for name in required:
@@ -62,6 +65,16 @@ for name in required:
         print(f"✓ import {name}")
     except Exception as exc:
         missing.append(f"{name}: {exc}")
+try:
+    from pytorch_lightning.utilities.distributed import rank_zero_only  # noqa: F401
+    print("✓ rank_zero_only via utilities.distributed")
+except Exception:
+    try:
+        from pytorch_lightning.utilities.rank_zero import rank_zero_only  # noqa: F401
+        print("✓ rank_zero_only via utilities.rank_zero (will use patched import)")
+    except Exception as exc:
+        missing.append(f"rank_zero_only: {exc}")
+print(f"✓ pytorch_lightning={pl.__version__}")
 if missing:
     raise SystemExit("REFace deps missing:\n  - " + "\n  - ".join(missing))
 print("✓ REFace Python deps OK")
