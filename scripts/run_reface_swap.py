@@ -91,9 +91,9 @@ def main() -> None:
 
         touched = patch_reface_tree(reface_root)
         if touched:
-            print(f"→ patched REFace for Py3.12 ({len(touched)} file(s))", flush=True)
+            print(f"→ patched REFace for Colab ({len(touched)} file(s))", flush=True)
     except Exception as exc:  # noqa: BLE001
-        print(f"⚠ REFace Py3.12 patch skipped: {exc}", flush=True)
+        print(f"⚠ REFace Colab patch skipped: {exc}", flush=True)
 
     # Import headswap face detector (optional; fall back to full-frame).
     headswap_src = Path(__file__).resolve().parents[1] / "src"
