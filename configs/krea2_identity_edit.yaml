@@ -180,6 +180,10 @@ full_frame_use_crop_prompt: true
 # Post-sample clamp on the full group frame can target the wrong face — OFF
 # until inference-path identity parity is proven.
 full_frame_clamp_head_scale: false
+# Landmark Procrustes (rotation+uniform scale+translation) after full_frame
+# sample, before freeze. OFF by default — enable for A/B when head_to_body
+# scale ratio is still meaningfully off 1.0 after promoting full_frame.
+full_frame_procrustes_align: false
 
 # Multi-person body photos: pick which face to swap, then tighten the crop so
 # neighbors are not in the edit canvas (fixes giant-head / wrong-person fails).

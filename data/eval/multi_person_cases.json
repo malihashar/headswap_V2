@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "description": "Multi-person bodies for full-frame promote A/B (c vs d vs production). Faces default to data/custom/face.png unless overridden.",
+  "default_face": "data/custom/face.png",
+  "cases": [
+    {
+      "id": "night_group_001",
+      "body": "results/_krea2_full_vs_localized/night_group_001/00_body.png",
+      "face": "data/custom/face.png",
+      "policy": "rightmost"
+    },
+    {
+      "id": "geometry_lock_multi",
+      "body": "results/_geometry_lock_smoke/multi_body.png",
+      "face": "data/custom/face.png",
+      "policy": "largest"
+    },
+    {
+      "id": "compare_multi_body",
+      "body": "results/_compare_single_vs_multi/00_body_full.png",
+      "face": "data/custom/face.png",
+      "policy": "largest"
+    }
+  ]
+}

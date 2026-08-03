@@ -1290,3 +1290,184 @@ def run_full_frame_author_ab(
         except Exception:
             pass
     return payload
+
+
+def run_full_frame_promote_cd(
+    *,
+    repo: Path | str,
+    body_path: Path | str | None = None,
+    face_path: Path | str | None = None,
+    out_dir: Path | str | None = None,
+    policy: str = "largest",
+    include_repo_multi_set: bool = True,
+) -> dict[str, Any]:
+    """Run c vs d (+ production delta) across the multi-person set.
+
+    Does **not** flip yaml production defaults. Writes REPORT.md + WINNER.json
+    and returns session overrides for the recommended winner.
+    """
+    root = Path(repo)
+    script = root / "scripts" / "ab_full_frame_promote_cd.py"
+    if not script.is_file():
+        raise DemoError(
+            f"Missing {script}. Checkout branch {FULL_FRAME_AB_BRANCH} first."
+        )
+    out = Path(out_dir or (root / "results" / "_ab_full_frame_promote_cd"))
+    out.mkdir(parents=True, exist_ok=True)
+
+    progress("Ensuring full v1.2 Identity Edit LoRA (optional download)…")
+    subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "download_krea2.py"),
+            "--include-optional",
+            "--comfy",
+            os.environ.get("COMFYUI_PATH", "/content/ComfyUI"),
+            "--store-dir",
+            os.environ.get(
+                "HEADSWAP_MODEL_STORE", "/content/drive/MyDrive/headswap_V2/models"
+            ),
+            "--staging-dir",
+            os.environ.get("HEADSWAP_STAGING_DIR", "/content/_hf_dl_staging"),
+            "--backend",
+            "auto",
+            "--disable-xet",
+        ],
+        check=False,
+    )
+
+    cases_path = root / "data" / "eval" / "multi_person_cases.json"
+    cmd = [sys.executable, str(script), "--out", str(out)]
+    if include_repo_multi_set and cases_path.is_file():
+        cmd += ["--cases", str(cases_path)]
+    elif body_path and face_path:
+        cmd += ["--body", str(body_path), "--face", str(face_path)]
+    else:
+        raise DemoError("Need multi_person_cases.json or body/face paths")
+
+    if body_path and face_path and include_repo_multi_set:
+        body_p = require_path(body_path, "Body image")
+        face_p = require_path(face_path, "Face image")
+        cmd += [
+            "--extra-case",
+            f"colab_upload:{body_p}:{face_p}:{policy or 'largest'}",
+        ]
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "src") + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
+    progress("Running full-frame promote A/B (prod + c + d) on multi set…")
+    t0 = time.perf_counter()
+    proc = subprocess.run(cmd, cwd=str(root), env=env, capture_output=False)
+    wall = time.perf_counter() - t0
+    if proc.returncode != 0:
+        raise DemoError(
+            f"full-frame promote A/B failed (exit={proc.returncode}). out={out}"
+        )
+
+    winner_path = out / "WINNER.json"
+    report_md = out / "REPORT.md"
+    report_json = out / "REPORT.json"
+    winner: dict[str, Any] = {}
+    if winner_path.is_file():
+        winner = json.loads(winner_path.read_text(encoding="utf-8"))
+
+    session_overrides = winner_session_overrides(winner)
+    ok(
+        f"Promote A/B finished in {wall:.1f}s → winner="
+        f"{winner.get('winner_arm')} procrustes={winner.get('need_procrustes')}"
+    )
+    payload: dict[str, Any] = {
+        "out_dir": str(out),
+        "report_md": str(report_md) if report_md.is_file() else None,
+        "report_json": str(report_json) if report_json.is_file() else None,
+        "winner_json": str(winner_path) if winner_path.is_file() else None,
+        "winner": winner,
+        "session_overrides": session_overrides,
+        "wall_s": round(wall, 2),
+        "mode": "full_frame_promote_cd",
+    }
+    if report_json.is_file():
+        try:
+            payload["report"] = json.loads(report_json.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return payload
+
+
+def winner_session_overrides(winner: dict[str, Any] | None) -> dict[str, Any]:
+    """Config overrides for a Colab session using the promote-gate winner.
+
+    Never writes yaml — callers apply these to an in-memory cfg only.
+    """
+    w = winner or {}
+    proposed = dict(w.get("proposed_production_diff") or {})
+    rb = float(w.get("winner_ref_boost") or proposed.get("full_frame_ref_boost") or 4.0)
+    return {
+        "multi_person_edit_mode": "full_frame",
+        "full_frame_identity_lora_name": "krea2_identity_edit_v1_2.safetensors",
+        "identity_lora_name": "krea2_identity_edit_v1_2.safetensors",
+        "full_frame_ref_boost": rb,
+        "ref_boost": rb,
+        "full_frame_procrustes_align": bool(
+            w.get("need_procrustes")
+            or proposed.get("full_frame_procrustes_align", False)
+        ),
+        # Keep single-person on crop_stitch via face-count routing; SPP flag on.
+        "single_person_parity": True,
+        "mask_crop_stitch": True,
+        # Rollback values (documentation only for session).
+        "_rollback_multi_person_edit_mode": "crop_stitch",
+        "_rollback_identity_lora_name": "krea2_identity_edit_v1_2_r64.safetensors",
+        "_rollback_ref_boost": 3.5,
+    }
+
+
+def apply_winner_overrides(cfg: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Merge winner session overrides into a loaded config (in-memory only)."""
+    out = dict(cfg)
+    for k, v in (overrides or {}).items():
+        if str(k).startswith("_"):
+            continue
+        out[k] = v
+    return out
+
+
+def run_spp_regression_check(
+    *,
+    repo: Path | str,
+    body_path: Path | str | None = None,
+    face_path: Path | str | None = None,
+    out_dir: Path | str | None = None,
+    mock: bool = False,
+) -> dict[str, Any]:
+    """Confirm single-person path did not pick up multi full_frame LoRA/ref_boost."""
+    root = Path(repo)
+    script = root / "scripts" / "ab_full_frame_spp_check.py"
+    if not script.is_file():
+        raise DemoError(f"Missing {script}")
+    out = Path(out_dir or (root / "results" / "_ab_full_frame_spp_check"))
+    cmd = [sys.executable, str(script), "--out", str(out)]
+    if body_path:
+        cmd += ["--body", str(body_path)]
+    if face_path:
+        cmd += ["--face", str(face_path)]
+    if mock:
+        cmd.append("--mock")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "src") + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
+    progress("Running SPP regression check (single-person path)…")
+    proc = subprocess.run(cmd, cwd=str(root), env=env, capture_output=False)
+    report_path = out / "SPP_CHECK.json"
+    report: dict[str, Any] = {}
+    if report_path.is_file():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    if proc.returncode != 0 and not report.get("ok"):
+        raise DemoError(
+            f"SPP regression FAILED: {report.get('summary') or proc.returncode}"
+        )
+    ok(report.get("summary") or f"SPP check exit={proc.returncode}")
+    return {"out_dir": str(out), "report": report, "ok": bool(report.get("ok", True))}

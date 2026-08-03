@@ -51,6 +51,7 @@ from headswap.preprocess import (
     pad_to_square,
     pil_to_rgb_np,
     place_face_at_height_frac,
+    procrustes_align_generated_to_body,
     resize_contain,
     resize_long_side,
     resize_max_keep_ar,
@@ -2487,6 +2488,37 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 f"[krea2] full_frame clamped oversized head "
                                 f"ratio {clamp_info['ratio_before']:.2f}→"
                                 f"{clamp_info['ratio_after']:.2f}",
+                                file=sys.__stdout__,
+                                flush=True,
+                            )
+                        face_prep_diag["full_frame_clamp"] = clamp_info
+                    # Landmark Procrustes (similarity): map generated face → original.
+                    # Config-gated; apply before freeze so neighbors stay locked.
+                    do_procrustes = bool(
+                        self.cfg.get("full_frame_procrustes_align", False)
+                    )
+                    if do_procrustes:
+                        out, proc_info = procrustes_align_generated_to_body(
+                            out,
+                            body_full,
+                            self.cache_dir,
+                            prefer_body_box=selected_face,
+                            prefer_gen_box=selected_face,
+                        )
+                        face_prep_diag["full_frame_procrustes"] = proc_info
+                        if proc_info.get("procrustes"):
+                            print(
+                                "[krea2] full_frame procrustes_align "
+                                f"scale={proc_info.get('scale')} "
+                                f"rot_deg={proc_info.get('rotation_deg')} "
+                                f"t={proc_info.get('translation')}",
+                                file=sys.__stdout__,
+                                flush=True,
+                            )
+                        elif verbose:
+                            print(
+                                "[krea2] full_frame procrustes skipped: "
+                                f"{proc_info.get('procrustes_reason')}",
                                 file=sys.__stdout__,
                                 flush=True,
                             )

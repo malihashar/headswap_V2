@@ -2101,6 +2101,72 @@ def align_face_to_destination(
     return Image.fromarray(rgba, mode="RGBA"), info
 
 
+def procrustes_align_generated_to_body(
+    generated: Image.Image,
+    body: Image.Image,
+    cache_dir,
+    *,
+    prefer_body_box: FaceBox | None = None,
+    prefer_gen_box: FaceBox | None = None,
+) -> tuple[Image.Image, dict[str, Any]]:
+    """Similarity transform (Procrustes): map generated face landmarks → body.
+
+    Uses ``cv2.estimateAffinePartial2D`` (rotation + uniform scale + translation)
+    so head size/pose can be locked to the original photo after a full-frame
+    Krea2 sample. Returns ``(aligned, info)``; on failure returns ``generated``.
+    """
+    info: dict[str, Any] = {
+        "procrustes": False,
+        "procrustes_reason": None,
+        "scale": None,
+        "rotation_deg": None,
+        "translation": None,
+    }
+    gen = generated.convert("RGB")
+    bod = body.convert("RGB")
+    if gen.size != bod.size:
+        gen = gen.resize(bod.size, Image.Resampling.LANCZOS)
+    gen_rgb = pil_to_rgb_np(gen)
+    bod_rgb = pil_to_rgb_np(bod)
+    src_lm, src_backend, src_note = get_face_landmarks5(
+        gen_rgb, cache_dir, prefer_box=prefer_gen_box
+    )
+    dst_lm, dst_backend, dst_note = get_face_landmarks5(
+        bod_rgb, cache_dir, prefer_box=prefer_body_box
+    )
+    info["src_landmarks_backend"] = src_backend
+    info["dst_landmarks_backend"] = dst_backend
+    if src_lm is None or dst_lm is None:
+        info["procrustes_reason"] = src_note or dst_note or "landmarks_missing"
+        return gen, info
+    if src_backend != "insightface" or dst_backend != "insightface":
+        info["procrustes_reason"] = "need_insightface_landmarks"
+        return gen, info
+    matrix, inliers = cv2.estimateAffinePartial2D(src_lm, dst_lm, method=cv2.LMEDS)
+    if matrix is None:
+        info["procrustes_reason"] = "estimateAffinePartial2D_failed"
+        return gen, info
+    # Recover similarity params from the 2x3 matrix.
+    a, b = float(matrix[0, 0]), float(matrix[0, 1])
+    scale = float(math.hypot(a, b))
+    rot = float(math.degrees(math.atan2(b, a))) if scale > 1e-8 else 0.0
+    info["scale"] = round(scale, 4)
+    info["rotation_deg"] = round(rot, 3)
+    info["translation"] = [round(float(matrix[0, 2]), 2), round(float(matrix[1, 2]), 2)]
+    if inliers is not None:
+        info["inliers"] = int(np.asarray(inliers).sum())
+    h, w = bod_rgb.shape[:2]
+    warped = cv2.warpAffine(
+        gen_rgb,
+        matrix,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+    info["procrustes"] = True
+    return Image.fromarray(warped, mode="RGB"), info
+
+
 def relock_pose_to_destination(
     generated: Image.Image,
     destination: Image.Image,
