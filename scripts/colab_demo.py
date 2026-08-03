@@ -1119,3 +1119,174 @@ def show_side_by_side(
 
 def elapsed(t0: float) -> float:
     return time.perf_counter() - t0
+
+
+# ---------------------------------------------------------------------------
+# Full-frame author-parity A/B (branch-gated Colab Run-all path)
+# ---------------------------------------------------------------------------
+
+FULL_FRAME_AB_BRANCH = "ab/full-frame-author-parity"
+
+
+def ensure_repo_branch(
+    repo: Path | str,
+    branch: str,
+    *,
+    remote: str = "origin",
+) -> dict[str, Any]:
+    """Fetch + checkout ``branch`` so Colab Run-all lands on the A/B code."""
+    root = Path(repo)
+    branch = str(branch or "").strip()
+    if not branch:
+        return repo_git_info(root)
+    print(f"→ Checking out branch {branch}…")
+    try:
+        subprocess.run(
+            ["git", "-C", str(root), "fetch", remote, branch],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        r = subprocess.run(
+            ["git", "-C", str(root), "checkout", branch],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            # Create local tracking branch if needed.
+            subprocess.run(
+                ["git", "-C", str(root), "checkout", "-B", branch, f"{remote}/{branch}"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "-C", str(root), "pull", "--ff-only", remote, branch],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:
+        raise DemoError(
+            f"Could not checkout branch {branch}: {exc}. "
+            "Check network / GitHub access, or unset REPO_BRANCH."
+        ) from None
+    info = repo_git_info(root)
+    print(f"✓ repo on {info.get('branch')} @ {info.get('commit_short')}")
+    return info
+
+
+def run_full_frame_author_ab(
+    *,
+    repo: Path | str,
+    body_path: Path | str,
+    face_path: Path | str,
+    out_dir: Path | str | None = None,
+    policy: str = "largest",
+) -> dict[str, Any]:
+    """Run the four-arm full-frame author-parity A/B (non-mock).
+
+    Invokes ``scripts/ab_full_frame_author_parity.py`` against the uploaded
+    body/face so Colab **Run all** on this branch produces REPORT.md without
+    a separate shell cell.
+    """
+    root = Path(repo)
+    script = root / "scripts" / "ab_full_frame_author_parity.py"
+    if not script.is_file():
+        raise DemoError(
+            f"Missing {script}. Checkout branch {FULL_FRAME_AB_BRANCH} first."
+        )
+    body_p = require_path(body_path, "Body image")
+    face_p = require_path(face_path, "Face image")
+    out = Path(out_dir or (root / "results" / "_ab_full_frame_author_parity"))
+    out.mkdir(parents=True, exist_ok=True)
+
+    # Ensure full v1.2 LoRA for arms (c)/(d); r64 is already in the required set.
+    progress("Ensuring full v1.2 Identity Edit LoRA (optional download)…")
+    subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "download_krea2.py"),
+            "--include-optional",
+            "--comfy",
+            os.environ.get("COMFYUI_PATH", "/content/ComfyUI"),
+            "--store-dir",
+            os.environ.get(
+                "HEADSWAP_MODEL_STORE", "/content/drive/MyDrive/headswap_V2/models"
+            ),
+            "--staging-dir",
+            os.environ.get("HEADSWAP_STAGING_DIR", "/content/_hf_dl_staging"),
+            "--backend",
+            "auto",
+            "--disable-xet",
+        ],
+        check=False,
+    )
+
+    progress("Running full-frame author-parity A/B (a/b/c/d)…")
+    cmd = [
+        sys.executable,
+        str(script),
+        "--body",
+        str(body_p),
+        "--face",
+        str(face_p),
+        "--out",
+        str(out),
+    ]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "src") + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
+    # Force policy via a one-off cases JSON so night_group defaults don't replace upload.
+    cases_path = out / "_colab_case.json"
+    cases_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "colab_upload",
+                    "body": str(body_p),
+                    "face": str(face_p),
+                    "policy": str(policy or "largest"),
+                }
+            ],
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    cmd = [
+        sys.executable,
+        str(script),
+        "--cases",
+        str(cases_path),
+        "--out",
+        str(out),
+    ]
+    t0 = time.perf_counter()
+    proc = subprocess.run(cmd, cwd=str(root), env=env, capture_output=False)
+    wall = time.perf_counter() - t0
+    if proc.returncode != 0:
+        raise DemoError(
+            f"full-frame author-parity A/B failed (exit={proc.returncode}). "
+            f"See logs above; report dir={out}"
+        )
+
+    report_md = out / "REPORT.md"
+    report_json = out / "REPORT.json"
+    sbs = out / "colab_upload" / "side_by_side.png"
+    ok(f"Full-frame A/B finished in {wall:.1f}s → {report_md}")
+    payload: dict[str, Any] = {
+        "out_dir": str(out),
+        "report_md": str(report_md) if report_md.is_file() else None,
+        "report_json": str(report_json) if report_json.is_file() else None,
+        "side_by_side": str(sbs) if sbs.is_file() else None,
+        "wall_s": round(wall, 2),
+        "mode": "full_frame_author_parity_ab",
+    }
+    if report_json.is_file():
+        try:
+            payload["report"] = json.loads(report_json.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return payload
