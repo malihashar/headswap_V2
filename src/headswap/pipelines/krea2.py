@@ -54,6 +54,7 @@ from headswap.preprocess import (
     resize_contain,
     resize_long_side,
     resize_max_keep_ar,
+    resize_to_megapixels,
     select_face_box,
     suppress_neighbor_faces_in_mask,
 )
@@ -469,6 +470,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
         lora_name = self.cfg.get(
             "identity_lora_name", "krea2_identity_edit_v1_2_r64.safetensors"
         )
+        # Full-frame A/B only: optional LoRA override (crop_stitch ignores this).
+        _ff_lora = self.cfg.get("full_frame_identity_lora_name")
+        _ff_mode = str(
+            self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
+        ).strip().lower()
+        if _ff_lora and _ff_mode in ("full_frame", "fullframe", "full"):
+            lora_name = str(_ff_lora)
         lora_strength = float(self.cfg.get("identity_lora_strength", 1.0) or 0.0)
         key = f"krea2::{unet_name}::{clip_name}::{vae_name}::{lora_name}::{lora_strength}"
         if key in rt.models:
@@ -1232,14 +1240,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
         selected_face: FaceBox | None,
         all_faces: list[FaceBox],
     ) -> dict[str, Any]:
-        """Full-body scene + identity ref matching crop_stitch person prep."""
+        """Full-body scene + identity ref matching crop_stitch person prep.
+
+        Unlike crop_stitch (head crop @ long-side 768 ≈ 0.59MP), full_frame
+        passes the entire photo as Krea2 image-1. Author guidance is ~1–1.5MP
+        for two-person context — see ``full_frame_target_mp``.
+        """
         max_ff = int(
             self.cfg.get(
-                "multi_full_frame_max_dim",
-                self.cfg.get("max_body_dim", 1024),
+                "full_frame_max_dim",
+                self.cfg.get(
+                    "multi_full_frame_max_dim",
+                    self.cfg.get("max_body_dim", 1024),
+                ),
             )
         )
-        scene = resize_max_keep_ar(body_full.convert("RGB"), max_ff, div_by=div_by)
+        target_mp = self.cfg.get("full_frame_target_mp", 1.25)
+        if target_mp is not None:
+            scene = resize_to_megapixels(
+                body_full.convert("RGB"),
+                target_mp=float(target_mp),
+                min_mp=float(self.cfg.get("full_frame_min_mp", 1.0)),
+                max_mp=float(self.cfg.get("full_frame_max_mp", 1.5)),
+                max_dim=max_ff,
+                div_by=div_by,
+                allow_upscale=bool(self.cfg.get("full_frame_allow_upscale", False)),
+            )
+        else:
+            scene = resize_max_keep_ar(body_full.convert("RGB"), max_ff, div_by=div_by)
 
         # Identity conditioning parity with successful single-person crop_stitch:
         # that path uses resize_contain (scale_match gated off for single).
@@ -1290,8 +1318,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
             ),
             "edit_mode": "full_frame",
             "scene_size": list(scene.size),
+            "scene_megapixels": round((scene.size[0] * scene.size[1]) / 1_000_000.0, 4),
             "person_size": list(person.size),
             "body_size": list(body_full.size),
+            "full_frame_target_mp": (
+                None
+                if self.cfg.get("full_frame_target_mp") is None
+                else float(self.cfg.get("full_frame_target_mp"))
+            ),
             "face_position": self._face_position_label(selected_face, all_faces),
             "face_height_frac_scene": round(float(face_h_frac), 4),
             "person_prep": person_prep,
@@ -1336,6 +1370,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
         grounding_px = int(self.cfg.get("grounding_px", 768))
         ref_boost = float(self.cfg.get("ref_boost", 4.0))
         ref_boost_a = float(self.cfg.get("ref_boost_a", 1.0))
+        # Full-frame A/B only: optional ref_boost override (crop_stitch ignores).
+        _ff_mode = str(
+            self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
+        ).strip().lower()
+        _ff_rb = self.cfg.get("full_frame_ref_boost")
+        if _ff_rb is not None and _ff_mode in ("full_frame", "fullframe", "full"):
+            ref_boost = float(_ff_rb)
         fit_mode = str(self.cfg.get("fit_mode", "fit") or "fit")
         steps = int(self.cfg.get("steps", 8))
         cfg = float(self.cfg.get("cfg", 1.0))
@@ -2010,9 +2051,35 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     and multi_edit_mode in ("full_frame", "fullframe", "full")
                     and not swap_all
                 ):
-                    # Full-frame Krea2 (no crop). Locality via post-freeze composite.
+                    # Full-frame Krea2 (no head crop). Author guidance is a full
+                    # scene around ~1–1.5MP — do NOT reuse crop_stitch's 1024 body
+                    # cap, which starves body/shoulder proportion cues.
                     multi_person = True
                     use_tight = False
+                    body_ff = resize_to_megapixels(
+                        body.convert("RGB"),
+                        target_mp=float(self.cfg.get("full_frame_target_mp", 1.25)),
+                        min_mp=float(self.cfg.get("full_frame_min_mp", 1.0)),
+                        max_mp=float(self.cfg.get("full_frame_max_mp", 1.5)),
+                        max_dim=int(
+                            self.cfg.get(
+                                "full_frame_max_dim",
+                                self.cfg.get("multi_full_frame_max_dim", 2048),
+                            )
+                        ),
+                        div_by=div_by,
+                        allow_upscale=bool(
+                            self.cfg.get("full_frame_allow_upscale", False)
+                        ),
+                    )
+                    # Re-detect on the full-frame canvas so boxes match scene coords.
+                    selected_face, all_faces = select_face_box(
+                        pil_to_rgb_np(body_ff),
+                        self.cache_dir,
+                        index=body_face_index,
+                        policy=body_face_policy,
+                    )
+                    body_full = body_ff
                     built = self._build_full_frame_inputs(
                         body_full,
                         face_crop,
@@ -2042,7 +2109,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         f"person_prep={face_prep_diag.get('person_prep')} "
                         f"freeze={freeze_mask is not None} "
                         f"ref_boost_mask={ref_boost_mask_img is not None} "
-                        f"scene={list(scene.size)} person={list(person.size)}",
+                        f"scene={list(scene.size)} "
+                        f"scene_mp={face_prep_diag.get('scene_megapixels')} "
+                        f"person={list(person.size)}",
                         file=sys.__stdout__,
                         flush=True,
                     )
@@ -2052,6 +2121,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     timings["_edit_mode_full_frame"] = 1.0
                     timings["_full_frame_freeze"] = (
                         1.0 if freeze_mask is not None else 0.0
+                    )
+                    timings["_full_frame_scene_mp"] = float(
+                        face_prep_diag.get("scene_megapixels") or 0.0
                     )
                 else:
                     # Default / single-face / multi crop_stitch path.

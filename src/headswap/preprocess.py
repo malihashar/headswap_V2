@@ -43,6 +43,54 @@ def resize_max_keep_ar(im: Image.Image, max_dim: int, div_by: int = 2) -> Image.
     return im.resize((nw, nh), Image.Resampling.LANCZOS)
 
 
+def resize_to_megapixels(
+    im: Image.Image,
+    *,
+    target_mp: float = 1.25,
+    min_mp: float = 1.0,
+    max_mp: float = 1.5,
+    max_dim: int = 2048,
+    div_by: int = 16,
+    allow_upscale: bool = False,
+) -> Image.Image:
+    """Resize so pixel count lands near ``target_mp`` megapixels (AR preserved).
+
+    Author Identity Edit guidance: generate around 1–1.5MP (≤2MP). Large
+    sources are downscaled into that band; small sources are left at native
+    resolution unless ``allow_upscale`` is set (avoids inventing detail).
+    """
+    im = im.convert("RGB")
+    w, h = im.size
+    cur_mp = (w * h) / 1_000_000.0
+    goal = float(min(max(float(target_mp), float(min_mp)), float(max_mp)))
+    if cur_mp <= 1e-9:
+        return im
+    if (not allow_upscale) and cur_mp <= goal:
+        # Native is already ≤ target band — only enforce max_dim + divisibility.
+        if max(w, h) > int(max_dim):
+            return resize_max_keep_ar(im, int(max_dim), div_by=div_by)
+        nw = evenify(w, div_by)
+        nh = evenify(h, div_by)
+        if (nw, nh) == (w, h):
+            return im
+        return im.resize((nw, nh), Image.Resampling.LANCZOS)
+
+    scale = math.sqrt(goal / cur_mp)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    # Hard long-side cap (still keep AR).
+    long = max(nw, nh)
+    if long > int(max_dim):
+        s2 = float(max_dim) / float(long)
+        nw = max(1, int(round(nw * s2)))
+        nh = max(1, int(round(nh * s2)))
+    nw = evenify(nw, div_by)
+    nh = evenify(nh, div_by)
+    if (nw, nh) == (w, h):
+        return im
+    return im.resize((nw, nh), Image.Resampling.LANCZOS)
+
+
 def resize_contain(
     im: Image.Image,
     size: tuple[int, int],

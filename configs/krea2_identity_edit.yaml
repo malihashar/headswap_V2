@@ -122,6 +122,19 @@ face_matte_force_ellipse: true
 #   full_frame  — debug/A/B only
 multi_person_edit_mode: crop_stitch
 single_person_parity: true
+# --- Full-frame A/B knobs (IGNORED while multi_person_edit_mode=crop_stitch) ---
+# Author Identity Edit guidance: pass the FULL scene (~1–1.5MP), not a head crop.
+# Production stays crop_stitch; flip mode to full_frame only for isolated A/B.
+full_frame_target_mp: 1.25
+full_frame_min_mp: 1.0
+full_frame_max_mp: 1.5
+full_frame_max_dim: 2048
+# Do not invent detail on tiny sources (e.g. night_group ~0.12MP).
+full_frame_allow_upscale: false
+# Optional overrides applied ONLY when multi_person_edit_mode=full_frame.
+# null = use the global identity_lora_name / ref_boost above.
+full_frame_identity_lora_name: null
+full_frame_ref_boost: null
 head_mask_backend: ellipse
 seam_refine: false
 seam_refine_erode_px: 8
