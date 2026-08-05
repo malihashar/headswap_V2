@@ -681,26 +681,48 @@ def classify_lighting(
     *,
     threshold: float,
     box: FaceBox | None = None,
+    boxes: list[FaceBox] | None = None,
 ) -> dict[str, Any]:
     """Compare mean HSV-V against ``threshold``; below => dark.
 
-    Returns a small dict suitable for logging / meta (metric, dark, region).
+    Evaluates both face region(s) and whole frame so that dark night photos
+    with flash-lit faces or underexposed faces in bright backgrounds are
+    reliably classified as dark.
     """
-    used_face = False
-    if box is not None:
-        y0, y1 = max(0, int(box.y0)), max(0, int(box.y1))
-        x0, x1 = max(0, int(box.x0)), max(0, int(box.x1))
-        h, w = rgb.shape[:2]
-        used_face = min(h, y1) > max(0, y0) + 1 and min(w, x1) > max(0, x0) + 1
-    metric = mean_hsv_v(rgb, box if used_face else None)
-    dark = bool(metric < float(threshold))
+    frame_metric = mean_hsv_v(rgb, None)
+
+    face_metrics: list[float] = []
+    if boxes:
+        for b in boxes:
+            if b is not None:
+                m = mean_hsv_v(rgb, b)
+                if m > 0:
+                    face_metrics.append(m)
+    elif box is not None:
+        m = mean_hsv_v(rgb, box)
+        if m > 0:
+            face_metrics.append(m)
+
+    face_metric = float(np.mean(face_metrics)) if face_metrics else None
+
+    # Dark if EITHER face region OR overall frame falls below threshold.
+    dark_frame = frame_metric < float(threshold)
+    dark_face = (face_metric < float(threshold)) if face_metric is not None else False
+    dark = bool(dark_frame or dark_face)
+
+    # Primary metric reported is the minimum of face & frame luminance for conservative dark detection
+    effective_metric = min(frame_metric, face_metric) if face_metric is not None else frame_metric
+
     return {
-        "lighting_metric": round(metric, 4),
+        "lighting_metric": round(effective_metric, 4),
+        "face_luminance": round(face_metric, 4) if face_metric is not None else None,
+        "whole_frame_luminance": round(frame_metric, 4),
         "lighting_metric_name": "mean_hsv_v",
-        "lighting_region": "face" if used_face else "full_frame",
+        "lighting_region": "face+frame" if face_metric is not None else "full_frame",
         "dark_lighting_threshold": float(threshold),
         "is_dark": dark,
     }
+
 
 
 def expand_box(

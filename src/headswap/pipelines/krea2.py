@@ -1482,6 +1482,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
         compile_mode = str(self.cfg.get("torch_compile_mode", "reduce-overhead"))
         used_ref_boost_mask = False
 
+        lora_name = self.cfg.get("identity_lora_name", "krea2_identity_edit_v1_2_r64.safetensors")
+        _ff_lora = self.cfg.get("full_frame_identity_lora_name")
+        if _ff_lora and _ff_mode in ("full_frame", "fullframe", "full"):
+            lora_name = str(_ff_lora)
+
+        import sys
+        print(
+            f"[krea2 sampling] mode={_ff_mode} lora={lora_name} "
+            f"ref_boost={ref_boost} grounding_px={grounding_px} "
+            f"steps={steps} cfg={cfg} seed={seed_i}",
+            file=sys.__stdout__,
+            flush=True,
+        )
+
         with torch.no_grad():
             scene_t = pil_to_comfy_tensor(scene, torch)
             person_t = pil_to_comfy_tensor(person, torch)
@@ -2117,7 +2131,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             return meta
 
         threshold = float(self.cfg.get("dark_lighting_threshold", 70.0))
-        lighting = classify_lighting(rgb, threshold=threshold, box=selected)
+        lighting = classify_lighting(rgb, threshold=threshold, box=selected, boxes=faces)
         meta.update(lighting)
         if lighting["is_dark"]:
             self.cfg["multi_person_edit_mode"] = "full_frame"
@@ -2141,7 +2155,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         print(
             f"[krea2] lighting_route={route} reason={reason} "
             f"faces={n_faces} metric={lighting['lighting_metric']:.2f} "
-            f"({lighting['lighting_metric_name']}/{lighting['lighting_region']}) "
+            f"(face_lum={lighting.get('face_luminance')}, frame_lum={lighting.get('whole_frame_luminance')}) "
             f"threshold={threshold} dark={lighting['is_dark']}",
             file=sys.__stdout__,
             flush=True,
