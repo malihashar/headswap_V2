@@ -2169,6 +2169,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if backend not in ("magic_hour", "magichour", "mh"):
             return None
 
+        # Colab may run Magic Hour first to show an interactive face selector
+        # and map each returned crop identity to scene geometry. Reuse that
+        # completed job instead of uploading/detecting the same image twice.
+        precomputed = self.cfg.get("magic_hour_precomputed_result")
+        if isinstance(precomputed, dict) and precomputed.get("status") == "complete":
+            return dict(precomputed)
+
         target = self.cfg.get("magic_hour_target_file_path")
         conf = self.cfg.get("magic_hour_confidence_score", 0.5)
         conf_f = None if conf is None else float(conf)
