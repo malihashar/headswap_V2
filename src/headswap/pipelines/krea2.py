@@ -52,6 +52,7 @@ from headswap.preprocess import (
     pad_to_square,
     pil_to_rgb_np,
     place_face_at_height_frac,
+    procrustes_align_edited_crop_to_body_box,
     procrustes_align_generated_to_body,
     resize_contain,
     resize_long_side,
@@ -59,6 +60,7 @@ from headswap.preprocess import (
     resize_to_megapixels,
     select_face_box,
     suppress_neighbor_faces_in_mask,
+    expand_crop_box_wide,
 )
 from headswap.segmentation import build_head_hair_mask
 
@@ -738,13 +740,57 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
             crop_img = body_full.crop(box)
 
-        # Match successful single-person inference resolution (default 768).
-        crop_long = int(self.cfg.get("crop_long_side", 768))
-        if (not spp) and use_tight and bool(self.cfg.get("multi_boost_crop_long", False)):
-            crop_long = max(
-                crop_long, int(self.cfg.get("multi_crop_long_side", 896))
+        # Match successful single-person inference resolution (default 768),
+        # unless crop_margin_mode=wide targets ~1MP with a larger native crop.
+        crop_margin_mode = str(
+            self.cfg.get("crop_margin_mode", "tight") or "tight"
+        ).strip().lower()
+        wide_mode = crop_margin_mode in ("wide", "wide_crop", "1mp")
+        if wide_mode and selected_face is not None:
+            # Recompute a larger crop from the face (shoulders/torso), not an
+            # upscale of the tight head crop. Neighbor clamp still applies.
+            wide_box = expand_crop_box_wide(
+                body_full.size,
+                selected_face,
+                pad_top_frac=float(self.cfg.get("wide_crop_pad_top_frac", 1.20)),
+                pad_side_frac=float(self.cfg.get("wide_crop_pad_side_frac", 1.80)),
+                pad_bot_frac=float(self.cfg.get("wide_crop_pad_bot_frac", 2.50)),
+                target_mp=float(self.cfg.get("wide_crop_target_mp", 1.0)),
+                div_by=div_by,
             )
-        scene = resize_long_side(crop_img, crop_long, div_by=div_by)
+            if multi_person and bool(self.cfg.get("clamp_crop_away_neighbors", True)):
+                wide_box, neighbor_clamp_info = clamp_crop_away_neighbors(
+                    body_full.size,
+                    wide_box,
+                    selected_face,
+                    all_faces,
+                    margin_frac=float(self.cfg.get("neighbor_crop_margin_frac", 0.18)),
+                    protect_top_frac=top_ext,
+                    protect_side_frac=side_ext,
+                    protect_bot_frac=bot_ext,
+                    protect_pad_px=expand_px + int(self.cfg.get("mask_blur_px", 12)),
+                )
+            box = wide_box
+            crop_img = body_full.crop(box)
+            # Allow mild upscale so the Krea2 scene lands near ~1MP when the
+            # available native crop is smaller (still a cropped region, not FF).
+            scene = resize_to_megapixels(
+                crop_img,
+                target_mp=float(self.cfg.get("wide_crop_target_mp", 1.0)),
+                min_mp=float(self.cfg.get("wide_crop_min_mp", 0.85)),
+                max_mp=float(self.cfg.get("wide_crop_max_mp", 1.15)),
+                max_dim=int(self.cfg.get("wide_crop_max_dim", 1536)),
+                div_by=div_by,
+                allow_upscale=bool(self.cfg.get("wide_crop_allow_upscale", True)),
+            )
+        else:
+            # Match successful single-person inference resolution (default 768).
+            crop_long = int(self.cfg.get("crop_long_side", 768))
+            if (not spp) and use_tight and bool(self.cfg.get("multi_boost_crop_long", False)):
+                crop_long = max(
+                    crop_long, int(self.cfg.get("multi_crop_long_side", 896))
+                )
+            scene = resize_long_side(crop_img, crop_long, div_by=div_by)
         face_h_frac_scene = 0.55
         hair_boost = float(self.cfg.get("identity_hair_height_boost", 1.30))
         if selected_face is not None and box is not None:
@@ -774,7 +820,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 )
         else:
             person = resize_long_side(
-                face_crop.convert("RGB"), crop_long, div_by=div_by
+                face_crop.convert("RGB"),
+                max(scene.size),
+                div_by=div_by,
             )
         apply_white_bg = (
             (not spp)
@@ -841,11 +889,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "crop_long_native": int(max(box[2] - box[0], box[3] - box[1])),
             "mask_size": list(mask.size),
             "scene_size": list(scene.size),
+            "scene_megapixels": round(
+                (scene.size[0] * scene.size[1]) / 1_000_000.0, 4
+            ),
             "person_size": list(person.size),
             "body_size": list(body_full.size),
             "use_tight": bool(use_tight),
             "isolate_selected": bool(isolate_selected),
             "multi_person": bool(multi_person),
+            "crop_margin_mode": "wide" if wide_mode else "tight",
             "face_white_bg_applied": bool(apply_white_bg),
             "crop_expand": {k: round(float(v), 4) for k, v in expand_info.items()},
             "neighbor_crop_clamp": {
@@ -1631,6 +1683,47 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "verbose": verbose,
         }
 
+    def _maybe_procrustes_edited_crop(
+        self,
+        edited: Image.Image,
+        body_full: Image.Image,
+        box: tuple[int, int, int, int],
+        selected_face: FaceBox | None,
+        face_prep_diag: dict[str, Any],
+    ) -> Image.Image:
+        """Optional Procrustes on crop_stitch edited crop before stitch."""
+        if not bool(self.cfg.get("enable_procrustes_correction", False)):
+            return edited
+        aligned, info = procrustes_align_edited_crop_to_body_box(
+            edited,
+            body_full,
+            box,
+            self.cache_dir,
+            prefer_body_box=selected_face,
+            min_inliers=int(self.cfg.get("procrustes_min_inliers", 3)),
+            min_scale=float(self.cfg.get("procrustes_min_scale", 0.40)),
+            max_scale=float(self.cfg.get("procrustes_max_scale", 2.50)),
+        )
+        face_prep_diag["procrustes_correction"] = info
+        import sys
+
+        if info.get("procrustes"):
+            print(
+                "[krea2] procrustes_correction "
+                f"scale={info.get('scale')} rot_deg={info.get('rotation_deg')} "
+                f"t={info.get('translation')} inliers={info.get('inliers')}",
+                file=sys.__stdout__,
+                flush=True,
+            )
+            return aligned
+        print(
+            "[krea2] procrustes_correction skipped: "
+            f"{info.get('procrustes_reason')}",
+            file=sys.__stdout__,
+            flush=True,
+        )
+        return edited
+
     def _stitch_edited(
         self,
         canvas: Image.Image,
@@ -2340,10 +2433,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         edit_cache_info=edit_cache_info,
                         seed=base_seed + face_i,
                     )
+                    edited_i = self._maybe_procrustes_edited_crop(
+                        sample["edited"],
+                        body_full,
+                        built["box"],
+                        face_box,
+                        face_prep_diag,
+                    )
                     with _stage(timings, "postprocessing"):
                         canvas = self._stitch_edited(
                             canvas,
-                            sample["edited"],
+                            edited_i,
                             built["mask"],
                             built["box"],
                             built["crop_content_box"],
@@ -2421,6 +2521,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 ref_boost_mask=ref_boost_mask_img if edit_mode == "full_frame" else None,
             )
             edited = sample_meta["edited"]
+            if (
+                do_stitch
+                and body_full is not None
+                and box is not None
+                and edit_mode != "full_frame"
+            ):
+                edited = self._maybe_procrustes_edited_crop(
+                    edited,
+                    body_full,
+                    box,
+                    selected_face,
+                    face_prep_diag,
+                )
+                sample_meta["edited"] = edited
             if head_scale_trace is not None:
                 head_scale_trace.record_edited(edited)
             with _stage(timings, "postprocessing"):
@@ -2650,6 +2764,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "body_size": list(body_full.size) if body_full is not None else list(scene.size),
             "crop_size": list(scene.size) if mask_crop_stitch else None,
             "mask_crop_stitch": mask_crop_stitch,
+            "crop_margin_mode": str(
+                self.cfg.get("crop_margin_mode", "tight") or "tight"
+            ),
+            "enable_procrustes_correction": bool(
+                self.cfg.get("enable_procrustes_correction", False)
+            ),
             "edit_mode": edit_mode,
             "multi_person_swap_mode": str(
                 self.cfg.get("multi_person_swap_mode", "krea2_crop") or "krea2_crop"

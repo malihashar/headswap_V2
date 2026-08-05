@@ -1177,6 +1177,84 @@ def ensure_repo_branch(
     return info
 
 
+def run_prod_crop_fixes_ab(
+    *,
+    repo: Path | str,
+    body_path: Path | str,
+    face_path: Path | str,
+    out_dir: Path | str | None = None,
+    policy: str = "largest",
+    arms: str = "prod,prod_procrustes,prod_wide_crop",
+) -> dict[str, Any]:
+    """Run prod vs Procrustes vs wide-crop A/B (crop_stitch only)."""
+    root = Path(repo)
+    script = root / "scripts" / "ab_prod_crop_fixes.py"
+    if not script.is_file():
+        raise DemoError(f"Missing {script}. Checkout branch {FULL_FRAME_AB_BRANCH}.")
+    body_p = require_path(body_path, "Body image")
+    face_p = require_path(face_path, "Face image")
+    out = Path(out_dir or (root / "results" / "_ab_prod_crop_fixes"))
+    out.mkdir(parents=True, exist_ok=True)
+
+    arms_arg = str(arms or "prod,prod_procrustes,prod_wide_crop").strip()
+    progress(f"Running prod crop-fixes A/B (arms={arms_arg})…")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "src") + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
+    cases_path = out / "_colab_case.json"
+    cases_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "colab_upload",
+                    "body": str(body_p),
+                    "face": str(face_p),
+                    "policy": str(policy or "largest"),
+                }
+            ],
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    cmd = [
+        sys.executable,
+        str(script),
+        "--cases",
+        str(cases_path),
+        "--out",
+        str(out),
+        "--arms",
+        arms_arg,
+    ]
+    t0 = time.perf_counter()
+    proc = subprocess.run(cmd, cwd=str(root), env=env, capture_output=False)
+    wall = time.perf_counter() - t0
+    if proc.returncode != 0:
+        raise DemoError(
+            f"prod crop-fixes A/B failed (exit={proc.returncode}). out={out}"
+        )
+    report_md = out / "REPORT.md"
+    report_json = out / "REPORT.json"
+    sbs = out / "colab_upload" / "side_by_side.png"
+    ok(f"Prod crop-fixes A/B finished in {wall:.1f}s → {report_md}")
+    payload: dict[str, Any] = {
+        "out_dir": str(out),
+        "report_md": str(report_md) if report_md.is_file() else None,
+        "report_json": str(report_json) if report_json.is_file() else None,
+        "side_by_side": str(sbs) if sbs.is_file() else None,
+        "wall_s": round(wall, 2),
+        "arms": arms_arg,
+        "mode": "prod_crop_fixes_ab",
+    }
+    if report_json.is_file():
+        try:
+            payload["report"] = json.loads(report_json.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return payload
+
+
 def run_full_frame_author_ab(
     *,
     repo: Path | str,

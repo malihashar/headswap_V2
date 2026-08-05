@@ -56,10 +56,27 @@ fit_mode: fit
 max_dim: 768
 div_by: 16
 
-# --- Locality (mask → crop → edit → soft stitch → LAB) ---
+# Locality (mask → crop → edit → soft stitch → LAB)
 # Same shell as Klein promote / Qwen improved. Diffusion still Krea2 dual-ref
 # on the crop (Picture 1 = body crop, Picture 2 = face). Set false for full-frame A/B.
 mask_crop_stitch: true
+# tight = production head crop (~768 long side). wide = larger shoulder/torso
+# crop resized to ~1MP (experimental; keep neighbor clamp). OFF by default.
+crop_margin_mode: tight
+wide_crop_target_mp: 1.0
+wide_crop_min_mp: 0.85
+wide_crop_max_mp: 1.15
+wide_crop_max_dim: 1536
+wide_crop_allow_upscale: true
+wide_crop_pad_top_frac: 1.20
+wide_crop_pad_side_frac: 1.80
+wide_crop_pad_bot_frac: 2.50
+# Landmark Procrustes on the edited crop before stitch (crop_stitch path).
+# OFF by default — experimental A/B only.
+enable_procrustes_correction: false
+procrustes_min_inliers: 3
+procrustes_min_scale: 0.40
+procrustes_max_scale: 2.50
 max_body_dim: 1024
 crop_long_side: 768
 square_crop: false

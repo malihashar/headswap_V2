@@ -2101,6 +2101,168 @@ def align_face_to_destination(
     return Image.fromarray(rgba, mode="RGBA"), info
 
 
+def procrustes_align_edited_crop_to_body_box(
+    edited: Image.Image,
+    body: Image.Image,
+    box: tuple[int, int, int, int],
+    cache_dir,
+    *,
+    prefer_body_box: FaceBox | None = None,
+    min_inliers: int = 3,
+    min_scale: float = 0.40,
+    max_scale: float = 2.50,
+) -> tuple[Image.Image, dict[str, Any]]:
+    """Procrustes (similarity) on a crop_stitch edited crop before stitch.
+
+    Landmarks:
+      - destination: selected face on ``body``, mapped into edited-crop coords
+        via ``box`` + resize scale
+      - source: face on ``edited``
+
+    Warps the full edited crop so generated head scale/pose matches the
+    original. On failure returns ``edited`` unchanged with a skip reason.
+    """
+    info: dict[str, Any] = {
+        "procrustes": False,
+        "procrustes_reason": None,
+        "scale": None,
+        "rotation_deg": None,
+        "translation": None,
+        "inliers": None,
+    }
+    edited_rgb = edited.convert("RGB")
+    body_rgb = body.convert("RGB")
+    x0, y0, x1, y1 = [int(v) for v in box]
+    cw = max(1, x1 - x0)
+    ch = max(1, y1 - y0)
+    ew, eh = edited_rgb.size
+    sx = float(ew) / float(cw)
+    sy = float(eh) / float(ch)
+
+    # Prefer body face mapped into crop-local / edited coords for gen detection.
+    prefer_gen: FaceBox | None = None
+    if prefer_body_box is not None:
+        prefer_gen = FaceBox(
+            int((prefer_body_box.x0 - x0) * sx),
+            int((prefer_body_box.y0 - y0) * sy),
+            int((prefer_body_box.x1 - x0) * sx),
+            int((prefer_body_box.y1 - y0) * sy),
+            float(prefer_body_box.conf),
+        )
+
+    src_lm, src_backend, src_note = get_face_landmarks5(
+        pil_to_rgb_np(edited_rgb), cache_dir, prefer_box=prefer_gen
+    )
+    dst_lm_body, dst_backend, dst_note = get_face_landmarks5(
+        pil_to_rgb_np(body_rgb), cache_dir, prefer_box=prefer_body_box
+    )
+    info["src_landmarks_backend"] = src_backend
+    info["dst_landmarks_backend"] = dst_backend
+    if src_lm is None or dst_lm_body is None:
+        info["procrustes_reason"] = src_note or dst_note or "landmarks_missing"
+        return edited_rgb, info
+    if src_backend != "insightface" or dst_backend != "insightface":
+        info["procrustes_reason"] = "low_confidence_need_insightface"
+        return edited_rgb, info
+
+    # Map body landmarks into edited-crop pixel space.
+    dst_lm = np.stack(
+        [
+            (dst_lm_body[:, 0] - float(x0)) * sx,
+            (dst_lm_body[:, 1] - float(y0)) * sy,
+        ],
+        axis=1,
+    ).astype(np.float32)
+
+    matrix, inliers = cv2.estimateAffinePartial2D(src_lm, dst_lm, method=cv2.LMEDS)
+    if matrix is None:
+        info["procrustes_reason"] = "estimateAffinePartial2D_failed"
+        return edited_rgb, info
+    a, b = float(matrix[0, 0]), float(matrix[0, 1])
+    scale = float(math.hypot(a, b))
+    rot = float(math.degrees(math.atan2(b, a))) if scale > 1e-8 else 0.0
+    n_in = int(np.asarray(inliers).sum()) if inliers is not None else 0
+    info["scale"] = round(scale, 4)
+    info["rotation_deg"] = round(rot, 3)
+    info["translation"] = [round(float(matrix[0, 2]), 2), round(float(matrix[1, 2]), 2)]
+    info["inliers"] = n_in
+    if n_in < int(min_inliers):
+        info["procrustes_reason"] = f"low_inliers:{n_in}"
+        return edited_rgb, info
+    if not (float(min_scale) <= scale <= float(max_scale)):
+        info["procrustes_reason"] = f"scale_out_of_range:{scale:.3f}"
+        return edited_rgb, info
+
+    warped = cv2.warpAffine(
+        pil_to_rgb_np(edited_rgb),
+        matrix,
+        (ew, eh),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+    info["procrustes"] = True
+    return Image.fromarray(warped, mode="RGB"), info
+
+
+def expand_crop_box_wide(
+    image_size: tuple[int, int],
+    selected: FaceBox,
+    *,
+    pad_top_frac: float = 1.20,
+    pad_side_frac: float = 1.80,
+    pad_bot_frac: float = 2.50,
+    target_mp: float = 1.0,
+    div_by: int = 16,
+) -> tuple[int, int, int, int]:
+    """Larger head+shoulder crop from the face box (not an upscale of a tight crop).
+
+    Starts from face-relative pads, then grows uniformly toward image bounds until
+    the native crop is near ``target_mp`` megapixels (or the frame is exhausted).
+    """
+    iw, ih = image_size
+    fw = max(1, selected.width)
+    fh = max(1, selected.height)
+    cx = 0.5 * (selected.x0 + selected.x1)
+    cy = 0.5 * (selected.y0 + selected.y1)
+
+    x0 = int(selected.x0 - pad_side_frac * fw)
+    y0 = int(selected.y0 - pad_top_frac * fh)
+    x1 = int(selected.x1 + pad_side_frac * fw)
+    y1 = int(selected.y1 + pad_bot_frac * fh)
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(iw, x1), min(ih, y1)
+
+    goal_px = max(1.0, float(target_mp) * 1_000_000.0)
+    # Grow box toward image edges while keeping the face roughly centered.
+    for _ in range(48):
+        area = float(max(1, (x1 - x0) * (y1 - y0)))
+        if area >= goal_px * 0.92:
+            break
+        # Expand by ~8% of current size each side, clamped to image.
+        dx = max(8, int(0.08 * (x1 - x0)))
+        dy = max(8, int(0.08 * (y1 - y0)))
+        nx0, ny0 = max(0, x0 - dx), max(0, y0 - dy)
+        nx1, ny1 = min(iw, x1 + dx), min(ih, y1 + dy)
+        if (nx0, ny0, nx1, ny1) == (x0, y0, x1, y1):
+            break
+        x0, y0, x1, y1 = nx0, ny0, nx1, ny1
+
+    # Keep face inside the crop (safety).
+    x0 = min(x0, int(selected.x0))
+    y0 = min(y0, int(selected.y0))
+    x1 = max(x1, int(selected.x1))
+    y1 = max(y1, int(selected.y1))
+
+    cw = evenify(max(div_by, x1 - x0), div_by)
+    ch = evenify(max(div_by, y1 - y0), div_by)
+    # Re-center on face if possible.
+    x0 = int(max(0, min(iw - cw, round(cx - 0.5 * cw))))
+    y0 = int(max(0, min(ih - ch, round(cy - 0.45 * ch))))
+    x1 = min(iw, x0 + cw)
+    y1 = min(ih, y0 + ch)
+    return (x0, y0, x1, y1)
+
+
 def procrustes_align_generated_to_body(
     generated: Image.Image,
     body: Image.Image,
