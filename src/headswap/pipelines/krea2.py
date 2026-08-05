@@ -2169,17 +2169,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if backend not in ("magic_hour", "magichour", "mh"):
             return None
 
-        from headswap.magichour.face_detection import (
-            MagicHourFaceDetectionError,
-            detect_faces_magic_hour,
-        )
-
         target = self.cfg.get("magic_hour_target_file_path")
         conf = self.cfg.get("magic_hour_confidence_score", 0.5)
         conf_f = None if conf is None else float(conf)
         max_wait = float(self.cfg.get("magic_hour_max_wait_s", 120.0))
         tmp_path: Path | None = None
         try:
+            from headswap.magichour.face_detection import detect_faces_magic_hour
+
             if target:
                 result = detect_faces_magic_hour(
                     str(target),
@@ -2230,15 +2227,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 except OSError:
                     pass
             return mh_meta
-        except MagicHourFaceDetectionError as e:
+        except Exception as e:
+            # Never fail a swap because the audit backend is down/misconfigured.
             print(
-                f"[krea2] magic_hour face detection failed: {e}",
+                f"[krea2] magic_hour face detection failed "
+                f"({type(e).__name__}: {e})",
                 file=sys.__stdout__,
                 flush=True,
             )
             return {
                 "backend": "magic_hour",
-                "error": str(e),
+                "error": f"{type(e).__name__}: {e}",
                 "geometry_from": "current",
             }
         finally:
