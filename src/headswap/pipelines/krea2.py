@@ -2377,9 +2377,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 face,
                 self.cache_dir,
                 top=float(self.cfg.get("face_top_pad", 0.55)),
-                bot=float(self.cfg.get("face_bot_pad", 0.20)),
+                bot=float(self.cfg.get("face_bot_pad", 0.02)),
                 side=float(self.cfg.get("face_side_pad", 0.28)),
                 include_shoulders=bool(self.cfg.get("include_shoulders", False)),
+                tight_identity_crop=bool(self.cfg.get("tight_identity_crop", True)),
             )
             if mask_crop_stitch:
                 # Locality shell (Klein/Qwen-improved): edit head crop, stitch back.

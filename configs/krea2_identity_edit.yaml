@@ -313,8 +313,9 @@ prompt: >-
 
 negative_prompt: ""
 
-# Tight face ref — include enough donor hair above the face.
+# Tight face ref — include enough donor hair above face; stop at jawline/chin to exclude clothing.
 face_side_pad: 0.22
 face_top_pad: 0.70
-face_bot_pad: 0.12
+face_bot_pad: 0.02
 include_shoulders: false
+tight_identity_crop: true

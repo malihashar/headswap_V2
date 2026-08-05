@@ -783,6 +783,7 @@ def crop_face_reference(
     bot: float = 0.25,
     side: float = 0.35,
     include_shoulders: bool = True,
+    tight_identity_crop: bool = True,
 ) -> Image.Image:
     rgb = pil_to_rgb_np(face_pil)
     box = detect_best_face(rgb, cache_dir)
@@ -791,9 +792,31 @@ def crop_face_reference(
     # Cutout / content boxes are already face-sized — large pads pull in jersey/bg.
     if box.conf <= 0.40 and box.height >= 0.28 * face_pil.height:
         top = min(float(top), 0.18)
-        bot = min(float(bot), 0.22)
+        bot = min(float(bot), 0.02)
         side = min(float(side), 0.18)
         include_shoulders = False
+
+    if tight_identity_crop and not include_shoulders:
+        lm, _, _ = get_face_landmarks5(rgb, cache_dir, prefer_box=box)
+        if lm is not None:
+            le, re, _, lmouth, rmouth = lm
+            iod = float(np.linalg.norm(re - le))
+            mouth_y = float(0.5 * (lmouth[1] + rmouth[1]))
+            chin_y = mouth_y + 0.75 * iod
+            # Stop at chin / upper jawline (chin_y + 0.15*iod), not extending down to collar/shoulders
+            max_y1 = min(box.y1 + max(0.02, float(bot)) * box.height, chin_y + 0.15 * iod)
+        else:
+            max_y1 = box.y1 + max(0.02, float(bot)) * box.height
+
+        fw, fh = box.width, box.height
+        xx0 = int(round(box.x0 - side * fw))
+        xx1 = int(round(box.x1 + side * fw))
+        yy0 = int(round(box.y0 - top * fh))
+        yy1 = int(round(max_y1))
+        xx0, yy0 = max(0, xx0), max(0, yy0)
+        xx1, yy1 = min(face_pil.width, xx1), min(face_pil.height, yy1)
+        return face_pil.crop((xx0, yy0, xx1, yy1)).convert("RGB")
+
     expanded = expand_box(
         box,
         face_pil.width,
