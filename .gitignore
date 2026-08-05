@@ -19,6 +19,11 @@ results/_test_mock/
 .ipynb_checkpoints/
 _refs/
 
+# Secrets — keep .env.example tracked; never commit real keys.
+.env
+.env.local
+.env.*.local
+
 # Colab uploads — never track; git reset --hard was restoring demo
 # body.png/face.png (suit selfie + Ronaldo) and wiping user uploads.
 data/custom/body.png
