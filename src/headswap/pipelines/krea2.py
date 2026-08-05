@@ -37,6 +37,7 @@ from headswap.profiling.identity_stage_trace import IdentityStageTrace
 from headswap.profiling.head_scale_trace import HeadScaleTrace
 from headswap.preprocess import (
     FaceBox,
+    classify_lighting,
     clamp_crop_away_neighbors,
     clamp_edited_head_scale,
     crop_face_reference,
@@ -2064,26 +2065,260 @@ class Krea2IdentityEditPipeline(BasePipeline):
         }
         return PipelineResult(image=out, latency_s=total_s, meta=meta, debug_paths=dbg)
 
+    def _resolve_lighting_route(
+        self, body: Image.Image
+    ) -> dict[str, Any]:
+        """Multi-person lighting route (config-gated, default off).
+
+        When ``enable_lighting_route`` is true and >1 face is detected:
+          dark  -> multi_person_edit_mode=full_frame (A/B winner: full v1.2 + rb4)
+          else  -> multi_person_edit_mode=crop_stitch (production)
+
+        Single-person: no lighting check; config left unchanged.
+        Mutates ``self.cfg['multi_person_edit_mode']`` for this run when multi.
+        """
+        import sys
+
+        enabled = bool(self.cfg.get("enable_lighting_route", False))
+        meta: dict[str, Any] = {
+            "enable_lighting_route": enabled,
+            "applied": False,
+            "faces_detected": None,
+            "route": None,
+            "reason": "disabled" if not enabled else None,
+        }
+        if not enabled:
+            return meta
+
+        div_by = int(self.cfg.get("div_by", 16))
+        probe = resize_max_keep_ar(
+            body.convert("RGB"),
+            int(self.cfg.get("max_body_dim", 1024)),
+            div_by=div_by,
+        )
+        rgb = pil_to_rgb_np(probe)
+        selected, faces = select_face_box(
+            rgb,
+            self.cache_dir,
+            index=int(self.cfg.get("body_face_index", 0) or 0),
+            policy=str(self.cfg.get("body_face_policy", "largest") or "largest"),
+        )
+        n_faces = len(faces)
+        meta["faces_detected"] = n_faces
+        if n_faces <= 1:
+            meta["route"] = "single_person_unchanged"
+            meta["reason"] = "single_person_skip_lighting"
+            print(
+                f"[krea2] lighting_route=skip faces={n_faces} "
+                f"(single-person path unchanged)",
+                file=sys.__stdout__,
+                flush=True,
+            )
+            return meta
+
+        threshold = float(self.cfg.get("dark_lighting_threshold", 70.0))
+        lighting = classify_lighting(rgb, threshold=threshold, box=selected)
+        meta.update(lighting)
+        if lighting["is_dark"]:
+            self.cfg["multi_person_edit_mode"] = "full_frame"
+            # Ensure A/B winner (d_ff_full_rb4) overrides are present when routing.
+            if not self.cfg.get("full_frame_identity_lora_name"):
+                self.cfg["full_frame_identity_lora_name"] = (
+                    "krea2_identity_edit_v1_2.safetensors"
+                )
+            if self.cfg.get("full_frame_ref_boost") is None:
+                self.cfg["full_frame_ref_boost"] = 4.0
+            route = "full_frame"
+            reason = "multi_person_dark"
+        else:
+            self.cfg["multi_person_edit_mode"] = "crop_stitch"
+            route = "crop_stitch"
+            reason = "multi_person_normal_lighting"
+        meta["applied"] = True
+        meta["route"] = route
+        meta["reason"] = reason
+        meta["multi_person_edit_mode"] = str(self.cfg.get("multi_person_edit_mode"))
+        print(
+            f"[krea2] lighting_route={route} reason={reason} "
+            f"faces={n_faces} metric={lighting['lighting_metric']:.2f} "
+            f"({lighting['lighting_metric_name']}/{lighting['lighting_region']}) "
+            f"threshold={threshold} dark={lighting['is_dark']}",
+            file=sys.__stdout__,
+            flush=True,
+        )
+        return meta
+
+    def _maybe_run_magic_hour_face_detection(
+        self, body: Image.Image, out_dir: Path | None
+    ) -> dict[str, Any] | None:
+        """Optional Magic Hour face-detection backend (does not replace geometry).
+
+        LIMITATION: Magic Hour returns cropped face images (path/url) only — no
+        bounding boxes or landmarks — so it cannot fully replace the current
+        detector's FaceBox geometry for crop_stitch / full_frame without
+        additional work. When selected we call the API for audit/count and still
+        run the current detector for boxes downstream.
+        """
+        import os
+        import sys
+        import tempfile
+
+        backend = str(
+            self.cfg.get("face_detection_backend", "current") or "current"
+        ).strip().lower()
+        if backend not in ("magic_hour", "magichour", "mh"):
+            return None
+
+        from headswap.magichour.face_detection import (
+            MagicHourFaceDetectionError,
+            detect_faces_magic_hour,
+        )
+
+        target = self.cfg.get("magic_hour_target_file_path")
+        conf = self.cfg.get("magic_hour_confidence_score", 0.5)
+        conf_f = None if conf is None else float(conf)
+        max_wait = float(self.cfg.get("magic_hour_max_wait_s", 120.0))
+        tmp_path: Path | None = None
+        try:
+            if target:
+                result = detect_faces_magic_hour(
+                    str(target),
+                    confidence_score=conf_f,
+                    max_wait_s=max_wait,
+                )
+            else:
+                # Upload local body so MH can see the same scene we edit.
+                fd, name = tempfile.mkstemp(prefix="mh_body_", suffix=".png")
+                os.close(fd)
+                tmp_path = Path(name)
+                body.convert("RGB").save(tmp_path, format="PNG")
+                result = detect_faces_magic_hour(
+                    local_image_path=tmp_path,
+                    confidence_score=conf_f,
+                    max_wait_s=max_wait,
+                )
+            mh_meta = {
+                "backend": "magic_hour",
+                "id": result.id,
+                "status": result.status,
+                "face_count": result.face_count,
+                "faces": [
+                    {"path": f.path, "url": f.url} for f in result.faces
+                ],
+                "credits_charged": result.credits_charged,
+                "geometry_from": "current",
+                "limitation": (
+                    "Magic Hour returns face crop path/url only — no boxes/"
+                    "landmarks; current detector still supplies FaceBox geometry."
+                ),
+            }
+            print(
+                f"[krea2] face_detection_backend=magic_hour "
+                f"id={result.id} status={result.status} "
+                f"faces={result.face_count} "
+                f"(geometry still from current detector)",
+                file=sys.__stdout__,
+                flush=True,
+            )
+            if out_dir is not None:
+                try:
+                    import json
+
+                    (Path(out_dir) / "magic_hour_face_detection.json").write_text(
+                        json.dumps(mh_meta, indent=2), encoding="utf-8"
+                    )
+                except OSError:
+                    pass
+            return mh_meta
+        except MagicHourFaceDetectionError as e:
+            print(
+                f"[krea2] magic_hour face detection failed: {e}",
+                file=sys.__stdout__,
+                flush=True,
+            )
+            return {
+                "backend": "magic_hour",
+                "error": str(e),
+                "geometry_from": "current",
+            }
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     def run(
         self, body: Image.Image, face: Image.Image, out_dir: Path | None = None
     ) -> PipelineResult:
-        import sys
-
         t0 = time.perf_counter()
         timings: dict[str, float] = {}
 
-        rt = self._ensure_runtime(timings)
-        from headswap.comfy.krea2_edit_fast import (
-            clear_krea2_edit_static_cache,
-            install_krea2_edit_static_cache,
-        )
+        # Restore multi_person_edit_mode after a lighting-routed run so reused
+        # pipeline instances do not leak full_frame into the next image.
+        _mode_before = self.cfg.get("multi_person_edit_mode", "crop_stitch")
+        _ff_lora_before = self.cfg.get("full_frame_identity_lora_name")
+        _ff_rb_before = self.cfg.get("full_frame_ref_boost")
 
-        edit_cache_info = install_krea2_edit_static_cache()
-        clear_krea2_edit_static_cache()  # fresh cache per image
-        bundle = self._load_models(rt, timings)
-        div_by = int(self.cfg.get("div_by", 16))
-        max_dim = int(self.cfg.get("max_dim", 768))
-        mask_crop_stitch = bool(self.cfg.get("mask_crop_stitch", True))
+        try:
+            # Optional Magic Hour face-detection audit (geometry still current).
+            magic_hour_meta = self._maybe_run_magic_hour_face_detection(body, out_dir)
+
+            # Lighting route must run BEFORE model load so full_frame LoRA/rb
+            # overrides are picked up when multi+dark.
+            lighting_route_meta = self._resolve_lighting_route(body)
+
+            rt = self._ensure_runtime(timings)
+            from headswap.comfy.krea2_edit_fast import (
+                clear_krea2_edit_static_cache,
+                install_krea2_edit_static_cache,
+            )
+
+            edit_cache_info = install_krea2_edit_static_cache()
+            clear_krea2_edit_static_cache()  # fresh cache per image
+            bundle = self._load_models(rt, timings)
+            div_by = int(self.cfg.get("div_by", 16))
+            max_dim = int(self.cfg.get("max_dim", 768))
+            mask_crop_stitch = bool(self.cfg.get("mask_crop_stitch", True))
+
+            return self._run_after_models(
+                body,
+                face,
+                out_dir,
+                t0=t0,
+                timings=timings,
+                rt=rt,
+                bundle=bundle,
+                edit_cache_info=edit_cache_info,
+                div_by=div_by,
+                max_dim=max_dim,
+                mask_crop_stitch=mask_crop_stitch,
+                lighting_route_meta=lighting_route_meta,
+                magic_hour_meta=magic_hour_meta,
+            )
+        finally:
+            self.cfg["multi_person_edit_mode"] = _mode_before
+            self.cfg["full_frame_identity_lora_name"] = _ff_lora_before
+            self.cfg["full_frame_ref_boost"] = _ff_rb_before
+
+    def _run_after_models(
+        self,
+        body: Image.Image,
+        face: Image.Image,
+        out_dir: Path | None,
+        *,
+        t0: float,
+        timings: dict[str, float],
+        rt: NodeRuntime,
+        bundle: dict,
+        edit_cache_info: dict,
+        div_by: int,
+        max_dim: int,
+        mask_crop_stitch: bool,
+        lighting_route_meta: dict[str, Any],
+        magic_hour_meta: dict[str, Any] | None,
+    ) -> PipelineResult:
+        import sys
 
         # face_swap_mode: "single" (default) | "all"
         # "all" only triggers multi-pass when >1 face is detected.
@@ -2832,6 +3067,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "enable_multi_face_features": bool(multi_face_enabled),
             "faces_succeeded": list(faces_succeeded),
             "face_failures": list(face_failures),
+            "lighting_route": lighting_route_meta,
+            "face_detection_backend": str(
+                self.cfg.get("face_detection_backend", "current") or "current"
+            ),
+            "magic_hour_face_detection": magic_hour_meta,
             "person_match_crop_size": bool(self.cfg.get("person_match_crop_size", True)),
             "square_crop": bool(self.cfg.get("square_crop", False)),
             "stitch_feather_px": int(self.cfg.get("stitch_feather_px", 10)),

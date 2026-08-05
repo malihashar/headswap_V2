@@ -141,22 +141,40 @@ face_matte_force_ellipse: true
 
 # Multi-person (>1 detected face) modes when swap_mode=krea2_crop:
 #   crop_stitch — SPP-CC single-person crop recipe (default)
-#   full_frame  — debug/A/B only
+#   full_frame  — dark multi-person route (A/B winner) or manual A/B
 multi_person_edit_mode: crop_stitch
 single_person_parity: true
+# --- Lighting-based multi-person routing (OFF by default) ---
+# When true: after face detection, if faces>1 compute mean HSV-V luminance and
+#   dark  -> full_frame (full v1.2 LoRA + ref_boost=4 via overrides below)
+#   else  -> crop_stitch (production r64 + ref_boost=3.5)
+# Single-person: never lighting-checked; stays on existing crop_stitch path.
+enable_lighting_route: false
+# Mean OpenCV HSV Value [0,255] over the target face (fallback: full frame).
+# Below threshold => dark. Tune on real night/day multi-person photos.
+dark_lighting_threshold: 70.0
 # --- Full-frame A/B knobs (IGNORED while multi_person_edit_mode=crop_stitch) ---
 # Author Identity Edit guidance: pass the FULL scene (~1–1.5MP), not a head crop.
-# Production stays crop_stitch; flip mode to full_frame only for isolated A/B.
+# Production stays crop_stitch; lighting route or manual flip uses full_frame.
 full_frame_target_mp: 1.25
 full_frame_min_mp: 1.0
 full_frame_max_mp: 1.5
 full_frame_max_dim: 2048
 # Do not invent detail on tiny sources (e.g. night_group ~0.12MP).
 full_frame_allow_upscale: false
-# Optional overrides applied ONLY when multi_person_edit_mode=full_frame.
-# null = use the global identity_lora_name / ref_boost above.
-full_frame_identity_lora_name: null
-full_frame_ref_boost: null
+# Applied ONLY when multi_person_edit_mode=full_frame (lighting route or manual).
+# A/B winner d_ff_full_rb4: full v1.2 LoRA + ref_boost=4.0; grounding_px stays 768.
+full_frame_identity_lora_name: krea2_identity_edit_v1_2.safetensors
+full_frame_ref_boost: 4.0
+# Face detection backend: "current" (InsightFace/OpenCV, default) | "magic_hour".
+# Magic Hour returns face crop path/url only — no boxes/landmarks — so it cannot
+# fully replace current geometry; when selected we still use current for FaceBox.
+face_detection_backend: current
+# Optional: Magic Hour asset path/URL. If empty and backend=magic_hour, the body
+# image is uploaded via /v1/files/upload-urls automatically.
+magic_hour_target_file_path: null
+magic_hour_confidence_score: 0.5
+magic_hour_max_wait_s: 120.0
 head_mask_backend: ellipse
 seam_refine: false
 seam_refine_erode_px: 8

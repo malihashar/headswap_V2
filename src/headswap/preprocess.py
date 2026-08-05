@@ -651,6 +651,58 @@ def select_face_box(
     return ordered[idx], faces
 
 
+def mean_hsv_v(
+    rgb: np.ndarray,
+    box: FaceBox | None = None,
+) -> float:
+    """Mean HSV Value (luminance proxy) over full frame or an optional face box.
+
+    OpenCV HSV V is in [0, 255]. Lower = darker. Used by multi-person lighting
+    route to classify dark vs normal scenes.
+    """
+    if rgb is None or rgb.size == 0:
+        return 0.0
+    region = rgb
+    if box is not None:
+        y0, y1 = max(0, int(box.y0)), max(0, int(box.y1))
+        x0, x1 = max(0, int(box.x0)), max(0, int(box.x1))
+        h, w = rgb.shape[:2]
+        y1, x1 = min(h, y1), min(w, x1)
+        if y1 > y0 + 1 and x1 > x0 + 1:
+            region = rgb[y0:y1, x0:x1]
+    if region.size == 0:
+        region = rgb
+    hsv = cv2.cvtColor(region, cv2.COLOR_RGB2HSV)
+    return float(np.mean(hsv[:, :, 2]))
+
+
+def classify_lighting(
+    rgb: np.ndarray,
+    *,
+    threshold: float,
+    box: FaceBox | None = None,
+) -> dict[str, Any]:
+    """Compare mean HSV-V against ``threshold``; below => dark.
+
+    Returns a small dict suitable for logging / meta (metric, dark, region).
+    """
+    used_face = False
+    if box is not None:
+        y0, y1 = max(0, int(box.y0)), max(0, int(box.y1))
+        x0, x1 = max(0, int(box.x0)), max(0, int(box.x1))
+        h, w = rgb.shape[:2]
+        used_face = min(h, y1) > max(0, y0) + 1 and min(w, x1) > max(0, x0) + 1
+    metric = mean_hsv_v(rgb, box if used_face else None)
+    dark = bool(metric < float(threshold))
+    return {
+        "lighting_metric": round(metric, 4),
+        "lighting_metric_name": "mean_hsv_v",
+        "lighting_region": "face" if used_face else "full_frame",
+        "dark_lighting_threshold": float(threshold),
+        "is_dark": dark,
+    }
+
+
 def expand_box(
     box: FaceBox,
     img_w: int,
