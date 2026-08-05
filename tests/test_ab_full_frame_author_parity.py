@@ -101,6 +101,7 @@ def test_ab_arms_isolate_variables():
         "g_ff_full_rb5_gp1024",
         "h_ff_full_rb35_noexpr",
         "i_ff_full_rb4_noexpr",
+        "j_ff_full_refboostmask",
     ]
     assert mod.ARMS[0]["multi_person_edit_mode"] == "crop_stitch"
     assert all(a["multi_person_edit_mode"] == "full_frame" for a in mod.ARMS[1:])
@@ -119,6 +120,16 @@ def test_ab_arms_isolate_variables():
     assert i["preserve_expression"] is False and i["ref_boost"] == 4.0
     assert h["identity_lora_name"] == mod.LORA_FULL
     assert i["identity_lora_name"] == mod.LORA_FULL
+    # Mask arm: same as d + face-localized ref_boost_mask
+    j = mod.ARMS[9]
+    assert j["id"] == "j_ff_full_refboostmask"
+    assert j["ref_boost"] == 4.0
+    assert j["identity_lora_name"] == mod.LORA_FULL
+    assert j["full_frame_ref_boost_mask"] is True
+    assert j["preserve_expression"] is True
+    assert all(
+        (not a.get("full_frame_ref_boost_mask")) for a in mod.ARMS if a is not j
+    )
 
 
 def test_cfg_for_arm_sets_grounding_and_expression():
@@ -128,11 +139,17 @@ def test_cfg_for_arm_sets_grounding_and_expression():
     assert cfg_e["grounding_px"] == 768
     assert cfg_e["ref_boost"] == 5.0
     assert cfg_e["preserve_expression"] is True
+    assert cfg_e["full_frame_ref_boost_mask"] is False
     cfg_i = mod._cfg_for_arm(base, mod.ARMS[8])
     assert cfg_i["grounding_px"] == 768
     assert cfg_i["ref_boost"] == 4.0
     assert cfg_i["preserve_expression"] is False
     assert cfg_i["multi_person_edit_mode"] == "full_frame"
+    cfg_j = mod._cfg_for_arm(base, mod.ARMS[9])
+    assert cfg_j["full_frame_ref_boost_mask"] is True
+    assert cfg_j["ref_boost"] == 4.0
+    assert cfg_j["multi_person_edit_mode"] == "full_frame"
+    assert cfg_j["identity_lora_name"] == mod.LORA_FULL
 
 
 def test_preserve_expression_false_strips_lock_and_allows_donor():

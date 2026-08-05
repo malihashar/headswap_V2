@@ -1262,9 +1262,9 @@ def run_full_frame_author_ab(
     face_path: Path | str,
     out_dir: Path | str | None = None,
     policy: str = "largest",
-    arms: str = "a,b,c,d,e,f,g,h,i",
+    arms: str = "a,b,c,d,e,f,g,h,i,j",
 ) -> dict[str, Any]:
-    """Run the full-frame author-parity A/B (non-mock), arms a–i by default.
+    """Run the full-frame author-parity A/B (non-mock), arms a–j by default.
 
     Invokes ``scripts/ab_full_frame_author_parity.py`` against the uploaded
     body/face so Colab **Run all** on this branch produces REPORT.md without
@@ -1303,7 +1303,7 @@ def run_full_frame_author_ab(
         check=False,
     )
 
-    arms_arg = str(arms or "a,b,c,d,e,f,g,h,i").strip()
+    arms_arg = str(arms or "a,b,c,d,e,f,g,h,i,j").strip()
     progress(f"Running full-frame author-parity A/B (arms={arms_arg})…")
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root / "src") + (
