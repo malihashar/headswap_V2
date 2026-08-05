@@ -33,6 +33,7 @@ def test_production_config_stays_crop_stitch():
     assert cfg.get("full_frame_target_mp") == 1.25
     assert cfg.get("full_frame_identity_lora_name") in (None, "null")
     assert cfg.get("full_frame_ref_boost") in (None, "null")
+    assert cfg.get("preserve_expression") is True
 
 
 def test_resize_to_megapixels_downscales_large_into_band():
@@ -95,6 +96,11 @@ def test_ab_arms_isolate_variables():
         "b_ff_r64_rb35",
         "c_ff_full_rb35",
         "d_ff_full_rb4",
+        "e_ff_full_rb5_gp768",
+        "f_ff_full_rb4_gp1024",
+        "g_ff_full_rb5_gp1024",
+        "h_ff_full_rb35_noexpr",
+        "i_ff_full_rb4_noexpr",
     ]
     assert mod.ARMS[0]["multi_person_edit_mode"] == "crop_stitch"
     assert all(a["multi_person_edit_mode"] == "full_frame" for a in mod.ARMS[1:])
@@ -102,3 +108,61 @@ def test_ab_arms_isolate_variables():
     assert mod.ARMS[2]["identity_lora_name"] == mod.LORA_FULL
     assert mod.ARMS[3]["ref_boost"] == 4.0
     assert mod.ARMS[1]["ref_boost"] == 3.5
+    # Identity-strength sweep
+    e, f, g = mod.ARMS[4], mod.ARMS[5], mod.ARMS[6]
+    assert e["ref_boost"] == 5.0 and e["grounding_px"] == 768
+    assert f["ref_boost"] == 4.0 and f["grounding_px"] == 1024
+    assert g["ref_boost"] == 5.0 and g["grounding_px"] == 1024
+    # Expression-freedom variants match c/d knobs with preserve_expression off
+    h, i = mod.ARMS[7], mod.ARMS[8]
+    assert h["preserve_expression"] is False and h["ref_boost"] == 3.5
+    assert i["preserve_expression"] is False and i["ref_boost"] == 4.0
+    assert h["identity_lora_name"] == mod.LORA_FULL
+    assert i["identity_lora_name"] == mod.LORA_FULL
+
+
+def test_cfg_for_arm_sets_grounding_and_expression():
+    mod = _load_ab()
+    base = yaml.safe_load(CFG_PATH.read_text())
+    cfg_e = mod._cfg_for_arm(base, mod.ARMS[4])
+    assert cfg_e["grounding_px"] == 768
+    assert cfg_e["ref_boost"] == 5.0
+    assert cfg_e["preserve_expression"] is True
+    cfg_i = mod._cfg_for_arm(base, mod.ARMS[8])
+    assert cfg_i["grounding_px"] == 768
+    assert cfg_i["ref_boost"] == 4.0
+    assert cfg_i["preserve_expression"] is False
+    assert cfg_i["multi_person_edit_mode"] == "full_frame"
+
+
+def test_preserve_expression_false_strips_lock_and_allows_donor():
+    pipe = Krea2IdentityEditPipeline.__new__(Krea2IdentityEditPipeline)
+    pipe.cfg = {
+        "preserve_expression": False,
+        "prompt": (
+            "Replace the head. CRITICAL: copy the facial expression from the first "
+            "image exactly — if they are smiling, the result must smile the same way; "
+            "if they are not smiling, do not add a smile. Keep mouth shape, "
+            "smile/no-smile, eye gaze, and micro-expressions from the first image "
+            "only — never from the second image. Keep the body."
+        ),
+        "single_person_parity": True,
+    }
+    out = pipe._prompt_for_edit(use_tight=False, multi_person=False)
+    assert "copy the facial expression from the first image exactly" not in out.lower()
+    assert "Allow the facial expression from the second image" in out
+    # Default true leaves lock intact
+    pipe.cfg["preserve_expression"] = True
+    locked = pipe._prompt_for_edit(use_tight=False, multi_person=False)
+    assert "copy the facial expression from the first image exactly" in locked.lower()
+
+
+def test_side_by_side_wraps_many_arms():
+    mod = _load_ab()
+    imgs = [
+        (Image.new("RGB", (80, 100), (i * 20, 40, 60)), f"arm_{i}") for i in range(10)
+    ]
+    collage = mod._side_by_side(imgs, height=120, max_per_row=5)
+    # Two rows of height 120+label (~146) + gap
+    assert collage.size[1] > 200
+    assert collage.size[0] > 200

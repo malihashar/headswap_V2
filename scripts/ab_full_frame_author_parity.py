@@ -4,15 +4,20 @@
 Hypothesis: tight head crops (~0.59MP) remove body/shoulder proportion cues
 that Krea2 Identity Edit authors assume when documenting full-scene ~1–1.5MP
 inputs — causing oversized heads. Isolate that from LoRA weight quality and
-ref_boost.
+ref_boost / grounding_px / expression policy.
 
-Four arms (production crop_stitch path is NEVER modified by this script's
+Arms (production crop_stitch path is NEVER modified by this script's
 defaults — overrides are per-arm only):
 
   (a) crop_stitch + r64 LoRA + ref_boost 3.5     — current production
   (b) full_frame  + r64 LoRA + ref_boost 3.5     — full context alone
   (c) full_frame  + full v1.2 LoRA + ref_boost 3.5 — weight quality
   (d) full_frame  + full v1.2 LoRA + ref_boost 4.0 — author-matched baseline
+  (e) full_frame  + full v1.2 + rb5 + grounding_px 768
+  (f) full_frame  + full v1.2 + rb4 + grounding_px 1024
+  (g) full_frame  + full v1.2 + rb5 + grounding_px 1024
+  (h) same as (c) with preserve_expression=false
+  (i) same as (d) with preserve_expression=false
 
 Usage (GPU + ComfyUI + both LoRAs downloaded):
   PYTHONPATH=src python scripts/ab_full_frame_author_parity.py \\
@@ -20,6 +25,9 @@ Usage (GPU + ComfyUI + both LoRAs downloaded):
 
   # Prep only (scene MP / face boxes, no Krea2):
   PYTHONPATH=src python scripts/ab_full_frame_author_parity.py --prep-only
+
+  # Subset of arms:
+  PYTHONPATH=src python scripts/ab_full_frame_author_parity.py --arms e,f,g,h,i
 
   python scripts/download_krea2.py --include-optional   # pulls full v1.2 LoRA
 """
@@ -73,6 +81,8 @@ ARMS: list[dict[str, Any]] = [
         "multi_person_edit_mode": "crop_stitch",
         "identity_lora_name": LORA_R64,
         "ref_boost": 3.5,
+        "grounding_px": 768,
+        "preserve_expression": True,
         "full_frame_identity_lora_name": None,
         "full_frame_ref_boost": None,
     },
@@ -82,6 +92,8 @@ ARMS: list[dict[str, Any]] = [
         "multi_person_edit_mode": "full_frame",
         "identity_lora_name": LORA_R64,
         "ref_boost": 3.5,
+        "grounding_px": 768,
+        "preserve_expression": True,
         "full_frame_identity_lora_name": LORA_R64,
         "full_frame_ref_boost": 3.5,
     },
@@ -91,6 +103,8 @@ ARMS: list[dict[str, Any]] = [
         "multi_person_edit_mode": "full_frame",
         "identity_lora_name": LORA_FULL,
         "ref_boost": 3.5,
+        "grounding_px": 768,
+        "preserve_expression": True,
         "full_frame_identity_lora_name": LORA_FULL,
         "full_frame_ref_boost": 3.5,
     },
@@ -100,6 +114,63 @@ ARMS: list[dict[str, Any]] = [
         "multi_person_edit_mode": "full_frame",
         "identity_lora_name": LORA_FULL,
         "ref_boost": 4.0,
+        "grounding_px": 768,
+        "preserve_expression": True,
+        "full_frame_identity_lora_name": LORA_FULL,
+        "full_frame_ref_boost": 4.0,
+    },
+    {
+        "id": "e_ff_full_rb5_gp768",
+        "label": "(e) full_frame + full v1.2 + rb5 + gp768",
+        "multi_person_edit_mode": "full_frame",
+        "identity_lora_name": LORA_FULL,
+        "ref_boost": 5.0,
+        "grounding_px": 768,
+        "preserve_expression": True,
+        "full_frame_identity_lora_name": LORA_FULL,
+        "full_frame_ref_boost": 5.0,
+    },
+    {
+        "id": "f_ff_full_rb4_gp1024",
+        "label": "(f) full_frame + full v1.2 + rb4 + gp1024",
+        "multi_person_edit_mode": "full_frame",
+        "identity_lora_name": LORA_FULL,
+        "ref_boost": 4.0,
+        "grounding_px": 1024,
+        "preserve_expression": True,
+        "full_frame_identity_lora_name": LORA_FULL,
+        "full_frame_ref_boost": 4.0,
+    },
+    {
+        "id": "g_ff_full_rb5_gp1024",
+        "label": "(g) full_frame + full v1.2 + rb5 + gp1024",
+        "multi_person_edit_mode": "full_frame",
+        "identity_lora_name": LORA_FULL,
+        "ref_boost": 5.0,
+        "grounding_px": 1024,
+        "preserve_expression": True,
+        "full_frame_identity_lora_name": LORA_FULL,
+        "full_frame_ref_boost": 5.0,
+    },
+    {
+        "id": "h_ff_full_rb35_noexpr",
+        "label": "(h) same as (c) + preserve_expression=false",
+        "multi_person_edit_mode": "full_frame",
+        "identity_lora_name": LORA_FULL,
+        "ref_boost": 3.5,
+        "grounding_px": 768,
+        "preserve_expression": False,
+        "full_frame_identity_lora_name": LORA_FULL,
+        "full_frame_ref_boost": 3.5,
+    },
+    {
+        "id": "i_ff_full_rb4_noexpr",
+        "label": "(i) same as (d) + preserve_expression=false",
+        "multi_person_edit_mode": "full_frame",
+        "identity_lora_name": LORA_FULL,
+        "ref_boost": 4.0,
+        "grounding_px": 768,
+        "preserve_expression": False,
         "full_frame_identity_lora_name": LORA_FULL,
         "full_frame_ref_boost": 4.0,
     },
@@ -225,6 +296,8 @@ def score_arm(
         "neighbor_count": full.neighbor_count,
         "gaze_eye_line_delta_deg": _gaze_delta(hs),
         "hair_transfer": "visual_inspection_required",
+        "grounding_px": meta.get("grounding_px"),
+        "preserve_expression": meta.get("preserve_expression"),
         **hs,
         "mock": bool(meta.get("mock")),
         "pipeline": meta.get("pipeline"),
@@ -232,25 +305,47 @@ def score_arm(
 
 
 def _side_by_side(
-    images: list[tuple[Image.Image, str]], *, height: int = 420
+    images: list[tuple[Image.Image, str]],
+    *,
+    height: int = 360,
+    max_per_row: int = 5,
 ) -> Image.Image:
-    fitted: list[Image.Image] = []
-    for im, _ in images:
-        im = im.convert("RGB")
-        s = height / max(1, im.size[1])
-        fitted.append(
-            im.resize((max(1, int(im.size[0] * s)), height), Image.Resampling.LANCZOS)
-        )
-    gap, label_h = 10, 26
-    total_w = sum(f.size[0] for f in fitted) + gap * max(0, len(fitted) - 1)
-    canvas = Image.new("RGB", (total_w, height + label_h), (16, 16, 16))
-    draw = ImageDraw.Draw(canvas)
-    x = 0
-    for f, (_, label) in zip(fitted, images):
-        draw.text((x + 2, 4), label, fill=(220, 230, 255))
-        canvas.paste(f, (x, label_h))
-        x += f.size[0] + gap
-    return canvas
+    """Horizontal collage; wraps to multiple rows when there are many arms."""
+    if not images:
+        return Image.new("RGB", (64, 64), (16, 16, 16))
+
+    def _fit_row(row: list[tuple[Image.Image, str]]) -> Image.Image:
+        fitted: list[Image.Image] = []
+        for im, _ in row:
+            im = im.convert("RGB")
+            s = height / max(1, im.size[1])
+            fitted.append(
+                im.resize(
+                    (max(1, int(im.size[0] * s)), height), Image.Resampling.LANCZOS
+                )
+            )
+        gap, label_h = 10, 26
+        total_w = sum(f.size[0] for f in fitted) + gap * max(0, len(fitted) - 1)
+        canvas = Image.new("RGB", (total_w, height + label_h), (16, 16, 16))
+        draw = ImageDraw.Draw(canvas)
+        x = 0
+        for f, (_, label) in zip(fitted, row):
+            draw.text((x + 2, 4), str(label)[:28], fill=(220, 230, 255))
+            canvas.paste(f, (x, label_h))
+            x += f.size[0] + gap
+        return canvas
+
+    rows = [images[i : i + max_per_row] for i in range(0, len(images), max_per_row)]
+    row_imgs = [_fit_row(r) for r in rows]
+    gap_y = 8
+    total_w = max(r.size[0] for r in row_imgs)
+    total_h = sum(r.size[1] for r in row_imgs) + gap_y * max(0, len(row_imgs) - 1)
+    out = Image.new("RGB", (total_w, total_h), (16, 16, 16))
+    y = 0
+    for r in row_imgs:
+        out.paste(r, (0, y))
+        y += r.size[1] + gap_y
+    return out
 
 
 def _cfg_for_arm(base: dict, arm: dict[str, Any]) -> dict:
@@ -258,6 +353,8 @@ def _cfg_for_arm(base: dict, arm: dict[str, Any]) -> dict:
     cfg["multi_person_edit_mode"] = arm["multi_person_edit_mode"]
     cfg["identity_lora_name"] = arm["identity_lora_name"]
     cfg["ref_boost"] = float(arm["ref_boost"])
+    cfg["grounding_px"] = int(arm.get("grounding_px", base.get("grounding_px", 768)))
+    cfg["preserve_expression"] = bool(arm.get("preserve_expression", True))
     cfg["full_frame_identity_lora_name"] = arm.get("full_frame_identity_lora_name")
     cfg["full_frame_ref_boost"] = arm.get("full_frame_ref_boost")
     # Author-parity full-frame resolution (no-op for crop_stitch).
@@ -300,17 +397,19 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
         "",
         "Tight head crops (~0.59MP) remove body/shoulder proportion cues that the",
         "Krea2 Identity Edit authors assume for full-scene ~1–1.5MP inputs,",
-        "causing oversized heads. Isolate full-frame context vs LoRA weight vs ref_boost.",
+        "causing oversized heads. Isolate full-frame context vs LoRA weight vs "
+        "ref_boost / grounding_px / preserve_expression.",
         "",
         "## Arms",
         "",
-        "| id | mode | LoRA | ref_boost |",
-        "|---|---|---|---:|",
+        "| id | mode | LoRA | ref_boost | grounding_px | preserve_expression |",
+        "|---|---|---|---:|---:|:---:|",
     ]
     for a in arms:
         lines.append(
             f"| `{a['id']}` | {a['multi_person_edit_mode']} | "
-            f"`{a['identity_lora_name']}` | {a['ref_boost']} |"
+            f"`{a['identity_lora_name']}` | {a['ref_boost']} | "
+            f"{a.get('grounding_px', 768)} | {a.get('preserve_expression', True)} |"
         )
 
     lines += [
@@ -339,18 +438,23 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
             "",
             f"![side_by_side]({cid}/side_by_side.png)",
             "",
-            "| arm | scene MP | head_to_body_scale_ratio | identity_cosine | "
+            "| arm | scene MP | gp | expr? | head_to_body_scale_ratio | identity_cosine | "
             "expr_l2 | gaze_Δ° | neighbor_id | latency_s |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "|---|---:|---:|:---:|---:|---:|---:|---:|---:|---:|",
         ]
         for arm_id, sc in (case.get("scores") or {}).items():
             if sc.get("error"):
-                lines.append(f"| `{arm_id}` | ERR | — | — | — | — | — | — |")
+                lines.append(
+                    f"| `{arm_id}` | ERR | — | — | — | — | — | — | — | — |"
+                )
                 continue
             lines.append(
-                "| `{arm}` | {mp} | **{hs}** | {idc} | {ex} | {gz} | {nb} | {lat} |".format(
+                "| `{arm}` | {mp} | {gp} | {pe} | **{hs}** | {idc} | {ex} | "
+                "{gz} | {nb} | {lat} |".format(
                     arm=arm_id,
                     mp=sc.get("scene_megapixels"),
+                    gp=sc.get("grounding_px"),
+                    pe=sc.get("preserve_expression"),
                     hs=sc.get("head_to_body_scale_ratio"),
                     idc=sc.get("identity_cosine"),
                     ex=(
@@ -390,6 +494,14 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
         "### Does author-matched ref_boost=4 help (d vs c)?",
         "",
         j.get("ref_boost", "_run GPU arms to fill_"),
+        "",
+        "### Identity-strength sweep (e / f / g vs d)",
+        "",
+        j.get("identity_strength", "_run GPU arms to fill_"),
+        "",
+        "### Expression freedom (h vs c, i vs d)",
+        "",
+        j.get("expression_freedom", "_run GPU arms to fill_"),
         "",
         "### Face-drift tradeoff (neighbors visible in full_frame)",
         "",
@@ -433,11 +545,19 @@ def _judge(cases: list[dict[str, Any]]) -> dict[str, str]:
         mean("c_ff_full_rb35"),
         mean("d_ff_full_rb4"),
     )
+    e, f, g = (
+        mean("e_ff_full_rb5_gp768"),
+        mean("f_ff_full_rb4_gp1024"),
+        mean("g_ff_full_rb5_gp1024"),
+    )
+    h, i = mean("h_ff_full_rb35_noexpr"), mean("i_ff_full_rb4_noexpr")
     if a is None or b is None:
         return {
             "context_alone": "Incomplete — need GPU results for arms (a) and (b).",
             "full_lora": "Incomplete.",
             "ref_boost": "Incomplete.",
+            "identity_strength": "Incomplete.",
+            "expression_freedom": "Incomplete.",
             "face_drift_tradeoff": "Incomplete.",
             "recommendation": "Re-run without --prep-only / --mock on Colab GPU.",
         }
@@ -476,6 +596,37 @@ def _judge(cases: list[dict[str, Any]]) -> dict[str, str]:
             )
         )
 
+    strength = "Incomplete (need e/f/g)."
+    if d is not None and any(x is not None for x in (e, f, g)):
+        parts = [f"d={d:.3f}"]
+        for name, val in (("e", e), ("f", f), ("g", g)):
+            if val is not None:
+                parts.append(f"{name}={val:.3f}")
+        strength = (
+            "Mean head_to_body_scale_ratio "
+            + ", ".join(parts)
+            + ". Compare identity_cosine in the per-case table — higher rb / "
+            "grounding_px may trade head-scale for identity strength."
+        )
+
+    expr_free = "Incomplete (need h/i)."
+    if c is not None or d is not None:
+        bits = []
+        if h is not None and c is not None:
+            bits.append(f"h={h:.3f} vs c={c:.3f}")
+        if i is not None and d is not None:
+            bits.append(f"i={i:.3f} vs d={d:.3f}")
+        expr_free = (
+            (
+                "Head-scale " + "; ".join(bits) + ". "
+                if bits
+                else "Expression-freedom arms present; "
+            )
+            + "Primary read is expression_landmark_l2 / visual expression — "
+            "preserve_expression=false should raise donor expression match and "
+            "may change expr_l2 vs body."
+        )
+
     na, nb_ = nmean("a_crop_r64_rb35"), nmean("b_ff_r64_rb35")
     drift = (
         "Neighbor identity not measured (detector/InsightFace missing)."
@@ -488,40 +639,39 @@ def _judge(cases: list[dict[str, Any]]) -> dict[str, str]:
         )
     )
 
-    # Recommendation heuristic
+    # Recommendation heuristic across all measured arms.
     best_arm, best_val = "a_crop_r64_rb35", a
-    for arm, val in (
-        ("b_ff_r64_rb35", b),
-        ("c_ff_full_rb35", c),
-        ("d_ff_full_rb4", d),
+    for arm_id in (
+        "b_ff_r64_rb35",
+        "c_ff_full_rb35",
+        "d_ff_full_rb4",
+        "e_ff_full_rb5_gp768",
+        "f_ff_full_rb4_gp1024",
+        "g_ff_full_rb5_gp1024",
+        "h_ff_full_rb35_noexpr",
+        "i_ff_full_rb4_noexpr",
     ):
+        val = mean(arm_id)
         if val is not None and closer_to_one(val, best_val):
-            best_arm, best_val = arm, val
+            best_arm, best_val = arm_id, val
     if best_arm == "a_crop_r64_rb35":
         rec = (
             "Keep production crop_stitch — full_frame did not win on head-scale. "
             "Look elsewhere for the oversized-head root cause."
         )
-    elif best_arm.startswith("b_"):
-        rec = (
-            "Promote full_frame (r64, rb3.5) for multi-person if neighbor drift is "
-            "acceptable; context alone appears sufficient."
-        )
-    elif best_arm.startswith("c_"):
-        rec = (
-            "Promote full_frame with full v1.2 LoRA (rb3.5); weight quality matters "
-            "beyond context."
-        )
     else:
         rec = (
-            "Promote full_frame with full v1.2 LoRA and ref_boost=4 (author-matched). "
-            "Watch neighbor face-drift on tight groups."
+            f"Best head-scale arm on aggregate: `{best_arm}` "
+            f"(mean ratio={best_val:.3f}). Also weigh identity_cosine and "
+            "expression metrics before promoting; head-scale alone is not enough."
         )
 
     return {
         "context_alone": ctx,
         "full_lora": full,
         "ref_boost": rb,
+        "identity_strength": strength,
+        "expression_freedom": expr_free,
         "face_drift_tradeoff": drift,
         "recommendation": rec,
     }
@@ -567,8 +717,8 @@ def main() -> int:
     ap.add_argument("--mock", action="store_true")
     ap.add_argument(
         "--arms",
-        default="a,b,c,d",
-        help="Subset of arms to run, e.g. a,b or a,b,c,d",
+        default="a,b,c,d,e,f,g,h,i",
+        help="Subset of arms to run, e.g. a,b,c,d or e,f,g,h,i or full ids",
     )
     args = ap.parse_args()
 
@@ -714,6 +864,8 @@ def main() -> int:
                     "scene_size": list(built["scene"].size),
                     "scene_megapixels": scene_mp,
                     "ref_boost": arm["ref_boost"],
+                    "grounding_px": arm.get("grounding_px", 768),
+                    "preserve_expression": arm.get("preserve_expression", True),
                     "identity_lora_name": arm["identity_lora_name"],
                 }
                 print(
@@ -731,7 +883,9 @@ def main() -> int:
             cfg = _cfg_for_arm(base_cfg, arm)
             print(
                 f"  running {arm_id} mode={arm['multi_person_edit_mode']} "
-                f"lora={arm['identity_lora_name']} rb={arm['ref_boost']}…"
+                f"lora={arm['identity_lora_name']} rb={arm['ref_boost']} "
+                f"gp={arm.get('grounding_px')} "
+                f"preserve_expr={arm.get('preserve_expression', True)}…"
             )
             try:
                 reset_shared_krea2_runtime()
@@ -783,11 +937,17 @@ def main() -> int:
                     latency_s=latency,
                     meta=meta,
                 )
+                if sc.get("grounding_px") is None:
+                    sc["grounding_px"] = arm.get("grounding_px")
+                if sc.get("preserve_expression") is None:
+                    sc["preserve_expression"] = arm.get("preserve_expression", True)
                 row["scores"][arm_id] = sc
                 row["metas"][arm_id] = {
                     "edit_mode": meta.get("edit_mode"),
                     "loras_loaded": meta.get("loras_loaded"),
                     "ref_boost": meta.get("ref_boost"),
+                    "grounding_px": meta.get("grounding_px"),
+                    "preserve_expression": meta.get("preserve_expression"),
                     "scene_size": meta.get("scene_size"),
                     "timing_s": meta.get("timing_s"),
                     "steps": meta.get("steps"),
@@ -814,6 +974,8 @@ def main() -> int:
             "context_alone": "Incomplete — prep/mock only.",
             "full_lora": "Incomplete — prep/mock only.",
             "ref_boost": "Incomplete — prep/mock only.",
+            "identity_strength": "Incomplete — prep/mock only.",
+            "expression_freedom": "Incomplete — prep/mock only.",
             "face_drift_tradeoff": "Incomplete — prep/mock only.",
             "recommendation": "Re-run on Colab GPU without --prep-only/--mock.",
         }

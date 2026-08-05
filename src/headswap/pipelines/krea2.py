@@ -12,6 +12,7 @@ show where wall time goes (bootstrap / load / encode / sample / decode).
 """
 from __future__ import annotations
 
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -897,11 +898,47 @@ class Krea2IdentityEditPipeline(BasePipeline):
             flush=True,
         )
 
+    def _apply_expression_policy(self, prompt: str) -> str:
+        """Honor ``preserve_expression`` (default true).
+
+        When false, strip prompt clauses that force the body/scene expression
+        onto the result and append donor-expression freedom language. Geometry,
+        identity, and hair instructions are left intact.
+        """
+        text = str(prompt or "").strip()
+        if bool(self.cfg.get("preserve_expression", True)):
+            return text
+        # Known expression-lock clauses (yaml prompt + align_paste refine + add-ons).
+        patterns = [
+            # Primary yaml CRITICAL block (expression + follow-on Keep mouth…).
+            r"CRITICAL:\s*copy the facial expression from the first image exactly"
+            r".*?never from the second image\.",
+            r"CRITICAL:\s*copy the facial expression from image 1 only[^.]*\.",
+            r"Keep mouth shape, smile/no-smile, eye gaze, and\s*"
+            r"micro-expressions from the first image only[^.]*\.",
+            r"Preserve the facial expression, mouth shape, eye gaze, and head\s*"
+            r"pose from the first image exactly\.?",
+        ]
+        out = text
+        for pat in patterns:
+            out = re.sub(pat, " ", out, flags=re.IGNORECASE | re.DOTALL)
+        out = re.sub(r"[ \t]+", " ", out)
+        out = re.sub(r" *\n *", "\n", out)
+        out = re.sub(r"\n{3,}", "\n\n", out).strip()
+        freedom = (
+            "Allow the facial expression from the second image (donor identity) — "
+            "do not force the first person's smile, no-smile, or mouth shape onto "
+            "the result. Prefer the natural expression of the identity person."
+        )
+        if "Allow the facial expression from the second image" not in out:
+            out = (out + " " + freedom).strip()
+        return out
+
     def _prompt_for_edit(self, *, use_tight: bool, multi_person: bool) -> str:
         prompt = str(self.cfg.get("prompt", "") or "").strip()
         # SPP-CC: identical prompt to single-person (no multi add-ons).
         if self._single_person_parity():
-            return prompt
+            return self._apply_expression_policy(prompt)
         # Head-scale reminder for group shots (oversized heads are the main fail).
         if multi_person and bool(self.cfg.get("multi_head_scale_prompt", True)):
             prompt = (
@@ -932,7 +969,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "clothing, collar, bowtie, or shoulders from the second image. "
                 "Match lighting and skin tone to the neck and jaw in the first image."
             )
-        return prompt
+        return self._apply_expression_policy(prompt)
 
     def _face_position_label(
         self, selected: FaceBox | None, all_faces: list[FaceBox]
@@ -968,7 +1005,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         base = str(self.cfg.get("prompt", "") or "").strip()
         pos = self._face_position_label(selected, all_faces)
         n = len(all_faces)
-        return (
+        return self._apply_expression_policy(
             base
             + f" There are {n} people in the first image. "
             "LOCALITY (mandatory): edit ONLY the selected person's head, face, and "
@@ -1725,20 +1762,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
         refine_fn = None
         do_refine = bool(self.cfg.get("align_paste_krea2_refine", True))
         if do_refine:
-            refine_prompt = str(
-                self.cfg.get(
-                    "align_paste_refine_prompt",
-                    "Blend the pasted face naturally into the first image. "
-                    "CRITICAL: the person must look in exactly the same direction "
-                    "as in the first image — same head yaw, eye gaze, and face angle. "
-                    "Do not rotate the head toward the camera or front-face the identity. "
-                    "Preserve the facial expression, mouth shape, eye gaze, and head "
-                    "pose from the first image exactly. Use only facial identity from "
-                    "the second image. Do not change clothing, collar, hair silhouette "
-                    "outside the face, or neighboring people. Match lighting to the first image.",
-                )
-            ).strip()
-
+            refine_prompt = self._apply_expression_policy(
+                str(
+                    self.cfg.get(
+                        "align_paste_refine_prompt",
+                        "Blend the pasted face naturally into the first image. "
+                        "CRITICAL: the person must look in exactly the same direction "
+                        "as in the first image — same head yaw, eye gaze, and face angle. "
+                        "Do not rotate the head toward the camera or front-face the identity. "
+                        "Preserve the facial expression, mouth shape, eye gaze, and head "
+                        "pose from the first image exactly. Use only facial identity from "
+                        "the second image. Do not change clothing, collar, hair silhouette "
+                        "outside the face, or neighboring people. Match lighting to the first image.",
+                    )
+                ).strip()
+            )
             def refine_fn(composite_crop, id_matte, face_mask_crop):  # noqa: ANN001
                 scene = composite_crop.convert("RGB")
                 person = resize_contain(id_matte.convert("RGB"), scene.size, fill=(0, 0, 0))
@@ -2656,6 +2694,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "ref_boost": sample_meta["ref_boost"],
             "ref_boost_a": sample_meta["ref_boost_a"],
             "grounding_px": sample_meta["grounding_px"],
+            "preserve_expression": bool(self.cfg.get("preserve_expression", True)),
             "fit_mode": sample_meta["fit_mode"],
             "empty_latent_node": sample_meta["empty_node"],
             "force_full_load": sample_meta["use_full_load"],

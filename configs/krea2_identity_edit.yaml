@@ -247,6 +247,10 @@ head_scale_trace: false
 multi_head_scale_prompt: true
 # Force hairstyle transfer (body hair often survives without this).
 multi_hair_replace_prompt: true
+# When true (default): prompt forces body/scene expression onto the result.
+# When false: strip expression-lock language and allow the donor identity's
+# natural expression (A/B arms h/i). Does not change geometry/identity LoRA.
+preserve_expression: true
 
 prompt: >-
   Replace the person's head, face, and hair in the first image with the person

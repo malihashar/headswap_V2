@@ -1184,8 +1184,9 @@ def run_full_frame_author_ab(
     face_path: Path | str,
     out_dir: Path | str | None = None,
     policy: str = "largest",
+    arms: str = "a,b,c,d,e,f,g,h,i",
 ) -> dict[str, Any]:
-    """Run the four-arm full-frame author-parity A/B (non-mock).
+    """Run the full-frame author-parity A/B (non-mock), arms a–i by default.
 
     Invokes ``scripts/ab_full_frame_author_parity.py`` against the uploaded
     body/face so Colab **Run all** on this branch produces REPORT.md without
@@ -1202,7 +1203,7 @@ def run_full_frame_author_ab(
     out = Path(out_dir or (root / "results" / "_ab_full_frame_author_parity"))
     out.mkdir(parents=True, exist_ok=True)
 
-    # Ensure full v1.2 LoRA for arms (c)/(d); r64 is already in the required set.
+    # Ensure full v1.2 LoRA for full-weight arms; r64 is already in the required set.
     progress("Ensuring full v1.2 Identity Edit LoRA (optional download)…")
     subprocess.run(
         [
@@ -1224,17 +1225,8 @@ def run_full_frame_author_ab(
         check=False,
     )
 
-    progress("Running full-frame author-parity A/B (a/b/c/d)…")
-    cmd = [
-        sys.executable,
-        str(script),
-        "--body",
-        str(body_p),
-        "--face",
-        str(face_p),
-        "--out",
-        str(out),
-    ]
+    arms_arg = str(arms or "a,b,c,d,e,f,g,h,i").strip()
+    progress(f"Running full-frame author-parity A/B (arms={arms_arg})…")
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root / "src") + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
@@ -1262,6 +1254,8 @@ def run_full_frame_author_ab(
         str(cases_path),
         "--out",
         str(out),
+        "--arms",
+        arms_arg,
     ]
     t0 = time.perf_counter()
     proc = subprocess.run(cmd, cwd=str(root), env=env, capture_output=False)
@@ -1282,6 +1276,7 @@ def run_full_frame_author_ab(
         "report_json": str(report_json) if report_json.is_file() else None,
         "side_by_side": str(sbs) if sbs.is_file() else None,
         "wall_s": round(wall, 2),
+        "arms": arms_arg,
         "mode": "full_frame_author_parity_ab",
     }
     if report_json.is_file():
