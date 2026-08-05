@@ -2101,26 +2101,58 @@ def align_face_to_destination(
     return Image.fromarray(rgba, mode="RGBA"), info
 
 
+def _landmark_centroid_in_box(
+    lm: np.ndarray, box: FaceBox | None, *, tolerance: float = 0.75
+) -> bool:
+    """True when the landmark centroid sits inside ``box`` expanded by tolerance.
+
+    ``get_face_landmarks5`` silently falls back to the largest face when the
+    ``prefer_box`` IoU is poor, so a successful "insightface" return does not
+    guarantee it locked onto the intended face. This is that missing check.
+    """
+    if box is None:
+        return True
+    cx = float(np.mean(lm[:, 0]))
+    cy = float(np.mean(lm[:, 1]))
+    mx = tolerance * float(max(1, box.width))
+    my = tolerance * float(max(1, box.height))
+    return (
+        (float(box.x0) - mx) <= cx <= (float(box.x1) + mx)
+        and (float(box.y0) - my) <= cy <= (float(box.y1) + my)
+    )
+
+
 def procrustes_align_edited_crop_to_body_box(
     edited: Image.Image,
     body: Image.Image,
     box: tuple[int, int, int, int],
     cache_dir,
     *,
+    crop_content_box: tuple[int, int, int, int] | None = None,
     prefer_body_box: FaceBox | None = None,
     min_inliers: int = 3,
     min_scale: float = 0.40,
     max_scale: float = 2.50,
+    max_rotation_deg: float = 12.0,
+    max_translate_frac: float = 0.25,
+    max_residual_frac: float = 0.06,
 ) -> tuple[Image.Image, dict[str, Any]]:
     """Procrustes (similarity) on a crop_stitch edited crop before stitch.
 
-    Landmarks:
-      - destination: selected face on ``body``, mapped into edited-crop coords
-        via ``box`` + resize scale
-      - source: face on ``edited``
+    Every coordinate lives in **content-local** space: the sub-rectangle of
+    ``edited`` that maps 1:1 onto ``box`` in ``body``. When ``square_crop`` pads
+    the scene, ``crop_content_box`` = ``(ox, oy, w, h)`` describes that
+    sub-rectangle; otherwise the whole ``edited`` image is the content.
 
-    Warps the full edited crop so generated head scale/pose matches the
-    original. On failure returns ``edited`` unchanged with a skip reason.
+      body pixel (bx, by)
+        -> content pixel (ox + (bx - x0) * cw_c / box_w,
+                          oy + (by - y0) * ch_c / box_h)
+
+    Source landmarks are detected on the content crop (not the padded image) so
+    detection and warp share one frame. The similarity transform is applied once
+    to the whole content crop, then pasted back at the pad offset.
+
+    On any failure the original ``edited`` is returned unchanged with a reason.
     """
     info: dict[str, Any] = {
         "procrustes": False,
@@ -2129,29 +2161,54 @@ def procrustes_align_edited_crop_to_body_box(
         "rotation_deg": None,
         "translation": None,
         "inliers": None,
+        "residual_px": None,
+        "content_box": None,
     }
     edited_rgb = edited.convert("RGB")
     body_rgb = body.convert("RGB")
     x0, y0, x1, y1 = [int(v) for v in box]
-    cw = max(1, x1 - x0)
-    ch = max(1, y1 - y0)
+    box_w = max(1, x1 - x0)
+    box_h = max(1, y1 - y0)
     ew, eh = edited_rgb.size
-    sx = float(ew) / float(cw)
-    sy = float(eh) / float(ch)
 
-    # Prefer body face mapped into crop-local / edited coords for gen detection.
+    # Content sub-rectangle of `edited` that corresponds to `box` in body space.
+    if crop_content_box is not None:
+        ox, oy, cw_c, ch_c = [int(v) for v in crop_content_box]
+    else:
+        ox, oy, cw_c, ch_c = 0, 0, ew, eh
+    ox = max(0, min(ox, max(0, ew - 1)))
+    oy = max(0, min(oy, max(0, eh - 1)))
+    cw_c = max(1, min(cw_c, ew - ox))
+    ch_c = max(1, min(ch_c, eh - oy))
+    info["content_box"] = [ox, oy, cw_c, ch_c]
+
+    # Single body -> content-local scale used for BOTH prefer box and landmarks.
+    sx = float(cw_c) / float(box_w)
+    sy = float(ch_c) / float(box_h)
+
+    content = edited_rgb.crop((ox, oy, ox + cw_c, oy + ch_c))
+
+    def _to_content_xy(bx: float, by: float) -> tuple[float, float]:
+        return ((float(bx) - x0) * sx, (float(by) - y0) * sy)
+
+    # Expected face location in content-local coords (clamped to the content).
     prefer_gen: FaceBox | None = None
     if prefer_body_box is not None:
+        gx0, gy0 = _to_content_xy(prefer_body_box.x0, prefer_body_box.y0)
+        gx1, gy1 = _to_content_xy(prefer_body_box.x1, prefer_body_box.y1)
+        gx0 = max(0.0, min(gx0, cw_c - 1.0))
+        gy0 = max(0.0, min(gy0, ch_c - 1.0))
+        gx1 = max(1.0, min(gx1, float(cw_c)))
+        gy1 = max(1.0, min(gy1, float(ch_c)))
+        if (gx1 - gx0) < 8.0 or (gy1 - gy0) < 8.0:
+            info["procrustes_reason"] = "selected_face_outside_crop"
+            return edited_rgb, info
         prefer_gen = FaceBox(
-            int((prefer_body_box.x0 - x0) * sx),
-            int((prefer_body_box.y0 - y0) * sy),
-            int((prefer_body_box.x1 - x0) * sx),
-            int((prefer_body_box.y1 - y0) * sy),
-            float(prefer_body_box.conf),
+            int(gx0), int(gy0), int(gx1), int(gy1), float(prefer_body_box.conf)
         )
 
     src_lm, src_backend, src_note = get_face_landmarks5(
-        pil_to_rgb_np(edited_rgb), cache_dir, prefer_box=prefer_gen
+        pil_to_rgb_np(content), cache_dir, prefer_box=prefer_gen
     )
     dst_lm_body, dst_backend, dst_note = get_face_landmarks5(
         pil_to_rgb_np(body_rgb), cache_dir, prefer_box=prefer_body_box
@@ -2165,7 +2222,15 @@ def procrustes_align_edited_crop_to_body_box(
         info["procrustes_reason"] = "low_confidence_need_insightface"
         return edited_rgb, info
 
-    # Map body landmarks into edited-crop pixel space.
+    # Reject a silent lock onto a neighbouring face on either side.
+    if not _landmark_centroid_in_box(src_lm, prefer_gen):
+        info["procrustes_reason"] = "src_landmarks_wrong_face"
+        return edited_rgb, info
+    if not _landmark_centroid_in_box(dst_lm_body, prefer_body_box):
+        info["procrustes_reason"] = "dst_landmarks_wrong_face"
+        return edited_rgb, info
+
+    # Map body landmarks into the same content-local frame as `src_lm`.
     dst_lm = np.stack(
         [
             (dst_lm_body[:, 0] - float(x0)) * sx,
@@ -2174,7 +2239,9 @@ def procrustes_align_edited_crop_to_body_box(
         axis=1,
     ).astype(np.float32)
 
-    matrix, inliers = cv2.estimateAffinePartial2D(src_lm, dst_lm, method=cv2.LMEDS)
+    matrix, inliers = cv2.estimateAffinePartial2D(
+        src_lm.astype(np.float32), dst_lm, method=cv2.LMEDS
+    )
     if matrix is None:
         info["procrustes_reason"] = "estimateAffinePartial2D_failed"
         return edited_rgb, info
@@ -2182,26 +2249,52 @@ def procrustes_align_edited_crop_to_body_box(
     scale = float(math.hypot(a, b))
     rot = float(math.degrees(math.atan2(b, a))) if scale > 1e-8 else 0.0
     n_in = int(np.asarray(inliers).sum()) if inliers is not None else 0
+
+    # Residual of the fit itself, in content-local pixels.
+    proj = (matrix[:, :2] @ src_lm.astype(np.float64).T).T + matrix[:, 2]
+    residual = float(np.sqrt(np.mean(np.sum((proj - dst_lm) ** 2, axis=1))))
+    long_side = float(max(cw_c, ch_c))
+    # Face-centre displacement, the number that actually moves the head.
+    src_c = src_lm.astype(np.float64).mean(axis=0)
+    dst_c = dst_lm.astype(np.float64).mean(axis=0)
+    shift = float(math.hypot(*(dst_c - src_c)))
+
     info["scale"] = round(scale, 4)
     info["rotation_deg"] = round(rot, 3)
     info["translation"] = [round(float(matrix[0, 2]), 2), round(float(matrix[1, 2]), 2)]
     info["inliers"] = n_in
+    info["residual_px"] = round(residual, 3)
+    info["face_shift_px"] = round(shift, 2)
+
     if n_in < int(min_inliers):
         info["procrustes_reason"] = f"low_inliers:{n_in}"
         return edited_rgb, info
     if not (float(min_scale) <= scale <= float(max_scale)):
         info["procrustes_reason"] = f"scale_out_of_range:{scale:.3f}"
         return edited_rgb, info
+    if abs(rot) > float(max_rotation_deg):
+        info["procrustes_reason"] = f"rotation_out_of_range:{rot:.2f}"
+        return edited_rgb, info
+    if shift > float(max_translate_frac) * long_side:
+        info["procrustes_reason"] = f"translation_too_large:{shift:.1f}px"
+        return edited_rgb, info
+    if residual > float(max_residual_frac) * long_side:
+        info["procrustes_reason"] = f"fit_residual_too_large:{residual:.1f}px"
+        return edited_rgb, info
 
+    # One warp of the whole content crop. BORDER_REPLICATE (never REFLECT) so a
+    # translation cannot mirror the head back into frame as a ghost fragment.
     warped = cv2.warpAffine(
-        pil_to_rgb_np(edited_rgb),
+        pil_to_rgb_np(content),
         matrix,
-        (ew, eh),
+        (cw_c, ch_c),
         flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REFLECT_101,
+        borderMode=cv2.BORDER_REPLICATE,
     )
+    out = edited_rgb.copy()
+    out.paste(Image.fromarray(warped, mode="RGB"), (ox, oy))
     info["procrustes"] = True
-    return Image.fromarray(warped, mode="RGB"), info
+    return out, info
 
 
 def expand_crop_box_wide(

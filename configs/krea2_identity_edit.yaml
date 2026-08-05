@@ -77,6 +77,11 @@ enable_procrustes_correction: false
 procrustes_min_inliers: 3
 procrustes_min_scale: 0.40
 procrustes_max_scale: 2.50
+# Sanity gates — any breach falls back to the uncorrected crop instead of
+# warping the head off-register (the floating face/hair fragment failure).
+procrustes_max_rotation_deg: 12.0
+procrustes_max_translate_frac: 0.25
+procrustes_max_residual_frac: 0.06
 max_body_dim: 1024
 crop_long_side: 768
 square_crop: false

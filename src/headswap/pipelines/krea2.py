@@ -1690,19 +1690,30 @@ class Krea2IdentityEditPipeline(BasePipeline):
         box: tuple[int, int, int, int],
         selected_face: FaceBox | None,
         face_prep_diag: dict[str, Any],
-    ) -> Image.Image:
-        """Optional Procrustes on crop_stitch edited crop before stitch."""
+        crop_content_box: tuple[int, int, int, int] | None = None,
+    ) -> tuple[Image.Image, bool]:
+        """Optional Procrustes on crop_stitch edited crop before stitch.
+
+        Returns ``(image, applied)``. ``applied`` lets the stitch stage skip its
+        own head-scale clamp so the head is never rescaled twice.
+        """
         if not bool(self.cfg.get("enable_procrustes_correction", False)):
-            return edited
+            return edited, False
         aligned, info = procrustes_align_edited_crop_to_body_box(
             edited,
             body_full,
             box,
             self.cache_dir,
+            crop_content_box=crop_content_box,
             prefer_body_box=selected_face,
             min_inliers=int(self.cfg.get("procrustes_min_inliers", 3)),
             min_scale=float(self.cfg.get("procrustes_min_scale", 0.40)),
             max_scale=float(self.cfg.get("procrustes_max_scale", 2.50)),
+            max_rotation_deg=float(self.cfg.get("procrustes_max_rotation_deg", 12.0)),
+            max_translate_frac=float(
+                self.cfg.get("procrustes_max_translate_frac", 0.25)
+            ),
+            max_residual_frac=float(self.cfg.get("procrustes_max_residual_frac", 0.06)),
         )
         face_prep_diag["procrustes_correction"] = info
         import sys
@@ -1711,18 +1722,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
             print(
                 "[krea2] procrustes_correction "
                 f"scale={info.get('scale')} rot_deg={info.get('rotation_deg')} "
-                f"t={info.get('translation')} inliers={info.get('inliers')}",
+                f"t={info.get('translation')} inliers={info.get('inliers')} "
+                f"residual_px={info.get('residual_px')} "
+                f"content_box={info.get('content_box')}",
                 file=sys.__stdout__,
                 flush=True,
             )
-            return aligned
+            return aligned, True
         print(
             "[krea2] procrustes_correction skipped: "
             f"{info.get('procrustes_reason')}",
             file=sys.__stdout__,
             flush=True,
         )
-        return edited
+        return edited, False
 
     def _stitch_edited(
         self,
@@ -1736,6 +1749,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         multi_person: bool = False,
         original_scene: Image.Image | None = None,
         debug_stages: dict[str, Image.Image] | None = None,
+        skip_head_clamp: bool = False,
     ) -> Image.Image:
         edited_crop = edited
         if crop_content_box is not None:
@@ -1744,7 +1758,19 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # Clamp / multi stitch boosts only when NOT on SPP-CC parity path.
         stitch_multi = bool(multi_person) and not self._single_person_parity()
         # Clamp oversized heads before composite (group-shot failure mode).
-        if stitch_multi and bool(self.cfg.get("clamp_edited_head_scale", True)):
+        # Suppressed when Procrustes already resized the head — two independent
+        # scale+translate warps stacked produce a doubled / displaced head.
+        if stitch_multi and skip_head_clamp:
+            import sys
+
+            print(
+                "[krea2] head-scale clamp skipped (procrustes already applied)",
+                file=sys.__stdout__,
+                flush=True,
+            )
+        if stitch_multi and not skip_head_clamp and bool(
+            self.cfg.get("clamp_edited_head_scale", True)
+        ):
             ref_scene = original_scene
             if ref_scene is None:
                 ref_scene = canvas.crop(box).resize(
@@ -2433,12 +2459,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         edit_cache_info=edit_cache_info,
                         seed=base_seed + face_i,
                     )
-                    edited_i = self._maybe_procrustes_edited_crop(
+                    edited_i, procrustes_applied_i = self._maybe_procrustes_edited_crop(
                         sample["edited"],
                         body_full,
                         built["box"],
                         face_box,
                         face_prep_diag,
+                        crop_content_box=built["crop_content_box"],
                     )
                     with _stage(timings, "postprocessing"):
                         canvas = self._stitch_edited(
@@ -2451,6 +2478,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             multi_person=True,
                             original_scene=built["scene"],
                             debug_stages=stitch_debug,
+                            skip_head_clamp=procrustes_applied_i,
                         )
                     faces_succeeded.append(face_i)
                     last_sample = sample
@@ -2521,18 +2549,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 ref_boost_mask=ref_boost_mask_img if edit_mode == "full_frame" else None,
             )
             edited = sample_meta["edited"]
+            procrustes_applied = False
             if (
                 do_stitch
                 and body_full is not None
                 and box is not None
                 and edit_mode != "full_frame"
             ):
-                edited = self._maybe_procrustes_edited_crop(
+                edited, procrustes_applied = self._maybe_procrustes_edited_crop(
                     edited,
                     body_full,
                     box,
                     selected_face,
                     face_prep_diag,
+                    crop_content_box=crop_content_box,
                 )
                 sample_meta["edited"] = edited
             if head_scale_trace is not None:
@@ -2555,6 +2585,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         multi_person=multi_person,
                         original_scene=scene,
                         debug_stages=stitch_debug,
+                        skip_head_clamp=procrustes_applied,
                     )
                     if head_scale_trace is not None:
                         head_scale_trace.record_stitched(out)
