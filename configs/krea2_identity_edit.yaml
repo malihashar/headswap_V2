@@ -149,7 +149,7 @@ single_person_parity: true
 #   dark  -> full_frame (full v1.2 LoRA + ref_boost=4 via overrides below)
 #   else  -> crop_stitch (production r64 + ref_boost=3.5)
 # Single-person: never lighting-checked; stays on existing crop_stitch path.
-enable_lighting_route: false
+enable_lighting_route: true
 # Mean OpenCV HSV Value [0,255] over the target face (fallback: full frame).
 # Below threshold => dark. Tune on real night/day multi-person photos.
 dark_lighting_threshold: 70.0
