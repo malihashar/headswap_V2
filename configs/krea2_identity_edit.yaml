@@ -205,10 +205,14 @@ full_frame_min_selected_mask_frac: 0.35
 full_frame_neighbor_pad_frac: 0.22
 full_frame_neighbor_top_frac: 0.35
 full_frame_protect_expand: 1.20
-full_frame_post_color_match_strength: 0.75
-# Optional: restrict identity ref_boost to the face ellipse on image-2.
-# ON by default for full-frame mode to close the identity gap while keeping head-scale ~1.0.
-full_frame_ref_boost_mask: true
+# LAB mean-shift applied to the head mask region post-freeze.
+# 0.15 = correct only seam-boundary discontinuity; higher values re-skin the
+# entire generated face back toward the original (kills identity at ≥0.45).
+full_frame_post_color_match_strength: 0.15
+# ref_boost_mask: DISABLED — mask was built in person-image space (512×512 portrait)
+# but _ref_attn_bias expects scene-space coordinates. Re-enable once mask is
+# rebuilt using selected_face.bbox projected onto scene (body_full) resolution.
+full_frame_ref_boost_mask: false
 # Match successful crop_stitch identity prep: full-bleed resize_contain onto
 # the scene canvas (NOT place_face_at_height_frac stickers). Only intentional
 # difference vs crop_stitch should be scene = full body vs head crop.

@@ -1395,6 +1395,36 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if bool(self.cfg.get("full_frame_ref_boost_mask", False)):
             ref_boost_mask = identity_face_boost_mask(person, self.cache_dir)
 
+        # ── Debug: dump both masks as PNGs so polarity can be inspected visually ──
+        # Always runs on full_frame path; download from /tmp/headswap_debug/ in Colab.
+        # White=1 (selected head / boosted region), Black=0 (frozen / not boosted).
+        try:
+            import os as _os
+            import time as _time
+            _dbg_dir = "/tmp/headswap_debug"
+            _os.makedirs(_dbg_dir, exist_ok=True)
+            _ts = int(_time.time())
+            _sel = selected_face
+            if freeze_mask is not None:
+                freeze_mask.save(f"{_dbg_dir}/freeze_mask_{_ts}.png")
+                print(
+                    f"[krea2 debug] freeze_mask saved → {_dbg_dir}/freeze_mask_{_ts}.png  "
+                    f"white=selected_head(swap preserved), black=background(restored to original)  "
+                    f"size={freeze_mask.size}  "
+                    f"selected_box={[_sel.x0,_sel.y0,_sel.x1,_sel.y1] if _sel else None}",
+                    flush=True,
+                )
+            if ref_boost_mask is not None:
+                ref_boost_mask.save(f"{_dbg_dir}/ref_boost_mask_person_{_ts}.png")
+                print(
+                    f"[krea2 debug] ref_boost_mask saved → {_dbg_dir}/ref_boost_mask_person_{_ts}.png  "
+                    f"white=boosted_identity_region  size={ref_boost_mask.size}  "
+                    f"NOTE: built from person-image coords, NOT scene coords",
+                    flush=True,
+                )
+        except Exception as _e:
+            print(f"[krea2 debug] mask dump failed: {_e}", flush=True)
+
         diag = {
             "faces_detected": len(all_faces),
             "selected_box": (
