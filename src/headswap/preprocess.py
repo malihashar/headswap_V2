@@ -805,7 +805,7 @@ def crop_face_reference(
             chin_y = mouth_y + 0.75 * iod
             # Stop at chin / upper jawline with buffer (chin_y + 0.65*iod), keeping a
             # clean neck/jaw transition rather than cutting mid-chin (0.15 was too tight).
-            max_y1 = min(box.y1 + max(0.02, float(bot)) * box.height, chin_y + 0.65 * iod)
+            max_y1 = max(box.y1 + max(0.02, float(bot)) * box.height, chin_y + 0.65 * iod)
         else:
             max_y1 = box.y1 + max(0.02, float(bot)) * box.height
 
