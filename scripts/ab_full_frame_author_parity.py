@@ -387,6 +387,8 @@ def _cfg_for_arm(base: dict, arm: dict[str, Any]) -> dict:
     cfg["full_frame_identity_lora_name"] = arm.get("full_frame_identity_lora_name")
     cfg["full_frame_ref_boost"] = arm.get("full_frame_ref_boost")
     cfg["full_frame_ref_boost_mask"] = bool(arm.get("full_frame_ref_boost_mask", False))
+    # Honor per-arm False; production full_frame forces True unless this is set.
+    cfg["allow_disable_full_frame_ref_boost_mask"] = True
     # Author-parity full-frame resolution (no-op for crop_stitch).
     cfg.setdefault("full_frame_target_mp", 1.25)
     cfg.setdefault("full_frame_min_mp", 1.0)

@@ -2180,6 +2180,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 )
             if self.cfg.get("full_frame_ref_boost") is None:
                 self.cfg["full_frame_ref_boost"] = 4.0
+            # Lighting-routed full_frame always wants identity boost (do not keep
+            # a stale notebook False from FULL_FRAME_REF_BOOST_MASK).
+            if not bool(
+                self.cfg.get("allow_disable_full_frame_ref_boost_mask", False)
+            ):
+                self.cfg["full_frame_ref_boost_mask"] = True
             route = "full_frame"
             reason = "multi_person_dark"
         else:
@@ -2529,6 +2535,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         policy=body_face_policy,
                     )
                     body_full = body_ff
+                    # Single source of truth: full_frame always enables identity ref_boost_mask
+                    # (overrides stale Colab FULL_FRAME_REF_BOOST_MASK=False / notebook cfg.update).
+                    # A/B opt-out: set allow_disable_full_frame_ref_boost_mask=True.
+                    if not bool(
+                        self.cfg.get("allow_disable_full_frame_ref_boost_mask", False)
+                    ):
+                        self.cfg["full_frame_ref_boost_mask"] = True
                     built = self._build_full_frame_inputs(
                         body_full,
                         face_crop,
