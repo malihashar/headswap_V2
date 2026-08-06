@@ -2094,6 +2094,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
         import sys
 
         enabled = bool(self.cfg.get("enable_lighting_route", False))
+        print(
+            f"[krea2 lighting] enable_lighting_route={enabled}",
+            file=sys.__stdout__,
+            flush=True,
+        )
         meta: dict[str, Any] = {
             "enable_lighting_route": enabled,
             "applied": False,
@@ -2119,11 +2124,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
         )
         n_faces = len(faces)
         meta["faces_detected"] = n_faces
+        print(
+            f"[krea2 lighting] faces_detected={n_faces} multi_person_branch={n_faces > 1}",
+            file=sys.__stdout__,
+            flush=True,
+        )
         if n_faces <= 1:
             meta["route"] = "single_person_unchanged"
             meta["reason"] = "single_person_skip_lighting"
             print(
-                f"[krea2] lighting_route=skip faces={n_faces} "
+                f"[krea2 lighting] lighting_route=skip faces={n_faces} "
                 f"(single-person path unchanged)",
                 file=sys.__stdout__,
                 flush=True,
@@ -2133,6 +2143,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
         threshold = float(self.cfg.get("dark_lighting_threshold", 70.0))
         lighting = classify_lighting(rgb, threshold=threshold, box=selected, boxes=faces)
         meta.update(lighting)
+        print(
+            f"[krea2 lighting] raw_luminance={lighting['lighting_metric']:.2f} "
+            f"region={lighting['lighting_region']} "
+            f"(face_lum={lighting.get('face_luminance')}, frame_lum={lighting.get('whole_frame_luminance')}) "
+            f"threshold={threshold} is_dark={lighting['is_dark']}",
+            file=sys.__stdout__,
+            flush=True,
+        )
         if lighting["is_dark"]:
             self.cfg["multi_person_edit_mode"] = "full_frame"
             # Ensure A/B winner (d_ff_full_rb4) overrides are present when routing.
@@ -2153,10 +2171,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         meta["reason"] = reason
         meta["multi_person_edit_mode"] = str(self.cfg.get("multi_person_edit_mode"))
         print(
-            f"[krea2] lighting_route={route} reason={reason} "
-            f"faces={n_faces} metric={lighting['lighting_metric']:.2f} "
-            f"(face_lum={lighting.get('face_luminance')}, frame_lum={lighting.get('whole_frame_luminance')}) "
-            f"threshold={threshold} dark={lighting['is_dark']}",
+            f"[krea2 lighting] resolved_mode={route} reason={reason}",
             file=sys.__stdout__,
             flush=True,
         )
@@ -2403,6 +2418,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 multi_edit_mode = str(
                     self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
                 ).strip().lower()
+                print(
+                    f"[krea2 path_selection] final_resolved_mode={multi_edit_mode} "
+                    f"faces_detected={len(all_faces)} swap_all={swap_all}",
+                    file=sys.__stdout__,
+                    flush=True,
+                )
                 multi_swap_mode = str(
                     self.cfg.get("multi_person_swap_mode", "krea2_crop")
                     or "krea2_crop"
