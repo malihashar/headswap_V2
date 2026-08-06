@@ -152,7 +152,7 @@ single_person_parity: true
 enable_lighting_route: true
 # Mean OpenCV HSV Value [0,255] over the target face (fallback: full frame).
 # Below threshold => dark. Tune on real night/day multi-person photos.
-dark_lighting_threshold: 70.0
+dark_lighting_threshold: 110.0
 # --- Full-frame A/B knobs (IGNORED while multi_person_edit_mode=crop_stitch) ---
 # Author Identity Edit guidance: pass the FULL scene (~1–1.5MP), not a head crop.
 # Production stays crop_stitch; lighting route or manual flip uses full_frame.

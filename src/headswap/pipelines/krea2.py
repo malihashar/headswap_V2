@@ -2126,7 +2126,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
             return meta
 
-        threshold = float(self.cfg.get("dark_lighting_threshold", 70.0))
+        threshold = float(self.cfg.get("dark_lighting_threshold", 110.0))
         lighting = classify_lighting(rgb, threshold=threshold, box=selected, boxes=faces)
         meta.update(lighting)
         print(
