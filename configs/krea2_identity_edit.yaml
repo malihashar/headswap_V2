@@ -207,9 +207,8 @@ full_frame_neighbor_top_frac: 0.35
 full_frame_protect_expand: 1.20
 full_frame_post_color_match_strength: 0.45
 # Optional: restrict identity ref_boost to the face ellipse on image-2.
-# OFF by default — crop_stitch passes None; enabling this is a conditioning
-# divergence from the successful single-person path.
-full_frame_ref_boost_mask: false
+# ON by default for full-frame mode to close the identity gap while keeping head-scale ~1.0.
+full_frame_ref_boost_mask: true
 # Match successful crop_stitch identity prep: full-bleed resize_contain onto
 # the scene canvas (NOT place_face_at_height_frac stickers). Only intentional
 # difference vs crop_stitch should be scene = full body vs head crop.
