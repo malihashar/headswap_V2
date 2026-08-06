@@ -919,7 +919,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "[krea2] WARNING: SPP-CC parity violated "
                 f"(scale_match={scale_match} isolate={isolate_selected} "
                 f"tight={use_tight})",
-                file=sys.__stdout__,
                 flush=True,
             )
         return {
@@ -947,7 +946,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             f"scene={diag.get('scene_size')} person={diag.get('person_size')} "
             f"body={diag.get('body_size')} mask={diag.get('mask_size')} "
             f"expand={diag.get('crop_expand')} mask_params={diag.get('mask_params')}",
-            file=sys.__stdout__,
             flush=True,
         )
 
@@ -1231,7 +1229,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             f"[krea2 face_delta] {label} selected_box=[{x0},{y0},{x1},{y1}] "
             f"mse={mse:.2f} psnr={psnr:.2f} "
             f"(high mse / low psnr ⇒ sampler changed the face)",
-            file=sys.__stdout__,
             flush=True,
         )
         return {"mse": round(mse, 3), "psnr": round(psnr, 3)}
@@ -1312,12 +1309,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
             f"grounding_px={info['grounding_px']} "
             f"sampler={info['sampler_name']}/{info['scheduler']} "
             f"shift_mu={info['timestep_shift_mu']}",
-            file=sys.__stdout__,
             flush=True,
         )
         print(
             f"[krea2 conditioning] prompt_preview={info['prompt_preview']!r}",
-            file=sys.__stdout__,
             flush=True,
         )
         return info
@@ -1492,7 +1487,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             f"[krea2 sampling] mode={_ff_mode} lora={lora_name} "
             f"ref_boost={ref_boost} grounding_px={grounding_px} "
             f"steps={steps} cfg={cfg} seed={seed_i}",
-            file=sys.__stdout__,
             flush=True,
         )
 
@@ -1740,14 +1734,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 f"t={info.get('translation')} inliers={info.get('inliers')} "
                 f"residual_px={info.get('residual_px')} "
                 f"content_box={info.get('content_box')}",
-                file=sys.__stdout__,
                 flush=True,
             )
             return aligned, True
         print(
             "[krea2] procrustes_correction skipped: "
             f"{info.get('procrustes_reason')}",
-            file=sys.__stdout__,
             flush=True,
         )
         return edited, False
@@ -1780,7 +1772,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
             print(
                 "[krea2] head-scale clamp skipped (procrustes already applied)",
-                file=sys.__stdout__,
                 flush=True,
             )
         if stitch_multi and not skip_head_clamp and bool(
@@ -1811,7 +1802,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     f"[krea2] clamped oversized head "
                     f"ratio {clamp_info['ratio_before']:.2f}→{clamp_info['ratio_after']:.2f} "
                     f"shrink={clamp_info['shrink']:.3f}",
-                    file=sys.__stdout__,
                     flush=True,
                 )
         stitch_mask = mask
@@ -2002,7 +1992,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             f"refine={ap['refine_meta'].get('refine_applied')} "
             f"pose_relock={ap.get('pose_meta', {}).get('pose_relock')} "
             f"gates={ap.get('gates')}",
-            file=sys.__stdout__,
             flush=True,
         )
 
@@ -2096,7 +2085,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
         enabled = bool(self.cfg.get("enable_lighting_route", False))
         print(
             f"[krea2 lighting] enable_lighting_route={enabled}",
-            file=sys.__stdout__,
             flush=True,
         )
         meta: dict[str, Any] = {
@@ -2126,7 +2114,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
         meta["faces_detected"] = n_faces
         print(
             f"[krea2 lighting] faces_detected={n_faces} multi_person_branch={n_faces > 1}",
-            file=sys.__stdout__,
             flush=True,
         )
         if n_faces <= 1:
@@ -2135,7 +2122,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             print(
                 f"[krea2 lighting] lighting_route=skip faces={n_faces} "
                 f"(single-person path unchanged)",
-                file=sys.__stdout__,
                 flush=True,
             )
             return meta
@@ -2148,7 +2134,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             f"region={lighting['lighting_region']} "
             f"(face_lum={lighting.get('face_luminance')}, frame_lum={lighting.get('whole_frame_luminance')}) "
             f"threshold={threshold} is_dark={lighting['is_dark']}",
-            file=sys.__stdout__,
             flush=True,
         )
         if lighting["is_dark"]:
@@ -2172,7 +2157,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
         meta["multi_person_edit_mode"] = str(self.cfg.get("multi_person_edit_mode"))
         print(
             f"[krea2 lighting] resolved_mode={route} reason={reason}",
-            file=sys.__stdout__,
             flush=True,
         )
         return meta
@@ -2250,7 +2234,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 f"id={result.id} status={result.status} "
                 f"faces={result.face_count} "
                 f"(geometry still from current detector)",
-                file=sys.__stdout__,
                 flush=True,
             )
             if out_dir is not None:
@@ -2268,7 +2251,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
             print(
                 f"[krea2] magic_hour face detection failed "
                 f"({type(e).__name__}: {e})",
-                file=sys.__stdout__,
                 flush=True,
             )
             return {
@@ -2421,7 +2403,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 print(
                     f"[krea2 path_selection] final_resolved_mode={multi_edit_mode} "
                     f"faces_detected={len(all_faces)} swap_all={swap_all}",
-                    file=sys.__stdout__,
                     flush=True,
                 )
                 multi_swap_mode = str(
@@ -2465,7 +2446,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     print(
                         f"[krea2] edit_mode=align_paste faces={len(all_faces)} "
                         f"(geometry-locked; Krea2 dual-ref free-gen skipped)",
-                        file=sys.__stdout__,
                         flush=True,
                     )
                 # MULTI-FACE: swap every detected face sequentially when requested.
@@ -2473,7 +2453,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     print(
                         f"[krea2] face_swap_mode=all faces_detected={len(all_faces)} "
                         f"— running {len(all_faces)} inference passes",
-                        file=sys.__stdout__,
                         flush=True,
                     )
                     timings["_multi_person"] = 1.0
@@ -2547,7 +2526,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         f"scene={list(scene.size)} "
                         f"scene_mp={face_prep_diag.get('scene_megapixels')} "
                         f"person={list(person.size)}",
-                        file=sys.__stdout__,
                         flush=True,
                     )
                     timings["_multi_person"] = 1.0
@@ -2566,7 +2544,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         print(
                             "[krea2] face_swap_mode=all but only 1 face detected "
                             "— falling back to single-face path",
-                            file=sys.__stdout__,
                             flush=True,
                         )
                     flags = self._tight_crop_flags(body_full, selected_face, all_faces)
@@ -2583,7 +2560,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         f"isolate={isolate_selected} "
                         f"selected_box="
                         f"{None if selected_face is None else [selected_face.x0, selected_face.y0, selected_face.x1, selected_face.y1]}",
-                        file=sys.__stdout__,
                         flush=True,
                     )
                     built = self._build_scene_person(
@@ -2723,7 +2699,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     print(
                         f"[krea2] swap-all face {face_i + 1}/{len(all_faces)} "
                         f"box=[{face_box.x0},{face_box.y0},{face_box.x1},{face_box.y1}]",
-                        file=sys.__stdout__,
                         flush=True,
                     )
                     sample = self._sample_edit(
@@ -2768,7 +2743,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     msg = f"{type(exc).__name__}: {exc}"
                     print(
                         f"[krea2] swap-all face {face_i + 1}/{len(all_faces)} FAILED — {msg}",
-                        file=sys.__stdout__,
                         flush=True,
                     )
                     face_failures.append({"index": face_i, "error": msg})
@@ -2948,7 +2922,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 f"[krea2] full_frame clamped oversized head "
                                 f"ratio {clamp_info['ratio_before']:.2f}→"
                                 f"{clamp_info['ratio_after']:.2f}",
-                                file=sys.__stdout__,
                                 flush=True,
                             )
                         face_prep_diag["full_frame_clamp"] = clamp_info
@@ -2972,14 +2945,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 f"scale={proc_info.get('scale')} "
                                 f"rot_deg={proc_info.get('rotation_deg')} "
                                 f"t={proc_info.get('translation')}",
-                                file=sys.__stdout__,
                                 flush=True,
                             )
                         elif verbose:
                             print(
                                 "[krea2] full_frame procrustes skipped: "
                                 f"{proc_info.get('procrustes_reason')}",
-                                file=sys.__stdout__,
                                 flush=True,
                             )
                     # Freeze outside selected face (post-sample locality only).
@@ -2997,7 +2968,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             "[krea2] full_frame freeze_outside applied "
                             f"(hard_neighbors="
                             f"{bool(self.cfg.get('full_frame_hard_freeze_neighbors', True))})",
-                            file=sys.__stdout__,
                             flush=True,
                         )
                         if selected_face is not None:
