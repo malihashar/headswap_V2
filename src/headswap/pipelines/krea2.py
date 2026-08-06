@@ -1186,6 +1186,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             out = lab_histogram_match_face(
                 out, body_full, stitch_mask, strength=post_match
             )
+        print(
+            f"[krea2 blend] mode=full_frame method=lab_match+feather "
+            f"feather_px={feather} lab_strength={post_match}",
+            flush=True,
+        )
         return out
 
     @staticmethod
@@ -2954,6 +2959,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 flush=True,
                             )
                     # Freeze outside selected face (post-sample locality only).
+                    _ff_post_match = float(
+                        self.cfg.get("full_frame_post_color_match_strength", 0.45) or 0.0
+                    )
+                    _ff_feather = int(self.cfg.get("full_frame_freeze_feather_px", 12))
                     if freeze_mask is not None and bool(
                         self.cfg.get("full_frame_freeze_outside", True)
                     ):
@@ -2977,6 +2986,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 out,
                                 selected_face,
                             )
+                    else:
+                        # No freeze_mask path: apply whole-frame LAB color-match as minimum
+                        # blending treatment (prevents raw resize landing with zero correction).
+                        if _ff_post_match > 0:
+                            out = lab_histogram_match_face(
+                                out, body_full, None, strength=_ff_post_match
+                            )
+                        print(
+                            f"[krea2 blend] mode=full_frame method=lab_match_only "
+                            f"lab_strength={_ff_post_match} feather_px=N/A (no freeze_mask)",
+                            flush=True,
+                        )
             faces_succeeded = [0] if do_stitch or edit_mode == "full_frame" else []
 
         dbg = {}
