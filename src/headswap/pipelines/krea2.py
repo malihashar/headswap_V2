@@ -1390,9 +1390,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 body_full, selected_face, all_faces
             )
 
-        # Default OFF — crop_stitch never passes ref_boost_mask.
+        # Default ON for full_frame — crop_stitch never passes ref_boost_mask.
         ref_boost_mask = None
-        if bool(self.cfg.get("full_frame_ref_boost_mask", False)):
+        if bool(self.cfg.get("full_frame_ref_boost_mask", True)):
             ref_boost_mask = identity_face_boost_mask(person, self.cache_dir)
 
         # ── Debug: dump both masks as PNGs so polarity can be inspected visually ──
@@ -2554,7 +2554,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     self._log_face_diag(face_prep_diag, label="full_frame")
                     print(
                         f"[krea2] edit_mode=full_frame faces={len(all_faces)} "
+                        f"policy={body_face_policy} index={body_face_index} "
                         f"position={face_prep_diag.get('face_position')} "
+                        f"selected_box="
+                        f"{None if selected_face is None else [selected_face.x0, selected_face.y0, selected_face.x1, selected_face.y1]} "
                         f"person_prep={face_prep_diag.get('person_prep')} "
                         f"freeze={freeze_mask is not None} "
                         f"ref_boost_mask={ref_boost_mask_img is not None} "

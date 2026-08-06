@@ -209,10 +209,8 @@ full_frame_protect_expand: 1.20
 # 0.15 = correct only seam-boundary discontinuity; higher values re-skin the
 # entire generated face back toward the original (kills identity at ≥0.45).
 full_frame_post_color_match_strength: 0.15
-# ref_boost_mask: DISABLED — mask was built in person-image space (512×512 portrait)
-# but _ref_attn_bias expects scene-space coordinates. Re-enable once mask is
-# rebuilt using selected_face.bbox projected onto scene (body_full) resolution.
-full_frame_ref_boost_mask: false
+# ON by default for full-frame mode to close the identity gap while keeping head-scale ~1.0.
+full_frame_ref_boost_mask: true
 # Match successful crop_stitch identity prep: full-bleed resize_contain onto
 # the scene canvas (NOT place_face_at_height_frac stickers). Only intentional
 # difference vs crop_stitch should be scene = full body vs head crop.

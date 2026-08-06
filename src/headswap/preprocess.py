@@ -627,7 +627,8 @@ def select_face_box(
       largest   — biggest face (default)
       rightmost — max center-x (common for 'person on the right')
       leftmost  — min center-x
-      index     — use ``index`` into largest-first list
+      index     — use ``index`` into left-to-right list (matches Colab §3b
+                  TARGET_HEAD / Face N numbering: Face 1 = leftmost)
     """
     faces = detect_faces(rgb, cache_dir, conf_thresh=conf_thresh, allow_prior=False)
     if not faces:
@@ -642,7 +643,9 @@ def select_face_box(
     elif pol == "leftmost":
         ordered = sorted(faces, key=lambda b: (b.x0 + b.x1) / 2.0)
     elif pol == "index":
-        ordered = list(faces)  # already largest-first
+        # Left-to-right so TARGET_HEAD / Face N from §3b matches crop_stitch
+        # and full_frame identically (Face 1 = leftmost, not largest).
+        ordered = sorted(faces, key=lambda b: (b.x0 + b.x1) / 2.0)
     else:
         ordered = list(faces)
 
