@@ -2103,6 +2103,171 @@ class Krea2IdentityEditPipeline(BasePipeline):
         }
         return PipelineResult(image=out, latency_s=total_s, meta=meta, debug_paths=dbg)
 
+    def _detect_full_body(
+        self,
+        body: Image.Image,
+        selected_face: FaceBox | None,
+        all_faces: list[FaceBox],
+    ) -> dict[str, Any]:
+        """Classify whether a full/half body (not just a head/portrait) is visible.
+
+        Primary signal (always available, no extra deps): face bbox height as
+        a fraction of image height, plus how much frame remains below the
+        chin. Portraits/close-ups fill the frame with the face; full-body or
+        half-body shots leave a large fraction of the frame for torso+legs
+        below the face.
+
+        Optional refinement: when ``rembg`` is installed, reuse the existing
+        BiRefNet/rembg person matte (``segmentation._try_birefnet_mask``,
+        ungated by passing ``face_box=None``) to measure the actual person
+        bbox height fraction, which overrides the geometric heuristic when
+        available since it looks at real body pixels instead of a proxy.
+        """
+        import numpy as np
+
+        w, h = body.size
+        if selected_face is None or h <= 0:
+            return {
+                "method": "none",
+                "full_body_detected": False,
+                "reason": "no_face",
+            }
+
+        face_h_frac = selected_face.height / float(h)
+        below_face_frac = max(0.0, h - selected_face.y1) / float(h)
+        face_h_frac_max = float(
+            self.cfg.get("body_route_face_height_frac_max", 0.30)
+        )
+        below_frac_min = float(
+            self.cfg.get("body_route_below_face_frac_min", 0.38)
+        )
+        heuristic_full_body = (
+            face_h_frac <= face_h_frac_max and below_face_frac >= below_frac_min
+        )
+        result: dict[str, Any] = {
+            "method": "face_geometry",
+            "face_height_frac": round(float(face_h_frac), 4),
+            "below_face_frac": round(float(below_face_frac), 4),
+            "face_height_frac_max": face_h_frac_max,
+            "below_face_frac_min": below_frac_min,
+            "full_body_detected": bool(heuristic_full_body),
+        }
+
+        if bool(self.cfg.get("body_route_use_segmentation", True)):
+            try:
+                from headswap.segmentation import _try_birefnet_mask
+
+                mask, skip_reason = _try_birefnet_mask(body, None, blur_px=0)
+            except Exception as exc:  # pragma: no cover - defensive
+                mask, skip_reason = None, f"import_failed:{exc}"
+            if mask is not None:
+                alpha = np.asarray(mask)
+                rows = np.where((alpha > 16).any(axis=1))[0]
+                if rows.size > 0:
+                    person_h_frac = float(rows.max() - rows.min()) / float(h)
+                    person_h_frac_min = float(
+                        self.cfg.get("body_route_person_height_frac_min", 0.55)
+                    )
+                    result.update(
+                        {
+                            "method": "person_segmentation",
+                            "person_height_frac": round(person_h_frac, 4),
+                            "person_height_frac_min": person_h_frac_min,
+                            "full_body_detected": bool(
+                                person_h_frac >= person_h_frac_min
+                            ),
+                        }
+                    )
+            else:
+                result["segmentation_skip_reason"] = skip_reason
+
+        return result
+
+    def _resolve_body_route(self, body: Image.Image) -> dict[str, Any]:
+        """Auto-route to full_frame when a full/half body is detected.
+
+        Full-frame preserves body/head proportions but has historically
+        traded off some face quality vs. crop_stitch. When a full body is
+        detected, we route to full_frame AND apply the same identity-boost
+        overrides the (dark) lighting route uses (full v1.2 LoRA +
+        ref_boost=4.0 + ref_boost_mask) so full_frame keeps as much
+        crop_stitch-level identity/face quality as the existing recipe
+        allows, rather than the plain default full_frame settings.
+
+        When no full body is detected, ``self.cfg`` is left untouched and the
+        existing crop_stitch path runs exactly as before — this route only
+        ever *adds* a path to full_frame, it never forces crop_stitch off.
+        Runs BEFORE model load (same as ``_resolve_lighting_route``) so any
+        LoRA/ref_boost overrides are picked up when the models are built.
+        """
+        enabled = bool(self.cfg.get("enable_body_route", True))
+        print(f"[krea2 body_route] enable_body_route={enabled}", flush=True)
+        meta: dict[str, Any] = {
+            "enable_body_route": enabled,
+            "applied": False,
+            "faces_detected": None,
+            "full_body_detected": False,
+            "route": None,
+            "reason": "disabled" if not enabled else None,
+        }
+        if not enabled:
+            return meta
+
+        div_by = int(self.cfg.get("div_by", 16))
+        probe = resize_max_keep_ar(
+            body.convert("RGB"),
+            int(self.cfg.get("max_body_dim", 1024)),
+            div_by=div_by,
+        )
+        rgb = pil_to_rgb_np(probe)
+        selected, faces = select_face_box(
+            rgb,
+            self.cache_dir,
+            index=int(self.cfg.get("body_face_index", 0) or 0),
+            policy=str(self.cfg.get("body_face_policy", "largest") or "largest"),
+        )
+        n_faces = len(faces)
+        meta["faces_detected"] = n_faces
+        if selected is None:
+            meta["reason"] = "no_face_detected"
+            print("[krea2 body_route] no_face_detected -> route unchanged", flush=True)
+            return meta
+
+        detection = self._detect_full_body(probe, selected, faces)
+        meta.update(detection)
+        print(
+            f"[krea2 body_route] faces_detected={n_faces} "
+            f"method={detection.get('method')} "
+            f"face_height_frac={detection.get('face_height_frac')} "
+            f"below_face_frac={detection.get('below_face_frac')} "
+            f"person_height_frac={detection.get('person_height_frac')} "
+            f"full_body_detected={detection.get('full_body_detected')}",
+            flush=True,
+        )
+        if not detection.get("full_body_detected"):
+            meta["route"] = "crop_stitch_unchanged"
+            meta["reason"] = "no_full_body_detected"
+            return meta
+
+        self.cfg["multi_person_edit_mode"] = "full_frame"
+        if not self.cfg.get("full_frame_identity_lora_name"):
+            self.cfg["full_frame_identity_lora_name"] = (
+                "krea2_identity_edit_v1_2.safetensors"
+            )
+        if self.cfg.get("full_frame_ref_boost") is None:
+            self.cfg["full_frame_ref_boost"] = 4.0
+        if not bool(self.cfg.get("allow_disable_full_frame_ref_boost_mask", False)):
+            self.cfg["full_frame_ref_boost_mask"] = True
+        meta["applied"] = True
+        meta["route"] = "full_frame"
+        meta["reason"] = "full_body_detected"
+        meta["multi_person_edit_mode"] = str(self.cfg.get("multi_person_edit_mode"))
+        print(
+            "[krea2 body_route] resolved_mode=full_frame reason=full_body_detected",
+            flush=True,
+        )
+        return meta
+
     def _resolve_lighting_route(
         self, body: Image.Image
     ) -> dict[str, Any]:
@@ -2317,6 +2482,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         _mode_before = self.cfg.get("multi_person_edit_mode", "crop_stitch")
         _ff_lora_before = self.cfg.get("full_frame_identity_lora_name")
         _ff_rb_before = self.cfg.get("full_frame_ref_boost")
+        _ff_rbm_before = self.cfg.get("full_frame_ref_boost_mask")
 
         try:
             # Optional Magic Hour face-detection audit (geometry still current).
@@ -2325,6 +2491,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # Lighting route must run BEFORE model load so full_frame LoRA/rb
             # overrides are picked up when multi+dark.
             lighting_route_meta = self._resolve_lighting_route(body)
+
+            # Body route runs AFTER lighting so it has the final say: it only
+            # ever upgrades crop_stitch -> full_frame when a full body is
+            # detected, and otherwise leaves whatever the lighting route (or
+            # the default) already decided untouched.
+            body_route_meta = self._resolve_body_route(body)
 
             rt = self._ensure_runtime(timings)
             from headswap.comfy.krea2_edit_fast import (
@@ -2352,12 +2524,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 max_dim=max_dim,
                 mask_crop_stitch=mask_crop_stitch,
                 lighting_route_meta=lighting_route_meta,
+                body_route_meta=body_route_meta,
                 magic_hour_meta=magic_hour_meta,
             )
         finally:
             self.cfg["multi_person_edit_mode"] = _mode_before
             self.cfg["full_frame_identity_lora_name"] = _ff_lora_before
             self.cfg["full_frame_ref_boost"] = _ff_rb_before
+            self.cfg["full_frame_ref_boost_mask"] = _ff_rbm_before
 
     def _run_after_models(
         self,
@@ -2374,6 +2548,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         max_dim: int,
         mask_crop_stitch: bool,
         lighting_route_meta: dict[str, Any],
+        body_route_meta: dict[str, Any],
         magic_hour_meta: dict[str, Any] | None,
     ) -> PipelineResult:
         import sys
@@ -2443,7 +2618,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 ).strip().lower()
                 print(
                     f"[krea2 path_selection] final_resolved_mode={multi_edit_mode} "
-                    f"faces_detected={len(all_faces)} swap_all={swap_all}",
+                    f"faces_detected={len(all_faces)} swap_all={swap_all} "
+                    f"full_body_detected={body_route_meta.get('full_body_detected')} "
+                    f"body_route_applied={body_route_meta.get('applied')}",
                     flush=True,
                 )
                 multi_swap_mode = str(
@@ -2502,14 +2679,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     edit_mode = "crop_stitch"
                     do_stitch = True
                 elif (
-                    len(all_faces) > 1
-                    and multi_edit_mode in ("full_frame", "fullframe", "full")
+                    multi_edit_mode in ("full_frame", "fullframe", "full")
                     and not swap_all
+                    and (
+                        len(all_faces) > 1
+                        or bool(body_route_meta.get("full_body_detected"))
+                    )
                 ):
                     # Full-frame Krea2 (no head crop). Author guidance is a full
                     # scene around ~1–1.5MP — do NOT reuse crop_stitch's 1024 body
                     # cap, which starves body/shoulder proportion cues.
-                    multi_person = True
+                    # Reachable either via >1 detected faces (legacy multi-person
+                    # A/B) or via single-person full-body auto-routing
+                    # (_resolve_body_route): a full/half body needs the full
+                    # scene for correct proportions even with only one face.
+                    multi_person = len(all_faces) > 1
                     use_tight = False
                     body_ff = resize_to_megapixels(
                         body.convert("RGB"),
@@ -2579,7 +2763,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         f"person={list(person.size)}",
                         flush=True,
                     )
-                    timings["_multi_person"] = 1.0
+                    timings["_multi_person"] = 1.0 if multi_person else 0.0
                     timings["_tight_crop"] = 0.0
                     timings["_body_face_count"] = float(len(all_faces))
                     timings["_edit_mode_full_frame"] = 1.0
@@ -2589,6 +2773,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     timings["_full_frame_scene_mp"] = float(
                         face_prep_diag.get("scene_megapixels") or 0.0
                     )
+                    timings["_full_frame_via_body_route"] = (
+                        1.0 if body_route_meta.get("applied") else 0.0
+                    )
+                    face_prep_diag["routed_via"] = (
+                        "body_route" if body_route_meta.get("applied") else "multi_face"
+                    )
+                    face_prep_diag["single_person_full_body"] = not multi_person
                 else:
                     # Default / single-face / multi crop_stitch path.
                     if swap_all and len(all_faces) <= 1:
@@ -3147,6 +3338,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "faces_succeeded": list(faces_succeeded),
             "face_failures": list(face_failures),
             "lighting_route": lighting_route_meta,
+            "body_route": body_route_meta,
             "face_detection_backend": str(
                 self.cfg.get("face_detection_backend", "current") or "current"
             ),

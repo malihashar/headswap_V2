@@ -153,6 +153,29 @@ enable_lighting_route: true
 # Mean OpenCV HSV Value [0,255] over the target face (fallback: full frame).
 # Below threshold => dark. Tune on real night/day multi-person photos.
 dark_lighting_threshold: 110.0
+# --- Body-detection routing (auto full_frame for full/half-body photos) ---
+# When true: after face detection (single- or multi-person), classify
+# portrait/close-up vs full/half-body framing. If a full body is detected,
+# route this image to full_frame (correct body/head proportions) with the
+# same identity-boost overrides the dark lighting route uses, so full_frame
+# keeps as much crop_stitch-level face quality as the existing recipe allows.
+# If no full body is detected, config is left untouched and crop_stitch runs
+# exactly as before. Only ever adds a path to full_frame — never forces
+# crop_stitch off, and never overrides an explicit crop_stitch-only request
+# unless a full body is actually detected in that image.
+enable_body_route: true
+# Fallback geometric heuristic (always available, no extra deps): face bbox
+# height as a fraction of image height must be <= this to be "small enough"
+# to suggest a body shot, AND the frame remaining below the chin must be
+# >= body_route_below_face_frac_min.
+body_route_face_height_frac_max: 0.30
+body_route_below_face_frac_min: 0.38
+# When true (and rembg is installed): refine the heuristic above using an
+# actual whole-person alpha matte (reuses segmentation.py's BiRefNet/rembg
+# path, ungated). Person bbox height / image height >= this => full body.
+# Falls back to the geometric heuristic above when rembg is unavailable.
+body_route_use_segmentation: true
+body_route_person_height_frac_min: 0.55
 # --- Full-frame A/B knobs (IGNORED while multi_person_edit_mode=crop_stitch) ---
 # Author Identity Edit guidance: pass the FULL scene (~1–1.5MP), not a head crop.
 # Production stays crop_stitch; lighting route or manual flip uses full_frame.
