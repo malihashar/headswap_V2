@@ -2560,12 +2560,23 @@ def relock_pose_to_destination(
     ellipse_scale_y: float = 2.55,
     feather_px: int = 21,
     stitch_feather_px: int = 8,
+    min_scale: float = 0.75,
+    max_scale: float = 1.35,
+    max_rotation_deg: float = 20.0,
+    max_translate_frac: float = 0.20,
 ) -> tuple[Image.Image, dict]:
     """
     Force ``generated`` face orientation onto ``destination`` landmarks.
 
     After generative refine, head yaw / eye gaze often drift toward a frontal
     identity. Re-aligning locks looking direction to the original photo.
+
+    ``min_scale``/``max_scale``/``max_rotation_deg``/``max_translate_frac``
+    bound the recovered similarity/affine transform in the ``face_mask``
+    branch: a bad landmark match can send the estimator to an implausible
+    transform, and warping+compositing that produces a large, misplaced
+    duplicate of image content instead of a subtle pose correction. Anything
+    outside these bounds is rejected and ``generated`` is returned unchanged.
     """
     info: dict = {"pose_relock": False, "pose_relock_reason": None}
     gen = generated.convert("RGB")
@@ -2608,6 +2619,35 @@ def relock_pose_to_destination(
                 )
             if matrix is not None:
                 h, w = dest_rgb.shape[:2]
+                # Sanity-bound the recovered transform before ever warping pixels.
+                # A bad landmark match (stylized lighting, wrong face, low-conf
+                # detection) can send estimateAffine[Partial]2D to a wild
+                # scale/rotation/translation; warping+compositing that produces a
+                # large, misplaced duplicate of image content (a "ghost" head)
+                # rather than a subtle pose correction. Reject anything outside a
+                # plausible single-photo pose-correction range and keep the
+                # unwarped generated image instead.
+                a, b = float(matrix[0, 0]), float(matrix[0, 1])
+                scale = float(math.hypot(a, b))
+                rot = float(math.degrees(math.atan2(b, a))) if scale > 1e-8 else 0.0
+                tx, ty = float(matrix[0, 2]), float(matrix[1, 2])
+                diag = max(1.0, float(math.hypot(w, h)))
+                translate_frac = float(math.hypot(tx, ty)) / diag
+                info["scale"] = round(scale, 4)
+                info["rotation_deg"] = round(rot, 3)
+                info["translation"] = [round(tx, 2), round(ty, 2)]
+                out_of_bounds = (
+                    scale < min_scale
+                    or scale > max_scale
+                    or abs(rot) > max_rotation_deg
+                    or translate_frac > max_translate_frac
+                )
+                if out_of_bounds:
+                    info["pose_relock_reason"] = (
+                        f"transform_out_of_bounds(scale={scale:.3f} "
+                        f"rot_deg={rot:.1f} translate_frac={translate_frac:.3f})"
+                    )
+                    return gen, info
                 warped = cv2.warpAffine(
                     gen_rgb,
                     matrix,

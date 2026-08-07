@@ -59,7 +59,7 @@ def test_relock_calls_relock_pose_to_destination_with_safe_defaults(monkeypatch)
     calls = []
     sentinel = Image.new("RGB", (200, 200), (99, 99, 99))
 
-    def _fake_relock(generated, destination, cache_dir, *, face_mask, use_full_affine, core_min_alpha, feather_px, stitch_feather_px):
+    def _fake_relock(generated, destination, cache_dir, *, face_mask, use_full_affine, core_min_alpha, feather_px, stitch_feather_px, **_bounds):
         calls.append(
             {
                 "generated_size": generated.size,

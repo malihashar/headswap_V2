@@ -372,7 +372,15 @@ negative_prompt: ""
 # + uniform scale + translation only, no shear/stretch) onto the ORIGINAL
 # photo's landmarks, then blended back through a tight face-only mask so
 # hair/body/quality are untouched -- only eye/head orientation is corrected.
-head_direction_relock: true
+# OFF by default: on a real (non-mock) run this produced a severely broken
+# result (a large misplaced duplicate of hair/head content) once, almost
+# certainly a bad landmark match sending the affine estimate to an
+# implausible transform. relock_pose_to_destination now rejects any
+# transform outside min_scale/max_scale/max_rotation_deg/max_translate_frac
+# instead of applying it, but this hasn't yet been re-validated on GPU with
+# that safeguard in place -- re-enable only after confirming it on real
+# photos.
+head_direction_relock: false
 # Partial affine (similarity: rotation+scale+translation) is the safe default
 # -- no shear/stretch, so it can't distort the face. Full affine allows shear
 # too, which can better match some poses but risks visible warping.
@@ -385,6 +393,12 @@ head_direction_relock_blur_px: 8
 head_direction_relock_top_extend: 0.12
 head_direction_relock_side_extend: 0.12
 head_direction_relock_bot_extend: 0.05
+# Reject the recovered transform (keep the unwarped generated face) outside
+# these bounds -- guards against a bad landmark match producing a wild warp.
+head_direction_relock_min_scale: 0.75
+head_direction_relock_max_scale: 1.35
+head_direction_relock_max_rotation_deg: 20.0
+head_direction_relock_max_translate_frac: 0.20
 
 # Tight face ref — include enough donor hair above face; stop at jawline/chin to exclude clothing.
 face_side_pad: 0.22

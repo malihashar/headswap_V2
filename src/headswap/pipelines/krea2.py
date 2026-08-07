@@ -1388,6 +1388,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
             core_min_alpha=float(self.cfg.get("head_direction_relock_core_min_alpha", 0.90)),
             feather_px=int(self.cfg.get("head_direction_relock_feather_px", 21)),
             stitch_feather_px=int(self.cfg.get("head_direction_relock_stitch_feather_px", 10)),
+            min_scale=float(self.cfg.get("head_direction_relock_min_scale", 0.75)),
+            max_scale=float(self.cfg.get("head_direction_relock_max_scale", 1.35)),
+            max_rotation_deg=float(
+                self.cfg.get("head_direction_relock_max_rotation_deg", 20.0)
+            ),
+            max_translate_frac=float(
+                self.cfg.get("head_direction_relock_max_translate_frac", 0.20)
+            ),
         )
         info.update(pose_meta)
         print(
