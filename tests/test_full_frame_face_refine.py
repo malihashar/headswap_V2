@@ -76,6 +76,7 @@ def test_refine_disabled_is_a_no_op(monkeypatch):
     refined, diag = pipe._refine_full_frame_face(
         out,
         out,
+        body_full=out,
         rt=None,
         bundle={"model": None},
         edit_cache_info={},
@@ -98,6 +99,7 @@ def test_refine_no_face_on_output_falls_back(monkeypatch):
     refined, diag = pipe._refine_full_frame_face(
         out,
         out,
+        body_full=out,
         rt=None,
         bundle={"model": None},
         edit_cache_info={},
@@ -127,6 +129,7 @@ def test_refine_applies_and_reports_resolution_gain(monkeypatch):
     refined, diag = pipe._refine_full_frame_face(
         out,
         face_crop,
+        body_full=out,
         rt=None,
         bundle={"model": None},
         edit_cache_info={},
@@ -174,6 +177,7 @@ def test_refine_reload_lora_calls_load_models(monkeypatch):
     refined, diag = pipe._refine_full_frame_face(
         out,
         out,
+        body_full=out,
         rt=None,
         bundle={"model": "full_frame_bundle"},
         edit_cache_info={},

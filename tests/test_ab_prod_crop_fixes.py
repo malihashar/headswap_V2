@@ -31,7 +31,12 @@ def test_yaml_defaults_stay_production_safe():
     cfg = yaml.safe_load(CFG_PATH.read_text())
     assert cfg["multi_person_edit_mode"] == "crop_stitch"
     assert cfg.get("crop_margin_mode", "tight") == "tight"
-    assert cfg.get("enable_procrustes_correction") is False
+    # Promoted to production default: corrects head-yaw/eye-gaze drift via a
+    # content-local (crop-space) landmark alignment with inlier/residual
+    # sanity gates -- see the comment above enable_procrustes_correction in
+    # the yaml for why this can't reproduce the whole-image-warp failure
+    # head_direction_relock hit.
+    assert cfg.get("enable_procrustes_correction") is True
 
 
 def test_arms_are_prod_procrustes_wide_only():

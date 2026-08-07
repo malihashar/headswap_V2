@@ -1199,6 +1199,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         out: Image.Image,
         face_crop: Image.Image,
         *,
+        body_full: Image.Image,
         rt: NodeRuntime,
         bundle: dict,
         edit_cache_info: dict,
@@ -1223,6 +1224,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
         the same feathered composite + LAB match crop_stitch already uses --
         so only pixels inside the head+hair mask can change; body/limb
         geometry from the full_frame pass is untouched by construction.
+
+        When ``full_frame_face_refine_procrustes`` is on (default), the
+        freshly re-sampled head crop is also landmark-aligned onto the
+        ORIGINAL, pristine ``body_full`` (not ``out``, which may itself carry
+        gaze/pose drift from the first full_frame pass) via
+        ``procrustes_align_edited_crop_to_body_box`` -- the same
+        content-local-space, inlier/residual-checked correction crop_stitch
+        already uses via ``enable_procrustes_correction``, applied here to
+        the small head crop *before* it is stitched in. Unlike a whole-image
+        pose warp, this can only ever move pixels that started out inside the
+        tight head crop, so it cannot drag in distant content (hair, body,
+        background) the way warping the whole composited frame can.
         """
         diag: dict[str, Any] = {"applied": False}
         if not bool(self.cfg.get("full_frame_face_refine", True)):
@@ -1308,9 +1321,50 @@ class Krea2IdentityEditPipeline(BasePipeline):
         finally:
             self.cfg["multi_person_edit_mode"] = _mode_before2
 
+        edited_for_stitch = refine_sample["edited"]
+        procrustes_applied = False
+        if bool(self.cfg.get("full_frame_face_refine_procrustes", True)):
+            aligned, proc_info = procrustes_align_edited_crop_to_body_box(
+                edited_for_stitch,
+                body_full,
+                built["box"],
+                self.cache_dir,
+                crop_content_box=built["crop_content_box"],
+                prefer_body_box=selected,
+                min_inliers=int(self.cfg.get("procrustes_min_inliers", 3)),
+                min_scale=float(self.cfg.get("procrustes_min_scale", 0.40)),
+                max_scale=float(self.cfg.get("procrustes_max_scale", 2.50)),
+                max_rotation_deg=float(
+                    self.cfg.get("procrustes_max_rotation_deg", 12.0)
+                ),
+                max_translate_frac=float(
+                    self.cfg.get("procrustes_max_translate_frac", 0.25)
+                ),
+                max_residual_frac=float(
+                    self.cfg.get("procrustes_max_residual_frac", 0.06)
+                ),
+            )
+            diag["head_direction_procrustes"] = proc_info
+            if proc_info.get("procrustes"):
+                edited_for_stitch = aligned
+                procrustes_applied = True
+                print(
+                    "[krea2 full_frame_refine] head_direction_procrustes "
+                    f"scale={proc_info.get('scale')} "
+                    f"rot_deg={proc_info.get('rotation_deg')} "
+                    f"inliers={proc_info.get('inliers')}",
+                    flush=True,
+                )
+            else:
+                print(
+                    "[krea2 full_frame_refine] head_direction_procrustes skipped "
+                    f"reason={proc_info.get('procrustes_reason')}",
+                    flush=True,
+                )
+
         refined = self._stitch_edited(
             out,
-            refine_sample["edited"],
+            edited_for_stitch,
             built["mask"],
             built["box"],
             built["crop_content_box"],
@@ -1318,7 +1372,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             multi_person=False,
             original_scene=refine_scene,
             debug_stages=stitch_debug,
-            skip_head_clamp=False,
+            skip_head_clamp=procrustes_applied,
         )
         diag.update(
             {
@@ -3459,6 +3513,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 out, full_frame_refine_diag = self._refine_full_frame_face(
                     out,
                     face_crop,
+                    body_full=body_full,
                     rt=rt,
                     bundle=bundle,
                     edit_cache_info=edit_cache_info,

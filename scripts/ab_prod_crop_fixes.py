@@ -112,8 +112,9 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
         "",
         f"_Generated {payload.get('generated_at', '')}_",
         "",
-        "Production yaml defaults remain `crop_stitch` / `crop_margin_mode: tight` /",
-        "`enable_procrustes_correction: false`. This harness only overrides per-arm.",
+        "Production yaml defaults are `crop_stitch` / `crop_margin_mode: tight` /",
+        "`enable_procrustes_correction: true` (promoted as the head-direction fix).",
+        "The `prod` arm below still overrides it to false for comparison.",
         "",
         "## Arms",
         "",
@@ -249,11 +250,10 @@ def main() -> int:
             "Refusing to run: yaml multi_person_edit_mode must stay crop_stitch "
             f"(got {base_cfg.get('multi_person_edit_mode')})"
         )
-    if bool(base_cfg.get("enable_procrustes_correction", False)):
-        raise SystemExit(
-            "Refusing to run: yaml enable_procrustes_correction must stay false "
-            "(arm overrides only)"
-        )
+    # enable_procrustes_correction was promoted to the production default
+    # (head-yaw/eye-gaze drift fix) -- each arm below still sets it
+    # explicitly regardless of the yaml value, so this harness still
+    # isolates the variable; only the old "must stay false" guard is gone.
     if str(base_cfg.get("crop_margin_mode") or "tight") != "tight":
         raise SystemExit(
             "Refusing to run: yaml crop_margin_mode must stay tight "
@@ -466,8 +466,9 @@ def main() -> int:
             )
         },
         "note": (
-            "Do not flip enable_procrustes_correction / crop_margin_mode in yaml "
-            "until this REPORT has real GPU aggregates."
+            "enable_procrustes_correction is now the production default. "
+            "Do not flip crop_margin_mode in yaml until this REPORT has real "
+            "GPU aggregates."
         ),
     }
     (out / "REPORT.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
