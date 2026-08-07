@@ -1346,7 +1346,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
             diag["head_direction_procrustes"] = proc_info
             if proc_info.get("procrustes"):
-                edited_for_stitch = aligned
+                edited_for_stitch, blend_info = self._blend_procrustes_face_only(
+                    refine_sample["edited"], aligned
+                )
+                diag["procrustes_face_only_blend"] = blend_info
                 procrustes_applied = True
                 print(
                     "[krea2 full_frame_refine] head_direction_procrustes "
@@ -2045,13 +2048,54 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 f"content_box={info.get('content_box')}",
                 flush=True,
             )
-            return aligned, True
+            blended, blend_info = self._blend_procrustes_face_only(edited, aligned)
+            face_prep_diag["procrustes_face_only_blend"] = blend_info
+            return blended, True
         print(
             "[krea2] procrustes_correction skipped: "
             f"{info.get('procrustes_reason')}",
             flush=True,
         )
         return edited, False
+
+    def _blend_procrustes_face_only(
+        self, edited: Image.Image, aligned: Image.Image
+    ) -> tuple[Image.Image, dict[str, Any]]:
+        """Only keep the procrustes-warped pixels inside a tight face ellipse.
+
+        ``procrustes_align_edited_crop_to_body_box`` warps the ENTIRE
+        rectangular head+hair crop -- face, hair, AND whatever background/sky
+        is baked into the crop's top/side padding (that padding assumes hair
+        fills it; for short-haired subjects it's mostly open sky). The stitch
+        mask that shows this crop into the final image is that same generous
+        head+hair mask, so any warp distortion in the sky/background portion
+        (cv2.warpAffine reflects source pixels at the border, which streaks
+        badly across a smooth gradient sky) becomes visible in the output.
+        Blending the warped and unwarped crops through a tight face-only
+        mask means only eyes/nose/mouth geometry is corrected; hair and any
+        background stay exactly as the (unwarped) generation produced them.
+        """
+        info: dict[str, Any] = {"face_only_blend": False}
+        rgb = pil_to_rgb_np(edited)
+        face, _ = select_face_box(rgb, self.cache_dir, index=0, policy="largest")
+        if face is None:
+            info["face_only_blend_reason"] = "no_face_on_edited_crop"
+            return aligned, info
+        face_mask, _ = build_head_hair_mask(
+            edited,
+            self.cache_dir,
+            backend="ellipse",
+            face_box=face,
+            expand_px=int(self.cfg.get("procrustes_face_mask_expand_px", 6)),
+            blur_px=int(self.cfg.get("procrustes_face_mask_blur_px", 10)),
+            top_extend=float(self.cfg.get("procrustes_face_mask_top_extend", 0.15)),
+            side_extend=float(self.cfg.get("procrustes_face_mask_side_extend", 0.15)),
+            bot_extend=float(self.cfg.get("procrustes_face_mask_bot_extend", 0.08)),
+        )
+        w, h = edited.size
+        blended = feathered_soft_composite(edited, aligned, face_mask, (0, 0, w, h))
+        info["face_only_blend"] = True
+        return blended, info
 
     def _stitch_edited(
         self,
