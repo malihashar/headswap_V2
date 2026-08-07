@@ -1832,6 +1832,27 @@ def fit_face_on_square(
     return out
 
 
+def clean_alpha_tails(mask: Image.Image, *, floor: int = 10, ceil: int = 245) -> Image.Image:
+    """Snap a blurred alpha mask's faint tails to 0/255, keep the mid-transition soft.
+
+    The head+hair mask is Gaussian-blurred at least twice before it reaches a
+    composite (once building the mask, once again as stitch feathering). Two
+    stacked blurs produce a long, very-low-alpha tail well outside the
+    intended silhouette. At composite time that tail is a translucent ghost
+    of the generated crop layered over the original (visible as a soft halo
+    around the head/shoulders, especially where the two layers aren't
+    pixel-aligned) rather than a clean fade to fully-original pixels.
+    Rescaling so alpha < ``floor`` snaps to 0 and > ``ceil`` snaps to 255
+    removes that faint tail while leaving the actual transition band (which
+    is what keeps the seam from looking hard-edged) untouched.
+    """
+    floor = max(0, min(254, int(floor)))
+    ceil = max(floor + 1, min(255, int(ceil)))
+    arr = np.asarray(mask.convert("L")).astype(np.float32)
+    arr = (arr - floor) * (255.0 / float(ceil - floor))
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
 def feathered_soft_composite(
     base: Image.Image,
     edit: Image.Image,
@@ -1839,15 +1860,19 @@ def feathered_soft_composite(
     box: tuple[int, int, int, int],
     *,
     extra_blur_px: int = 8,
+    alpha_floor: int = 10,
+    alpha_ceil: int = 245,
 ) -> Image.Image:
     """Soft stitch with an extra blur on the alpha for less obvious jaw seams."""
+    m = mask.convert("L")
     if extra_blur_px > 0:
-        m = mask.convert("L")
         k = max(3, int(extra_blur_px) * 2 + 1)
         arr = np.asarray(m)
         arr = cv2.GaussianBlur(arr, (k, k), 0)
-        mask = Image.fromarray(arr)
-    return soft_composite(base, edit, mask, box)
+        m = Image.fromarray(arr)
+    if alpha_floor > 0 or alpha_ceil < 255:
+        m = clean_alpha_tails(m, floor=alpha_floor, ceil=alpha_ceil)
+    return soft_composite(base, edit, m, box)
 
 def describe_hair_length_hint(body: Image.Image, face: Image.Image, cache_dir) -> str:
     """Heuristic prompt add-on when body hair is longer than face crop."""
