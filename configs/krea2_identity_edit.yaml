@@ -248,6 +248,29 @@ full_frame_clamp_head_scale: false
 # sample, before freeze. OFF by default — enable for A/B when head_to_body
 # scale ratio is still meaningfully off 1.0 after promoting full_frame.
 full_frame_procrustes_align: false
+# Grounding (VLM) encode resolution for full_frame only. full_frame's scene is
+# the whole photo, not a head crop, so the shared default grounding_px=768
+# squeezes a much smaller face into the VLM's conditioning than crop_stitch's
+# tight crop does — this is a primary driver of full_frame's face-quality gap.
+# Raising it gives the grounding encode more absolute face pixels to work
+# from. crop_stitch is unaffected (only applied when multi_person_edit_mode
+# resolves to full_frame).
+full_frame_grounding_px: 1024
+# Second-pass face refine on top of full_frame: re-detects the (already
+# proportion-correct) head in the full_frame output, crops+masks it exactly
+# like the normal single-person crop_stitch path, re-samples just that
+# region at native crop_stitch resolution/grounding, and stitches it back
+# with the same feathered composite + LAB match crop_stitch uses. Only
+# pixels inside the head+hair mask can change — body/limb geometry from the
+# full_frame pass is untouched by construction. This is the main lever for
+# closing the full_frame vs crop_stitch face-quality gap while keeping
+# full_frame's body proportions.
+full_frame_face_refine: true
+# When true, reload the model bundle with the crop_stitch identity LoRA
+# (identity_lora_name, e.g. the r64 variant) for the refine pass instead of
+# reusing the full_frame LoRA already loaded for pass 1. More faithful to
+# "true" crop_stitch quality, but costs a fresh UNETLoader (extra VRAM/time).
+full_frame_face_refine_reload_lora: false
 
 # Multi-person body photos: pick which face to swap, then tighten the crop so
 # neighbors are not in the edit canvas (fixes giant-head / wrong-person fails).

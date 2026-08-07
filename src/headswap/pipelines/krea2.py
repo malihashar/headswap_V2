@@ -1193,6 +1193,155 @@ class Krea2IdentityEditPipeline(BasePipeline):
         )
         return out
 
+    def _refine_full_frame_face(
+        self,
+        out: Image.Image,
+        face_crop: Image.Image,
+        *,
+        rt: NodeRuntime,
+        bundle: dict,
+        edit_cache_info: dict,
+        div_by: int,
+        timings: dict[str, float],
+        base_seed: int | None,
+        prompt: str,
+        out_dir: Path | None,
+        stitch_debug: dict[str, Image.Image],
+    ) -> tuple[Image.Image, dict[str, Any]]:
+        """Crop_stitch-quality face refine pass on top of a full_frame result.
+
+        full_frame gives correct body/head proportions but spends the same
+        pixel + VLM-grounding budget on the whole scene, so the face itself
+        is rendered (and grounded) at a fraction of crop_stitch's effective
+        resolution -- e.g. a full-body photo with face_height_frac=0.12 in a
+        ~1.25MP scene renders the face at roughly 1/3 the pixel height a
+        768px head crop gets. This second pass re-detects the (already
+        proportion-correct) head in ``out``, crops+masks it exactly like the
+        normal single-person crop_stitch path, re-samples just that region at
+        native crop_stitch resolution/grounding, and stitches it back with
+        the same feathered composite + LAB match crop_stitch already uses --
+        so only pixels inside the head+hair mask can change; body/limb
+        geometry from the full_frame pass is untouched by construction.
+        """
+        diag: dict[str, Any] = {"applied": False}
+        if not bool(self.cfg.get("full_frame_face_refine", True)):
+            diag["reason"] = "disabled"
+            return out, diag
+
+        rgb = pil_to_rgb_np(out)
+        selected, faces = select_face_box(
+            rgb,
+            self.cache_dir,
+            index=int(self.cfg.get("body_face_index", 0) or 0),
+            policy=str(self.cfg.get("body_face_policy", "largest") or "largest"),
+        )
+        if selected is None:
+            diag["reason"] = "no_face_on_full_frame_output"
+            return out, diag
+
+        flags = self._tight_crop_flags(out, selected, faces)
+        built = self._build_scene_person(
+            out,
+            face_crop,
+            selected,
+            div_by=div_by,
+            use_tight=False,
+            top_ext=float(flags["top_ext"]),
+            side_ext=float(flags["side_ext"]),
+            bot_ext=float(flags["bot_ext"]),
+            expand_px=int(flags["expand_px"]),
+            crop_pad=int(flags["crop_pad"]),
+            all_faces=faces,
+            isolate_selected=False,
+        )
+        refine_scene = built["scene"]
+        refine_face_h = float(selected.height)
+        crop_box = built["box"]
+        crop_h = max(1, crop_box[3] - crop_box[1]) if crop_box else 1
+        refine_scale = refine_scene.size[1] / float(crop_h)
+        diag.update(
+            {
+                "full_frame_face_height_px": round(refine_face_h, 1),
+                "refine_crop_scene_size": list(refine_scene.size),
+                "refine_face_height_px_effective": round(
+                    refine_face_h * refine_scale, 1
+                ),
+                "resolution_gain_x": round(max(refine_scale, 1e-6), 3),
+            }
+        )
+
+        # This pass intentionally reuses the already-loaded bundle (same
+        # checkpoint/LoRA as the full_frame first pass): reloading a
+        # different LoRA mid-run means a fresh UNETLoader, which is a real
+        # VRAM/latency cost. Opt in via full_frame_face_refine_reload_lora
+        # to reload with the crop_stitch identity LoRA for max fidelity.
+        refine_bundle = bundle
+        if bool(self.cfg.get("full_frame_face_refine_reload_lora", False)):
+            _mode_before = self.cfg.get("multi_person_edit_mode")
+            try:
+                self.cfg["multi_person_edit_mode"] = "crop_stitch"
+                refine_bundle = self._load_models(rt, timings)
+            except Exception as exc:
+                diag["reload_lora_failed"] = f"{type(exc).__name__}: {exc}"
+                refine_bundle = bundle
+            finally:
+                self.cfg["multi_person_edit_mode"] = _mode_before
+
+        _mode_before2 = self.cfg.get("multi_person_edit_mode")
+        try:
+            self.cfg["multi_person_edit_mode"] = "crop_stitch"
+            refine_sample = self._sample_edit(
+                rt,
+                refine_bundle,
+                refine_scene,
+                built["person"],
+                timings,
+                prompt=prompt,
+                edit_cache_info=edit_cache_info,
+                seed=base_seed,
+                ref_boost_mask=None,
+            )
+        except Exception as exc:
+            diag["reason"] = f"refine_sample_failed:{type(exc).__name__}: {exc}"
+            return out, diag
+        finally:
+            self.cfg["multi_person_edit_mode"] = _mode_before2
+
+        refined = self._stitch_edited(
+            out,
+            refine_sample["edited"],
+            built["mask"],
+            built["box"],
+            built["crop_content_box"],
+            color_ref=out,
+            multi_person=False,
+            original_scene=refine_scene,
+            debug_stages=stitch_debug,
+            skip_head_clamp=False,
+        )
+        diag.update(
+            {
+                "applied": True,
+                "lora_reloaded": refine_bundle is not bundle,
+                "steps": refine_sample.get("steps"),
+                "grounding_px": refine_sample.get("grounding_px"),
+            }
+        )
+        print(
+            f"[krea2 full_frame_refine] applied=True "
+            f"full_frame_face_h={diag['full_frame_face_height_px']}px "
+            f"refine_effective_face_h={diag['refine_face_height_px_effective']}px "
+            f"gain={diag['resolution_gain_x']}x "
+            f"lora_reloaded={diag['lora_reloaded']}",
+            flush=True,
+        )
+        if out_dir is not None:
+            self._save_debug(out_dir, "debug_full_frame_refine_crop.png", refine_scene)
+            self._save_debug(
+                out_dir, "debug_full_frame_refine_edited.png", refine_sample["edited"]
+            )
+        return refined, diag
+
     @staticmethod
     def _node_accepts_kwarg(rt: NodeRuntime, node_name: str, key: str) -> bool:
         cls = rt.mappings.get(node_name)
@@ -1498,6 +1647,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
         _ff_rb = self.cfg.get("full_frame_ref_boost")
         if _ff_rb is not None and _ff_mode in ("full_frame", "fullframe", "full"):
             ref_boost = float(_ff_rb)
+        # Full-frame's scene is the whole photo, not a head crop, so the same
+        # grounding_px squeezes a much smaller face into the VLM's grounding
+        # encode than crop_stitch's tight crop does. Let full_frame use a
+        # higher grounding_px by default to partially compensate.
+        _ff_grounding_px = self.cfg.get("full_frame_grounding_px")
+        if _ff_grounding_px is not None and _ff_mode in ("full_frame", "fullframe", "full"):
+            grounding_px = int(_ff_grounding_px)
         fit_mode = str(self.cfg.get("fit_mode", "fit") or "fit")
         steps = int(self.cfg.get("steps", 8))
         cfg = float(self.cfg.get("cfg", 1.0))
@@ -3235,6 +3391,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             f"lab_strength={_ff_post_match} feather_px=N/A (no freeze_mask)",
                             flush=True,
                         )
+            if edit_mode == "full_frame" and body_full is not None:
+                out, full_frame_refine_diag = self._refine_full_frame_face(
+                    out,
+                    face_crop,
+                    rt=rt,
+                    bundle=bundle,
+                    edit_cache_info=edit_cache_info,
+                    div_by=div_by,
+                    timings=timings,
+                    base_seed=base_seed,
+                    prompt=prompt,
+                    out_dir=out_dir,
+                    stitch_debug=stitch_debug,
+                )
+                face_prep_diag["full_frame_face_refine"] = full_frame_refine_diag
             faces_succeeded = [0] if do_stitch or edit_mode == "full_frame" else []
 
         dbg = {}
@@ -3339,6 +3510,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "face_failures": list(face_failures),
             "lighting_route": lighting_route_meta,
             "body_route": body_route_meta,
+            "full_frame_face_refine": face_prep_diag.get("full_frame_face_refine"),
             "face_detection_backend": str(
                 self.cfg.get("face_detection_backend", "current") or "current"
             ),
