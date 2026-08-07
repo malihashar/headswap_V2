@@ -55,6 +55,7 @@ from headswap.preprocess import (
     place_face_at_height_frac,
     procrustes_align_edited_crop_to_body_box,
     procrustes_align_generated_to_body,
+    relock_pose_to_destination,
     resize_contain,
     resize_long_side,
     resize_max_keep_ar,
@@ -1341,6 +1342,61 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 out_dir, "debug_full_frame_refine_edited.png", refine_sample["edited"]
             )
         return refined, diag
+
+    def _relock_head_direction(
+        self,
+        out: Image.Image,
+        destination: Image.Image,
+        selected_face: FaceBox | None,
+    ) -> tuple[Image.Image, dict[str, Any]]:
+        """Re-align the generated face's landmarks onto the original photo's.
+
+        Prompt text alone ("keep head rotation / eye gaze from the first
+        image") doesn't reliably stop generative identity edits from
+        drifting the head yaw/eye-gaze toward the donor face or a frontal
+        default. This applies a similarity transform (rotation + uniform
+        scale + translation only -- no shear/stretch, to avoid distorting
+        the already-good face quality) mapping the generated face's 5
+        landmarks onto the original photo's, then blends the warped result
+        back in through a tight face-only mask (hair/body untouched).
+        """
+        info: dict[str, Any] = {"pose_relock": False, "pose_relock_reason": None}
+        if not bool(self.cfg.get("head_direction_relock", True)):
+            info["pose_relock_reason"] = "disabled"
+            return out, info
+        if selected_face is None:
+            info["pose_relock_reason"] = "no_selected_face"
+            return out, info
+
+        face_mask, _mask_info = build_head_hair_mask(
+            out,
+            self.cache_dir,
+            backend="ellipse",
+            face_box=selected_face,
+            expand_px=int(self.cfg.get("head_direction_relock_expand_px", 6)),
+            blur_px=int(self.cfg.get("head_direction_relock_blur_px", 8)),
+            top_extend=float(self.cfg.get("head_direction_relock_top_extend", 0.12)),
+            side_extend=float(self.cfg.get("head_direction_relock_side_extend", 0.12)),
+            bot_extend=float(self.cfg.get("head_direction_relock_bot_extend", 0.05)),
+        )
+        relocked, pose_meta = relock_pose_to_destination(
+            out,
+            destination,
+            self.cache_dir,
+            face_mask=face_mask,
+            use_full_affine=bool(self.cfg.get("head_direction_relock_full_affine", False)),
+            core_min_alpha=float(self.cfg.get("head_direction_relock_core_min_alpha", 0.90)),
+            feather_px=int(self.cfg.get("head_direction_relock_feather_px", 21)),
+            stitch_feather_px=int(self.cfg.get("head_direction_relock_stitch_feather_px", 10)),
+        )
+        info.update(pose_meta)
+        print(
+            f"[krea2 head_direction] pose_relock={info.get('pose_relock')} "
+            f"reason={info.get('pose_relock_reason')} "
+            f"rotation_deg={info.get('rotation_deg')} scale={info.get('scale')}",
+            flush=True,
+        )
+        return relocked, info
 
     @staticmethod
     def _node_accepts_kwarg(rt: NodeRuntime, node_name: str, key: str) -> bool:
@@ -3406,6 +3462,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     stitch_debug=stitch_debug,
                 )
                 face_prep_diag["full_frame_face_refine"] = full_frame_refine_diag
+            if (do_stitch or edit_mode == "full_frame") and body_full is not None and out is not None:
+                out, pose_relock_diag = self._relock_head_direction(
+                    out, body_full, selected_face
+                )
+                face_prep_diag["head_direction_relock"] = pose_relock_diag
             faces_succeeded = [0] if do_stitch or edit_mode == "full_frame" else []
 
         dbg = {}
@@ -3511,6 +3572,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "lighting_route": lighting_route_meta,
             "body_route": body_route_meta,
             "full_frame_face_refine": face_prep_diag.get("full_frame_face_refine"),
+            "head_direction_relock": face_prep_diag.get("head_direction_relock"),
             "face_detection_backend": str(
                 self.cfg.get("face_detection_backend", "current") or "current"
             ),

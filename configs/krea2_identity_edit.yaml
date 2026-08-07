@@ -365,6 +365,27 @@ prompt: >-
 
 negative_prompt: ""
 
+# Post-generation head-direction relock. Prompt text alone doesn't reliably
+# stop the model from drifting head yaw / eye gaze toward the donor face or a
+# frontal default. When true, after crop_stitch/full_frame produce the final
+# composited image, the generated face's 5 landmarks are re-aligned (rotation
+# + uniform scale + translation only, no shear/stretch) onto the ORIGINAL
+# photo's landmarks, then blended back through a tight face-only mask so
+# hair/body/quality are untouched -- only eye/head orientation is corrected.
+head_direction_relock: true
+# Partial affine (similarity: rotation+scale+translation) is the safe default
+# -- no shear/stretch, so it can't distort the face. Full affine allows shear
+# too, which can better match some poses but risks visible warping.
+head_direction_relock_full_affine: false
+head_direction_relock_feather_px: 21
+head_direction_relock_stitch_feather_px: 10
+head_direction_relock_core_min_alpha: 0.90
+head_direction_relock_expand_px: 6
+head_direction_relock_blur_px: 8
+head_direction_relock_top_extend: 0.12
+head_direction_relock_side_extend: 0.12
+head_direction_relock_bot_extend: 0.05
+
 # Tight face ref — include enough donor hair above face; stop at jawline/chin to exclude clothing.
 face_side_pad: 0.22
 face_top_pad: 0.70
