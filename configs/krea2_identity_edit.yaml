@@ -350,6 +350,11 @@ prompt: >-
   are smiling, the result must smile the same way; if they are not smiling,
   do not add a smile. Keep mouth shape, smile/no-smile, eye gaze, and
   micro-expressions from the first image only — never from the second image.
+  CRITICAL: keep the head facing the exact same direction as the first image —
+  do not turn, rotate, or angle the head to the left or right, and do not tilt
+  it. The eyes must look in the exact same direction as the first image, not
+  toward the camera or off to a side if the first image does not. Head yaw,
+  pitch, and roll must exactly match the first image.
   Keep the body, clothing, pose, head rotation, camera angle, lighting, and
   background from the first image. Match the original head size and neck seam —
   do not enlarge the head. Use face and hair identity from the second image; do not
