@@ -44,8 +44,10 @@ from headswap.preprocess import (
     crop_with_mask,
     dilate_mask,
     ensure_selected_face_mask_coverage,
+    estimate_head_direction_label,
     expand_crop_box_for_face_fill,
     feathered_soft_composite,
+    get_face_landmarks5,
     hard_freeze_neighbor_faces,
     identity_face_boost_mask,
     lab_histogram_match_face,
@@ -986,11 +988,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
             out = (out + " " + freedom).strip()
         return out
 
-    def _prompt_for_edit(self, *, use_tight: bool, multi_person: bool) -> str:
+    def _prompt_for_edit(
+        self,
+        *,
+        use_tight: bool,
+        multi_person: bool,
+        direction_hint: str = "",
+    ) -> str:
         prompt = str(self.cfg.get("prompt", "") or "").strip()
-        # SPP-CC: identical prompt to single-person (no multi add-ons).
+        # SPP-CC: identical prompt to single-person (no multi add-ons), but the
+        # per-image head-direction hint still applies -- it's not a multi-person
+        # add-on, it's a concrete replacement for the generic "keep the same
+        # direction" boilerplate already in the base prompt (see yaml).
         if self._single_person_parity():
-            return self._apply_expression_policy(prompt)
+            return self._apply_expression_policy(
+                self._append_direction_hint(prompt, direction_hint)
+            )
         # Head-scale reminder for group shots (oversized heads are the main fail).
         if multi_person and bool(self.cfg.get("multi_head_scale_prompt", True)):
             prompt = (
@@ -1021,7 +1034,65 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "clothing, collar, bowtie, or shoulders from the second image. "
                 "Match lighting and skin tone to the neck and jaw in the first image."
             )
-        return self._apply_expression_policy(prompt)
+        return self._apply_expression_policy(
+            self._append_direction_hint(prompt, direction_hint)
+        )
+
+    def _append_direction_hint(self, prompt: str, direction_hint: str) -> str:
+        if not bool(self.cfg.get("head_direction_prompt_hint", True)):
+            return prompt
+        hint = str(direction_hint or "").strip()
+        if not hint:
+            return prompt
+        return (
+            prompt
+            + f" CRITICAL — measured head/eye alignment in the first image: {hint}."
+        )
+
+    def _measure_head_direction_hint(
+        self, body_full: Image.Image, selected_face: FaceBox | None
+    ) -> tuple[str, dict[str, Any]]:
+        """Compute a concrete, per-image head yaw/roll hint for the prompt.
+
+        This is the prompt-only successor to the pixel-warp head-direction
+        fixes (head_direction_relock, procrustes correction) that each
+        introduced a new compositing artifact (a whole-image warp produced a
+        floating duplicate head; a crop-local warp still streaked warped
+        sky into the output even after masking). A wrong or unhelpful text
+        hint can't corrupt pixels the way those did, so this is the safer
+        default lever to reach for first.
+        """
+        diag: dict[str, Any] = {"applied": False}
+        if not bool(self.cfg.get("head_direction_prompt_hint", True)):
+            diag["reason"] = "disabled"
+            return "", diag
+        if selected_face is None:
+            diag["reason"] = "no_selected_face"
+            return "", diag
+        landmarks, backend, note = get_face_landmarks5(
+            pil_to_rgb_np(body_full), self.cache_dir, prefer_box=selected_face
+        )
+        diag["landmarks_backend"] = backend
+        if landmarks is None or backend != "insightface":
+            diag["reason"] = note or "landmarks_unavailable"
+            return "", diag
+        result = estimate_head_direction_label(
+            landmarks,
+            roll_deg_thresh=float(self.cfg.get("head_direction_roll_deg_thresh", 3.0)),
+            yaw_thresh=float(self.cfg.get("head_direction_yaw_thresh", 0.12)),
+            yaw_strong_thresh=float(
+                self.cfg.get("head_direction_yaw_strong_thresh", 0.30)
+            ),
+        )
+        diag.update(result)
+        diag["applied"] = bool(result.get("label"))
+        print(
+            f"[krea2 head_direction_hint] applied={diag['applied']} "
+            f"roll_deg={result.get('roll_deg')} yaw_offset={result.get('yaw_offset')} "
+            f"label={result.get('label')!r}",
+            flush=True,
+        )
+        return str(result.get("label") or ""), diag
 
     def _face_position_label(
         self, selected: FaceBox | None, all_faces: list[FaceBox]
@@ -2931,6 +3002,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     index=body_face_index,
                     policy=body_face_policy if not swap_all else "largest",
                 )
+                direction_hint, direction_diag = self._measure_head_direction_hint(
+                    body_full, selected_face
+                )
+                face_prep_diag["head_direction_hint"] = direction_diag
                 multi_edit_mode = str(
                     self.cfg.get("multi_person_edit_mode", "crop_stitch") or "crop_stitch"
                 ).strip().lower()
@@ -3253,8 +3328,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         built.get("diag") or {}, label=f"swap_all[{face_i}]"
                     )
                     face_prep_diag = built.get("diag") or face_prep_diag
+                    direction_hint_i, direction_diag_i = self._measure_head_direction_hint(
+                        body_full, face_box
+                    )
+                    face_prep_diag["head_direction_hint"] = direction_diag_i
                     prompt_i = self._prompt_for_edit(
-                        use_tight=True, multi_person=True
+                        use_tight=True,
+                        multi_person=True,
+                        direction_hint=direction_hint_i,
                     )
                     print(
                         f"[krea2] swap-all face {face_i + 1}/{len(all_faces)} "
@@ -3335,6 +3416,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 prompt = self._prompt_for_edit(
                     use_tight=use_tight if edit_mode != "full_frame" else False,
                     multi_person=prompt_multi,
+                    direction_hint=direction_hint,
                 )
             cond_info = self._log_krea2_conditioning(
                 edit_mode=edit_mode,

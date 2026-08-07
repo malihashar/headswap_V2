@@ -1966,6 +1966,84 @@ def get_face_landmarks5(
     return pts, "box_prior", note
 
 
+def estimate_head_direction_label(
+    landmarks5: np.ndarray,
+    *,
+    roll_deg_thresh: float = 3.0,
+    yaw_thresh: float = 0.12,
+    yaw_strong_thresh: float = 0.30,
+) -> dict[str, Any]:
+    """Coarse, self-referential head yaw/roll description from 5 landmarks.
+
+    Used to give the model a CONCRETE, image-specific direction cue in the
+    prompt instead of a generic "keep the same direction" instruction, which
+    on its own doesn't reliably stop head yaw / eye gaze from drifting
+    toward the donor face or a frontal default. Unlike a pixel-level warp
+    (which repeatedly produced compositing artifacts -- ghosting, streaking
+    -- across several attempts), this only changes prompt text, so it cannot
+    introduce a visual defect by construction; worst case is an unhelpful
+    hint, never a broken pixel.
+
+    Landmark order follows ``get_face_landmarks5``'s convention: [eye_a,
+    eye_b, nose, mouth_a, mouth_b] in image (x, y) pixel coordinates. Index
+    0/1 are NOT guaranteed to be screen-left/right (that depends on the
+    detector, not on this function), so eyes are re-sorted by x here before
+    anything is labeled "left"/"right" -- the labels below are always
+    defined relative to that local sort, so they are self-consistent and
+    verifiable by looking at the image, never dependent on an assumed
+    anatomical left/right convention that could be backwards.
+
+    Roll (in-plane tilt) is described directly and unambiguously ("the eye
+    on the left/right side sits higher"), since that's derived purely from
+    which sorted landmark has the smaller y -- no directional judgement
+    call involved. Yaw (turn) is deliberately described only by MAGNITUDE
+    ("turned moderately/strongly off-center"), not by an asserted left/right
+    turn direction: a 2D nose-offset-from-eye-midpoint proxy is too noisy to
+    confidently commit to a turn direction, and telling the model the wrong
+    direction would be worse than not claiming one -- the model can still
+    look at image 1 itself to see which way the offset goes.
+    """
+    lm = np.asarray(landmarks5, dtype=np.float64)
+    info: dict[str, Any] = {"label": "", "roll_deg": None, "yaw_offset": None}
+    if lm.shape[0] < 3:
+        info["reason"] = "insufficient_landmarks"
+        return info
+
+    eyes = lm[:2]
+    nose = lm[2]
+    eye_left, eye_right = (eyes[0], eyes[1]) if eyes[0][0] <= eyes[1][0] else (eyes[1], eyes[0])
+    eye_span = max(1.0, float(eye_right[0] - eye_left[0]))
+    roll_deg = math.degrees(
+        math.atan2(eye_right[1] - eye_left[1], eye_right[0] - eye_left[0])
+    )
+    eye_mid_x = 0.5 * (eye_left[0] + eye_right[0])
+    yaw_offset = float(nose[0] - eye_mid_x) / eye_span
+    info["roll_deg"] = round(roll_deg, 2)
+    info["yaw_offset"] = round(yaw_offset, 4)
+
+    parts: list[str] = []
+    if abs(roll_deg) > roll_deg_thresh:
+        higher = "left" if eye_left[1] < eye_right[1] else "right"
+        parts.append(
+            f"the eye on the {higher} side of the frame sits noticeably "
+            f"higher than the other (about a {abs(round(roll_deg))}-degree "
+            "tilt) -- match this exact tilt, do not level the head"
+        )
+    yaw_mag = abs(yaw_offset)
+    if yaw_mag > yaw_thresh:
+        strength = "strongly" if yaw_mag > yaw_strong_thresh else "moderately"
+        parts.append(
+            f"the head/nose is {strength} turned off-center relative to the "
+            "eyes, not facing straight at the camera -- study the exact "
+            "eye/nose/mouth alignment visible in the first image and "
+            "reproduce that same off-center angle, do not straighten or "
+            "frontalize it"
+        )
+
+    info["label"] = "; ".join(parts)
+    return info
+
+
 def _ellipse_alpha(
     h: int,
     w: int,

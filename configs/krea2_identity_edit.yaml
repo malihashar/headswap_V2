@@ -283,8 +283,16 @@ full_frame_face_refine_reload_lora: false
 # before stitching -- same content-local, inlier/residual-checked
 # procrustes_align_edited_crop_to_body_box used by enable_procrustes_correction
 # above, reused here because it is scoped to the tight head crop and cannot
-# drag in distant content the way a whole-image pose warp can.
-full_frame_face_refine_procrustes: true
+# drag in distant content the way a whole-image pose warp can. Also gated by
+# _blend_procrustes_face_only, which only lets the warp affect a tight
+# face-only ellipse (fixes the streaky-sky bug this originally caused).
+# OFF by default here specifically (crop_stitch's enable_procrustes_correction
+# stays on): the full_frame refine pass ALREADY stitches once (first-pass
+# freeze composite), and stacking this pass's own stitch-with-warp on top of
+# that is a second compositing seam in the same head/hair region -- more
+# opportunity for a faint boundary ghost than crop_stitch's single stitch.
+# Re-enable once validated on real full_frame + refine runs.
+full_frame_face_refine_procrustes: false
 
 # Multi-person body photos: pick which face to swap, then tighten the crop so
 # neighbors are not in the edit canvas (fixes giant-head / wrong-person fails).
@@ -352,6 +360,21 @@ multi_hair_replace_prompt: true
 # When false: strip expression-lock language and allow the donor identity's
 # natural expression (A/B arms h/i). Does not change geometry/identity LoRA.
 preserve_expression: true
+
+# Per-image head-direction prompt hint. The generic "keep the same direction"
+# instruction below doesn't reliably stop yaw/gaze drift on its own. When
+# true, each run also measures the ACTUAL yaw/roll from the original photo's
+# face landmarks and appends a concrete, image-specific hint (e.g. "the eye
+# on the right sits higher -- an 8-degree tilt" / "the head is strongly
+# turned off-center, study image 1's exact eye/nose/mouth alignment").
+# Text-only -- unlike the pixel-warp corrections above (head_direction_relock,
+# procrustes), a wrong or unhelpful hint cannot corrupt pixels, so this is
+# the safer lever to reach for first. See estimate_head_direction_label in
+# preprocess.py for exactly what is/isn't asserted and why.
+head_direction_prompt_hint: true
+head_direction_roll_deg_thresh: 3.0
+head_direction_yaw_thresh: 0.12
+head_direction_yaw_strong_thresh: 0.30
 
 prompt: >-
   Replace the person's head, face, and hair in the first image with the person
