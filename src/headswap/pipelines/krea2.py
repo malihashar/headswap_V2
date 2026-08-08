@@ -1128,6 +1128,53 @@ class Krea2IdentityEditPipeline(BasePipeline):
             flush=True,
         )
 
+    def _append_headwear_policy(self, prompt: str) -> str:
+        """Say what to do with hats/headwear explicitly.
+
+        Diagnosed from a real production failure: the target wore a hat with
+        wide side flaps, and the output showed a translucent oval above the
+        head plus "wings" at ear level. Those were never invented hair -- they
+        were the ORIGINAL HAT surviving the swap. Measured: the hat sat 100%
+        inside the stitch mask, so this was not a mask-coverage problem.
+
+        The cause is conditioning. The prompt named glasses ("Remove the
+        original face and glasses") but never mentioned headwear, while
+        simultaneously demanding the donor's hairstyle and "completely remove
+        and replace the original hair". A hat is not hair, so nothing told the
+        model what to do with it -- and Krea2 conditions heavily on image 1's
+        structure. It resolved the ambiguity by producing a hat/hair hybrid.
+
+        Default is PRESERVE: headwear is functionally clothing, and the prompt
+        already keeps clothing from image 1. Preserving it also keeps the
+        original silhouette, so no background has to be reconstructed --
+        removal would additionally require inpainting whatever the hat
+        occluded, which is the far harder problem.
+        """
+        if not bool(self.cfg.get("headwear_prompt_policy", True)):
+            return prompt
+        if bool(self.cfg.get("preserve_headwear", True)):
+            return (
+                prompt
+                + " CRITICAL: if the person in the first image is wearing a hat, "
+                "cap, headscarf, helmet, or any other head covering, KEEP that "
+                "headwear exactly as it appears in the first image — same shape, "
+                "position, colour and size, including any flaps, brim or straps. "
+                "It is clothing, not hair: do not remove it, do not replace it "
+                "with hair, and do not blend hair through it. Place the new "
+                "person's hair naturally UNDERNEATH and around it, showing only "
+                "the hair that would realistically be visible outside the "
+                "headwear."
+            )
+        return (
+            prompt
+            + " CRITICAL: if the person in the first image is wearing a hat, cap, "
+            "headscarf or any other head covering, REMOVE it completely and "
+            "replace it with the second person's hair. No part of the original "
+            "headwear — including flaps, brim, straps or its outline — may remain "
+            "or show through. Reconstruct whatever background the headwear was "
+            "covering so nothing of its silhouette is left."
+        )
+
     def _apply_expression_policy(self, prompt: str) -> str:
         """Honor ``preserve_expression`` (default true).
 
@@ -1178,7 +1225,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # direction" boilerplate already in the base prompt (see yaml).
         if self._single_person_parity():
             return self._apply_expression_policy(
-                self._append_direction_hint(prompt, direction_hint)
+                self._append_headwear_policy(
+                    self._append_direction_hint(prompt, direction_hint)
+                )
             )
         # Head-scale reminder for group shots (oversized heads are the main fail).
         if multi_person and bool(self.cfg.get("multi_head_scale_prompt", True)):
@@ -1211,7 +1260,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "Match lighting and skin tone to the neck and jaw in the first image."
             )
         return self._apply_expression_policy(
-            self._append_direction_hint(prompt, direction_hint)
+            self._append_headwear_policy(
+                self._append_direction_hint(prompt, direction_hint)
+            )
         )
 
     def _append_direction_hint(self, prompt: str, direction_hint: str) -> str:

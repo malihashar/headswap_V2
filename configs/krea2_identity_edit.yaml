@@ -419,6 +419,18 @@ preserve_expression: true
 # the safer lever to reach for first. See estimate_head_direction_label in
 # preprocess.py for exactly what is/isn't asserted and why.
 head_direction_prompt_hint: true
+# --- Headwear policy -------------------------------------------------------
+# Diagnosed from a real failure: the target wore a hat with wide side flaps and
+# the output showed a ghost oval above the head + "wings" at ear level. Those
+# were the ORIGINAL HAT surviving, not invented hair -- the hat measured 100%
+# inside the stitch mask, so it was never a coverage problem. The prompt named
+# glasses but never headwear, while demanding the donor's hairstyle, so the
+# model produced a hat/hair hybrid.
+# preserve_headwear=true  -> keep the hat (it is clothing; keeps the original
+#   silhouette so no occluded background has to be reconstructed).
+# preserve_headwear=false -> remove it and reconstruct what it covered (harder).
+headwear_prompt_policy: true
+preserve_headwear: true
 head_direction_roll_deg_thresh: 3.0
 head_direction_yaw_thresh: 0.12
 head_direction_yaw_strong_thresh: 0.30
