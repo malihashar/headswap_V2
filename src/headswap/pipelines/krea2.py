@@ -1357,8 +1357,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # crop_stitch flag resolution -- only the mask SHAPE itself needs to
         # match pass 1, not the unrelated crop padding.
         flags = self._tight_crop_flags(out, selected, faces)
+        # Source the refine crop's "scene" (image 1) from the PRISTINE
+        # body_full, not `out` (pass 1's own generated content). Krea2 is an
+        # edit model -- it conditions heavily on image 1's structure even at
+        # denoise=1.0, so cropping from pass 1's already-soft generated head
+        # just re-edits that softness at higher pixel dimensions instead of
+        # ever seeing real detail. Cropping from the pristine original gives
+        # the refine pass the same sharp, real-photo source crop_stitch uses
+        # -- this pass becomes a genuine crop_stitch-quality swap anchored at
+        # the target's geometry, not an upscale-and-touch-up of pass 1.
         built = self._build_scene_person(
-            out,
+            body_full,
             face_crop,
             selected,
             div_by=div_by,

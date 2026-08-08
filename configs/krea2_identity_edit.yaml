@@ -231,11 +231,16 @@ full_frame_hard_freeze_neighbors: true
 # onto the person standing next to the selected face.
 full_frame_mask_top_extend: 1.55
 full_frame_mask_side_extend: 0.42
-full_frame_mask_bot_extend: 0.40
+# Cut from 0.40: combined with blur/dilate/feather below, the soft-alpha
+# reach below the chin was ~144px -- enough to land ON hands/forearms in a
+# praying/hands-near-chin pose, blending Krea2's raw (possibly pose-shifted)
+# generated frame with the original there instead of freezing it -> ghosted
+# hands. 0.18 still covers neck/collar, not chest-level hands.
+full_frame_mask_bot_extend: 0.18
 full_frame_mask_expand_px: 12
-full_frame_mask_blur_px: 24
-full_frame_freeze_dilate_px: 10
-full_frame_freeze_feather_px: 30
+full_frame_mask_blur_px: 12
+full_frame_freeze_dilate_px: 4
+full_frame_freeze_feather_px: 12
 # Keep neighbor carve moderate — aggressive shrink on tight groups wiped the
 # selected-head mask and made freeze look like a no-op swap.
 full_frame_neighbor_suppress_shrink: 1.05
