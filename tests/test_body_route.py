@@ -115,7 +115,12 @@ def _stub_face_detection(monkeypatch, faces: list[FaceBox], selected: FaceBox | 
     )
 
 
-def test_resolve_body_route_full_body_routes_to_full_frame(monkeypatch):
+def test_resolve_body_route_single_person_full_body_stays_crop_stitch(monkeypatch):
+    # Architecture (see _resolve_body_route docstring): full_frame's whole-
+    # scene generation + freeze-composite was the repeated source of
+    # ghosting/hand-duplication/scale artifacts. Single-person full-body
+    # photos now stay on crop_stitch (proven, ghost-free) with a dedicated
+    # scale/position clamp safety net instead of routing to full_frame.
     pipe = _pipe(
         {
             "enable_body_route": True,
@@ -134,10 +139,10 @@ def test_resolve_body_route_full_body_routes_to_full_frame(monkeypatch):
 
     assert meta["applied"] is True
     assert meta["full_body_detected"] is True
-    assert meta["route"] == "full_frame"
-    assert pipe.cfg["multi_person_edit_mode"] == "full_frame"
-    assert pipe.cfg["full_frame_ref_boost_mask"] is True
-    assert pipe.cfg["full_frame_ref_boost"] == 4.0
+    assert meta["route"] == "crop_stitch_scale_clamped"
+    assert meta["multi_person_edit_mode"] == "crop_stitch"
+    assert "multi_person_edit_mode" not in pipe.cfg  # never forced to full_frame
+    assert pipe.cfg["crop_stitch_clamp_head_scale"] is True
 
 
 def test_resolve_body_route_portrait_leaves_crop_stitch_untouched(monkeypatch):

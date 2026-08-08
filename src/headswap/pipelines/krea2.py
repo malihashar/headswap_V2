@@ -816,9 +816,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # Match donor face-to-canvas ratio to measured scene face height.
         # Allowed under SPP (krea2_crop) for oversized-head A/B — gated only by
         # identity_scale_match + multi/isolate, not by single_person_parity.
-        scale_match = (
-            bool(self.cfg.get("identity_scale_match", True))
-            and (multi_person or isolate_selected)
+        # Also on for the single-person full-body route (crop_stitch_clamp_
+        # head_scale, set only by _resolve_body_route when a full body was
+        # actually detected): that route already computes face_h_frac_scene
+        # above but previously discarded it, falling back to a scale-blind
+        # resize_contain -- the same donor-scale-blindness that was already
+        # fixed for multi-person, just never extended to this later-added
+        # single-subject case. Narrowly scoped so ordinary portrait/close-up
+        # crop_stitch (crop_stitch_clamp_head_scale unset) is unaffected.
+        scale_match = bool(self.cfg.get("identity_scale_match", True)) and (
+            multi_person
+            or isolate_selected
+            or bool(self.cfg.get("crop_stitch_clamp_head_scale", False))
         )
         scale_factor = float(self.cfg.get("identity_scale_factor", 0.90))
         if bool(self.cfg.get("person_match_crop_size", True)):
@@ -2198,6 +2207,48 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
         return clamped, clamp_info
 
+    def _maybe_clamp_crop_stitch_head_scale(
+        self, body_full: Image.Image, out: Image.Image
+    ) -> tuple[Image.Image, dict[str, Any] | None]:
+        """Same safety net as `_maybe_clamp_full_frame_head_scale`, for the
+        single-person crop_stitch stitch result on a body-route-detected
+        full-body photo.
+
+        crop_stitch's own head-scale clamp (inside `_stitch_edited`, via
+        `clamp_edited_head_scale`) is gated by `stitch_multi = multi_person
+        and not single_person_parity()`. `single_person_parity` defaults
+        true, so for any single-subject photo (which a full-body photo
+        almost always is) that clamp never fires -- it's dead code for
+        exactly the case `_resolve_body_route` now needs it for. Rather than
+        touch the existing, validated SPP-CC gate (used by every crop_stitch
+        run today), this is a separate, explicitly-flagged call
+        (`crop_stitch_clamp_head_scale`, set by `_resolve_body_route` only
+        when a single-person full body was actually detected) so ordinary
+        portrait/close-up crop_stitch runs are completely unaffected.
+        """
+        do_clamp = bool(
+            self.cfg.get("crop_stitch_clamp_head_scale", False)
+        ) and bool(self.cfg.get("clamp_edited_head_scale", True))
+        if not do_clamp:
+            return out, None
+        clamped, clamp_info = clamp_edited_head_scale(
+            body_full,
+            out,
+            self.cache_dir,
+            max_height_ratio=float(self.cfg.get("max_edited_head_height_ratio", 1.08)),
+            target_ratio=float(self.cfg.get("target_edited_head_height_ratio", 0.98)),
+            min_height_ratio=float(self.cfg.get("min_edited_head_height_ratio", 0.92)),
+            max_grow=float(self.cfg.get("max_edited_head_grow", 1.45)),
+        )
+        if clamp_info.get("clamped"):
+            print(
+                f"[krea2] crop_stitch (full-body route) clamped head scale "
+                f"ratio {clamp_info['ratio_before']:.2f}→"
+                f"{clamp_info['ratio_after']:.2f} shrink={clamp_info['shrink']:.3f}",
+                flush=True,
+            )
+        return clamped, clamp_info
+
     def _maybe_procrustes_edited_crop(
         self,
         edited: Image.Image,
@@ -2702,21 +2753,38 @@ class Krea2IdentityEditPipeline(BasePipeline):
         return result
 
     def _resolve_body_route(self, body: Image.Image) -> dict[str, Any]:
-        """Auto-route to full_frame when a full/half body is detected.
+        """Route full/half-body photos to the pipeline that actually suits them.
 
-        Full-frame preserves body/head proportions but has historically
-        traded off some face quality vs. crop_stitch. When a full body is
-        detected, we route to full_frame AND apply the same identity-boost
-        overrides the (dark) lighting route uses (full v1.2 LoRA +
-        ref_boost=4.0 + ref_boost_mask) so full_frame keeps as much
-        crop_stitch-level identity/face quality as the existing recipe
-        allows, rather than the plain default full_frame settings.
+        ARCHITECTURE (revised after repeated ghosting/hand-duplication/scale
+        failures traced to full_frame's whole-scene generation + freeze
+        composite -- see docs/full_frame_failure_analysis.md):
 
-        When no full body is detected, ``self.cfg`` is left untouched and the
-        existing crop_stitch path runs exactly as before — this route only
-        ever *adds* a path to full_frame, it never forces crop_stitch off.
-        Runs BEFORE model load (same as ``_resolve_lighting_route``) so any
-        LoRA/ref_boost overrides are picked up when the models are built.
+        full_frame's whole-scene-regeneration + freeze-composite architecture
+        was originally built and validated for MULTI-PERSON group photos
+        (commit 076f687), where crop_stitch's per-person tight crop has a
+        real, distinct problem it solves (neighbor-face isolation/locality).
+        Single-person full-body auto-routing to full_frame was added later,
+        on the assumption that seeing the whole body was necessary for
+        correct proportions. That assumption doesn't hold up: crop_stitch's
+        crop window is built directly from the REAL detected face bbox in
+        the pristine photo (already-correct geometry, proportional to face
+        size regardless of how small the face is in frame -- verified: small
+        faces get proportionally MORE context margin from expand_px/crop_pad,
+        not less). Every ghost/hand-duplication artifact chased across many
+        rounds traced back to full_frame's freeze step letting the model
+        touch body/hand pixels and then trying to mask them back -- an
+        architecture crop_stitch's single tight-crop-and-stitch doesn't have
+        by construction, since body/hands are never inside the edited region
+        at all.
+
+        So: single-person full-body -> stays on crop_stitch (its proven,
+        ghost-free path), with `_maybe_clamp_crop_stitch_head_scale` (see
+        below, called from the crop_stitch stitch site) as the scale/position
+        safety net anchored to the real photo -- crop_stitch's existing
+        `clamp_edited_head_scale` call is gated behind `single_person_parity`
+        and never fires for single-subject photos otherwise. Genuine
+        multi-person full-body photos still route to full_frame, unchanged --
+        that's the case it was actually built and validated for.
         """
         enabled = bool(self.cfg.get("enable_body_route", True))
         print(f"[krea2 body_route] enable_body_route={enabled}", flush=True)
@@ -2767,21 +2835,80 @@ class Krea2IdentityEditPipeline(BasePipeline):
             meta["reason"] = "no_full_body_detected"
             return meta
 
-        self.cfg["multi_person_edit_mode"] = "full_frame"
-        if not self.cfg.get("full_frame_identity_lora_name"):
-            self.cfg["full_frame_identity_lora_name"] = (
-                "krea2_identity_edit_v1_2.safetensors"
+        if n_faces > 1:
+            # Multi-person full-body: full_frame's original, validated use
+            # case (commit 076f687) -- unchanged.
+            self.cfg["multi_person_edit_mode"] = "full_frame"
+            if not self.cfg.get("full_frame_identity_lora_name"):
+                self.cfg["full_frame_identity_lora_name"] = (
+                    "krea2_identity_edit_v1_2.safetensors"
+                )
+            if self.cfg.get("full_frame_ref_boost") is None:
+                self.cfg["full_frame_ref_boost"] = 4.0
+            if not bool(
+                self.cfg.get("allow_disable_full_frame_ref_boost_mask", False)
+            ):
+                self.cfg["full_frame_ref_boost_mask"] = True
+            meta["applied"] = True
+            meta["route"] = "full_frame"
+            meta["reason"] = "multi_person_full_body_detected"
+            meta["multi_person_edit_mode"] = str(self.cfg.get("multi_person_edit_mode"))
+            print(
+                "[krea2 body_route] resolved_mode=full_frame "
+                "reason=multi_person_full_body_detected",
+                flush=True,
             )
-        if self.cfg.get("full_frame_ref_boost") is None:
-            self.cfg["full_frame_ref_boost"] = 4.0
-        if not bool(self.cfg.get("allow_disable_full_frame_ref_boost_mask", False)):
-            self.cfg["full_frame_ref_boost_mask"] = True
+            return meta
+
+        # Single-person full-body: stay on crop_stitch (see docstring). Just
+        # flag that this run should get the post-stitch scale/position clamp
+        # (crop_stitch's own clamp_edited_head_scale call is SPP-gated and
+        # would otherwise never fire for a single-subject photo).
+        self.cfg["crop_stitch_clamp_head_scale"] = True
+        # Raise the native resolution the head+hair crop is sourced from.
+        # crop_long_side=768 (the size actually fed to Krea2) is INDEPENDENT
+        # of max_body_dim -- resize_long_side always downsamples the crop to
+        # 768 regardless of body_full's size (krea2.py ~808), so this costs
+        # zero extra inference time/VRAM. It only matters for a full-body
+        # photo where the face is a small fraction of the frame: at
+        # max_body_dim=1024 the face itself might be only ~100px natively
+        # before ANY crop/resize, so even a correct resize-to-768 crop
+        # started from very little real detail. Raising body_full's cap
+        # gives the crop far more native pixels to draw from. No coordinate-
+        # mapping risk: mask/box/canvas/detection all stay derived from this
+        # one body_full, nothing else needs to change.
+        _new_max_body_dim = int(self.cfg.get("body_route_max_body_dim", 2048))
+        _cur_max_body_dim = int(self.cfg.get("max_body_dim", 1024) or 1024)
+        if _new_max_body_dim > _cur_max_body_dim:
+            self.cfg["max_body_dim"] = _new_max_body_dim
+            meta["max_body_dim_raised"] = [_cur_max_body_dim, _new_max_body_dim]
+            # mask_expand_px/mask_blur_px/stitch_feather_px are FIXED PIXEL
+            # values applied to the mask at body_full's native resolution
+            # (never downsampled to crop_long_side=768 -- only the RGB scene
+            # is). The ellipse's own extend (top/side/bot_extend) scales
+            # proportionally with face size, but these don't -- so raising
+            # max_body_dim without also scaling them shrinks the soft-blend
+            # zone's fraction of the crop (e.g. ~10% -> ~5% at a 2x raise),
+            # risking a harder-edged jaw/neck seam than before. Scale them by
+            # the same ratio so the visual softness stays equivalent.
+            _res_ratio = float(_new_max_body_dim) / float(_cur_max_body_dim)
+            for _key, _default in (
+                ("mask_expand_px", 18),
+                ("mask_blur_px", 12),
+                ("stitch_feather_px", 10),
+            ):
+                _cur_val = int(self.cfg.get(_key, _default) or _default)
+                self.cfg[_key] = int(round(_cur_val * _res_ratio))
+            meta["mask_feather_scaled_by"] = round(_res_ratio, 3)
         meta["applied"] = True
-        meta["route"] = "full_frame"
-        meta["reason"] = "full_body_detected"
-        meta["multi_person_edit_mode"] = str(self.cfg.get("multi_person_edit_mode"))
+        meta["route"] = "crop_stitch_scale_clamped"
+        meta["reason"] = "single_person_full_body_detected"
+        meta["multi_person_edit_mode"] = str(
+            self.cfg.get("multi_person_edit_mode", "crop_stitch")
+        )
         print(
-            "[krea2 body_route] resolved_mode=full_frame reason=full_body_detected",
+            "[krea2 body_route] resolved_mode=crop_stitch_scale_clamped "
+            "reason=single_person_full_body_detected",
             flush=True,
         )
         return meta
@@ -3001,6 +3128,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
         _ff_lora_before = self.cfg.get("full_frame_identity_lora_name")
         _ff_rb_before = self.cfg.get("full_frame_ref_boost")
         _ff_rbm_before = self.cfg.get("full_frame_ref_boost_mask")
+        _cs_clamp_before = self.cfg.get("crop_stitch_clamp_head_scale")
+        _max_body_dim_before = self.cfg.get("max_body_dim")
+        _mask_expand_before = self.cfg.get("mask_expand_px")
+        _mask_blur_before = self.cfg.get("mask_blur_px")
+        _stitch_feather_before = self.cfg.get("stitch_feather_px")
 
         try:
             # Optional Magic Hour face-detection audit (geometry still current).
@@ -3050,6 +3182,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             self.cfg["full_frame_identity_lora_name"] = _ff_lora_before
             self.cfg["full_frame_ref_boost"] = _ff_rb_before
             self.cfg["full_frame_ref_boost_mask"] = _ff_rbm_before
+            self.cfg["crop_stitch_clamp_head_scale"] = _cs_clamp_before
+            self.cfg["max_body_dim"] = _max_body_dim_before
+            self.cfg["mask_expand_px"] = _mask_expand_before
+            self.cfg["mask_blur_px"] = _mask_blur_before
+            self.cfg["stitch_feather_px"] = _stitch_feather_before
 
     def _run_after_models(
         self,
@@ -3618,6 +3755,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             if out_dir
                             else None,
                         }
+                    # Body-route safety net (see _resolve_body_route /
+                    # _maybe_clamp_crop_stitch_head_scale docstrings): only
+                    # active when a single-person full body was detected --
+                    # ordinary portrait crop_stitch runs are unaffected.
+                    out, cs_clamp_info = self._maybe_clamp_crop_stitch_head_scale(
+                        body_full, out
+                    )
+                    if cs_clamp_info is not None:
+                        face_prep_diag["crop_stitch_body_route_clamp"] = cs_clamp_info
                     # Optional post-stitch neighbor restore. OFF by default —
                     # production locality is crop-window exclusion + mask carve.
                     if (
