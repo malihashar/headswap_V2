@@ -214,7 +214,21 @@ face_detection_backend: current
 magic_hour_target_file_path: null
 magic_hour_confidence_score: 0.5
 magic_hour_max_wait_s: 120.0
-head_mask_backend: ellipse
+# head_matte = ellipse AND a real foreground/person matte (rembg), so the mask
+# follows the ACTUAL head silhouette instead of enclosing background.
+# Measured on a short-haired subject, small face in a full-body frame:
+#   ellipse    -> 121px of EMPTY SKY above the real head (0.98x face height)
+#   head_matte ->  13px                                  (0.11x face height)
+# That empty headroom is not cosmetic: crop_with_mask derives the crop box
+# from the mask, so the model was being handed a big oval of sky, regenerating
+# it imperfectly (the visible arc ON the mask boundary) and inventing hair to
+# fill the space. 9x reduction in the region it can hallucinate into.
+# Falls back to `ellipse` automatically if rembg is not installed.
+head_mask_backend: head_matte
+# Dilates the matte before intersecting, so a donor hairstyle slightly larger
+# than the target's still has room to grow. 0.0 would pin new hair to the old
+# silhouette exactly (the failure HID names, arXiv 2503.00861).
+head_matte_hair_margin_frac: 0.08
 seam_refine: false
 seam_refine_erode_px: 8
 seam_refine_dilate_px: 16

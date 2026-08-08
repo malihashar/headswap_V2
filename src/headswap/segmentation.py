@@ -124,6 +124,109 @@ def _try_birefnet_mask(
     return Image.fromarray(alpha), None
 
 
+def _person_matte(body_pil: Image.Image) -> tuple[np.ndarray | None, str | None]:
+    """Raw, UNGATED foreground/person alpha matte (rembg / BiRefNet)."""
+    try:
+        from rembg import remove as rembg_remove  # type: ignore
+    except Exception as exc:
+        return None, f"rembg_missing:{exc}"
+    try:
+        rgba = rembg_remove(body_pil.convert("RGB"))
+        if not isinstance(rgba, Image.Image):
+            rgba = Image.fromarray(np.asarray(rgba))
+        return np.asarray(rgba.convert("RGBA"))[:, :, 3], None
+    except Exception as exc:
+        return None, f"rembg_failed:{exc}"
+
+
+def _head_matte_mask(
+    body_pil: Image.Image,
+    cache_dir,
+    *,
+    face_box: FaceBox | None,
+    expand_px: int,
+    blur_px: int,
+    top_extend: float,
+    side_extend: float,
+    bot_extend: float,
+    hair_margin_frac: float = 0.08,
+) -> tuple[Image.Image | None, str | None]:
+    """Head mask that follows the REAL silhouette: ellipse AND person matte.
+
+    The plain ``ellipse`` backend is a geometric prior derived only from the
+    face box. Measured on a short-haired subject with a small face in a
+    full-body frame, it covers ~6.5x the face-box AREA and reaches ~1.3x
+    face-height above the face -- and for short hair essentially all of that
+    upper region is BACKGROUND, not hair.
+
+    That is not merely a compositing concern. ``crop_with_mask`` derives the
+    crop box from the mask, and the model regenerates everything inside it.
+    So the model is handed a large oval of sky, regenerates it (imperfectly,
+    producing a visible arc exactly on the mask boundary) and -- having been
+    asked to fill that space -- invents hair to occupy it. This is the
+    observed "ghost oval above the head + hair wings at ear level" failure.
+
+    Intersecting the ellipse with a foreground/person matte removes the
+    background from the mask entirely, so the model can only ever regenerate
+    actual head/hair pixels. The matte is dilated by ``hair_margin_frac`` of
+    face height first, so a donor hairstyle slightly larger than the target's
+    still has room to grow (an un-dilated intersection would pin the new hair
+    to the old silhouette exactly -- the failure HID names, arXiv 2503.00861).
+
+    Returns ``(mask, None)`` or ``(None, reason)`` so the caller can fall back
+    to the ellipse when no matting backend is installed.
+    """
+    if face_box is None:
+        return None, "head_matte_no_face_box"
+    alpha, reason = _person_matte(body_pil)
+    if alpha is None:
+        return None, reason
+
+    # Region of interest: the existing ellipse prior, UNBLURRED (we blur the
+    # intersection at the end -- blurring twice would re-grow a soft tail
+    # into the background we are trying to exclude).
+    ellipse, _ = _ellipse_mask(
+        body_pil,
+        cache_dir,
+        face_box=face_box,
+        expand_px=expand_px,
+        blur_px=0,
+        top_extend=top_extend,
+        side_extend=side_extend,
+        bot_extend=bot_extend,
+    )
+    ell = np.asarray(ellipse.convert("L"))
+
+    fh = max(1.0, float(face_box.height))
+    margin = int(round(max(0.0, hair_margin_frac) * fh))
+    if margin > 0:
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (margin * 2 + 1, margin * 2 + 1)
+        )
+        alpha = cv2.dilate(alpha, k)
+
+    mask = np.minimum(ell, alpha)
+
+    # The face core must always be editable even if the matte is imperfect
+    # (sunglasses, motion blur, low contrast against the background).
+    core = np.zeros_like(mask)
+    cx = int(0.5 * (face_box.x0 + face_box.x1))
+    cy = int(0.5 * (face_box.y0 + face_box.y1))
+    cv2.ellipse(
+        core,
+        (cx, cy),
+        (max(1, int(face_box.width * 0.50)), max(1, int(fh * 0.55))),
+        0, 0, 360, 255, -1,
+    )
+    mask = np.maximum(mask, core)
+
+    if float((mask > 16).mean()) < 0.0005:
+        return None, "head_matte_empty"
+    if blur_px > 0:
+        mask = cv2.GaussianBlur(mask, (blur_px * 2 + 1, blur_px * 2 + 1), 0)
+    return Image.fromarray(mask), None
+
+
 def build_head_hair_mask(
     body_pil: Image.Image,
     cache_dir,
@@ -135,6 +238,7 @@ def build_head_hair_mask(
     top_extend: float = 1.55,
     side_extend: float = 0.60,
     bot_extend: float = 0.40,
+    hair_margin_frac: float = 0.08,
 ) -> tuple[Image.Image, dict[str, Any]]:
     """
     Dispatch head+hair(+neck) mask by backend.
@@ -143,6 +247,24 @@ def build_head_hair_mask(
     """
     name = str(backend or "ellipse").strip().lower()
     info: dict[str, Any] = {"requested_backend": name}
+
+    if name in ("head_matte", "matte", "silhouette"):
+        mask, reason = _head_matte_mask(
+            body_pil,
+            cache_dir,
+            face_box=face_box,
+            expand_px=expand_px,
+            blur_px=blur_px,
+            top_extend=top_extend,
+            side_extend=side_extend,
+            bot_extend=bot_extend,
+            hair_margin_frac=hair_margin_frac,
+        )
+        if mask is not None:
+            info.update({"backend": "head_matte", "fallback_reason": None})
+            return mask, info
+        info["head_matte_skip"] = reason
+        name = "ellipse"  # fall through -- never fail a swap on a missing dep
 
     if name in ("sam2", "sam"):
         mask, reason = _try_sam2_mask(body_pil, face_box, blur_px=blur_px)
@@ -172,7 +294,12 @@ def build_head_hair_mask(
     )
     if info.get("requested_backend") not in ("ellipse", ""):
         meta["fallback_reason"] = (
-            info.get("sam_skip") or info.get("birefnet_skip") or "unknown"
+            info.get("head_matte_skip")
+            or info.get("sam_skip")
+            or info.get("birefnet_skip")
+            or "unknown"
         )
+        if info.get("head_matte_skip"):
+            meta["head_matte_skip"] = info["head_matte_skip"]
         meta["requested_backend"] = info["requested_backend"]
     return mask, meta

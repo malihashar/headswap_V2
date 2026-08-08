@@ -734,6 +734,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
             body_full,
             self.cache_dir,
             backend=str(self.cfg.get("head_mask_backend", "ellipse") or "ellipse"),
+            hair_margin_frac=float(
+                self.cfg.get("head_matte_hair_margin_frac", 0.08)
+            ),
             face_box=selected_face,
             expand_px=expand_px,
             blur_px=int(

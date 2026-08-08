@@ -169,6 +169,17 @@ if [[ "$DOWNLOAD_KREA2" -eq 1 ]]; then
   echo
 fi
 
+# head_matte mask backend (segmentation.py): intersects the geometric ellipse
+# with a real foreground matte so the head mask follows the actual silhouette
+# instead of enclosing background. Without rembg this silently degrades to the
+# plain ellipse, so install it here rather than leaving it to chance.
+# CPU onnxruntime is fine -- one matte per image on a ~1024px frame.
+echo "-> Installing rembg (head_matte mask backend)..."
+pip install -q rembg 2>&1 | tail -2 || echo "   WARN: rembg install failed; head_matte will fall back to ellipse"
+python -c "import rembg" 2>/dev/null \
+  && echo "   rembg OK" \
+  || echo "   WARN: rembg not importable; head_matte will fall back to ellipse"
+
 echo "Setup complete."
 echo "COMFYUI_PATH=$COMFYUI_PATH"
 echo "HEADSWAP_MODEL_STORE=$HEADSWAP_MODEL_STORE"
