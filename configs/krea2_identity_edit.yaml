@@ -248,9 +248,19 @@ full_frame_match_crop_identity: true
 # Use the same prompt builder as crop_stitch (_prompt_for_edit). Do not append
 # full_frame-only locality essays (those are a prompt divergence).
 full_frame_use_crop_prompt: true
-# Post-sample clamp on the full group frame can target the wrong face — OFF
-# until inference-path identity parity is proven.
-full_frame_clamp_head_scale: false
+# Post-sample clamp: if the generated head in `out` is taller than the
+# target's real detected face (from body_full) by more than
+# max_edited_head_height_ratio, shrink+recenter `out` about the detected
+# face center back toward target_edited_head_height_ratio. Uses the SAME
+# face-detection anchor (detect_best_face) as everything else in this
+# pipeline -- this is the existing, already-built mechanism for correcting
+# full_frame head scale/position, it just wasn't reachable for the
+# single-person full-body route (see the code comment at the call site).
+# Originally OFF because "the full GROUP frame can target the wrong face"
+# via detect_best_face's blind pick -- that risk is specifically a
+# multi-person (>1 face) concern and doesn't apply to the single-person
+# case this is now scoped to.
+full_frame_clamp_head_scale: true
 # Landmark Procrustes (rotation+uniform scale+translation) after full_frame
 # sample, before freeze. OFF by default — enable for A/B when head_to_body
 # scale ratio is still meaningfully off 1.0 after promoting full_frame.

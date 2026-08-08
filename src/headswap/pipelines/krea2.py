@@ -2121,6 +2121,58 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "verbose": verbose,
         }
 
+    def _maybe_clamp_full_frame_head_scale(
+        self, body_full: Image.Image, out: Image.Image
+    ) -> tuple[Image.Image, dict[str, Any] | None]:
+        """Correct full_frame head scale/position using the target's real face.
+
+        clamp_edited_head_scale detects the face in both the pristine
+        ``body_full`` (the geometric anchor) and the raw full_frame sample
+        ``out``, and -- only if the generated face is taller than the
+        target's real face by more than max_edited_head_height_ratio --
+        uniformly shrinks the whole ``out`` image about the generated face's
+        own center, then translates it so that (now-shrunk) center lands
+        exactly on the target's real face center. That single similarity
+        transform fixes scale AND position (both axes) together, anchored to
+        face detection the same way the rest of this pipeline is, and
+        BORDER_REPLICATE + a shrink-only clamp (0.55-1.0x) keeps it bounded.
+
+        Was gated ``if multi_person and do_clamp`` -- full_frame was
+        originally a multi-person-only feature, so that gate made sense
+        then. ``_resolve_body_route`` later added a single-person full-body
+        route to full_frame, but this gate was never updated, so the clamp
+        could never fire for exactly that (now primary) trigger case,
+        regardless of the ``full_frame_clamp_head_scale`` config flag.
+        ``detect_best_face``'s "could grab the wrong face" risk (the
+        original reason this defaulted off) only applies with >1 face in
+        frame -- moot for the single-person case this now covers, since
+        there's only one face to detect.
+
+        Returns ``(out, None)`` when the clamp is disabled or not needed
+        (no clamp_info to report); ``(possibly-clamped out, clamp_info)``
+        otherwise.
+        """
+        do_clamp = bool(
+            self.cfg.get("full_frame_clamp_head_scale", False)
+        ) and bool(self.cfg.get("clamp_edited_head_scale", True))
+        if not do_clamp:
+            return out, None
+        clamped, clamp_info = clamp_edited_head_scale(
+            body_full,
+            out,
+            self.cache_dir,
+            max_height_ratio=float(self.cfg.get("max_edited_head_height_ratio", 1.08)),
+            target_ratio=float(self.cfg.get("target_edited_head_height_ratio", 0.98)),
+        )
+        if clamp_info.get("clamped"):
+            print(
+                f"[krea2] full_frame clamped oversized head "
+                f"ratio {clamp_info['ratio_before']:.2f}→"
+                f"{clamp_info['ratio_after']:.2f} shrink={clamp_info['shrink']:.3f}",
+                flush=True,
+            )
+        return clamped, clamp_info
+
     def _maybe_procrustes_edited_crop(
         self,
         edited: Image.Image,
@@ -3585,33 +3637,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             out,
                             selected_face,
                         )
-                    do_clamp = bool(
-                        self.cfg.get(
-                            "full_frame_clamp_head_scale",
-                            False,
-                        )
-                    ) and bool(self.cfg.get("clamp_edited_head_scale", True))
-                    if multi_person and do_clamp:
-                        out, clamp_info = clamp_edited_head_scale(
-                            body_full,
-                            out,
-                            self.cache_dir,
-                            max_height_ratio=float(
-                                self.cfg.get("max_edited_head_height_ratio", 1.08)
-                            ),
-                            target_ratio=float(
-                                self.cfg.get("target_edited_head_height_ratio", 0.98)
-                            ),
-                        )
-                        if clamp_info.get("clamped"):
-                            import sys
-
-                            print(
-                                f"[krea2] full_frame clamped oversized head "
-                                f"ratio {clamp_info['ratio_before']:.2f}→"
-                                f"{clamp_info['ratio_after']:.2f}",
-                                flush=True,
-                            )
+                    out, clamp_info = self._maybe_clamp_full_frame_head_scale(
+                        body_full, out
+                    )
+                    if clamp_info is not None:
                         face_prep_diag["full_frame_clamp"] = clamp_info
                     # Landmark Procrustes (similarity): map generated face → original.
                     # Config-gated; apply before freeze so neighbors stay locked.

@@ -304,7 +304,7 @@ purely in mask shape and face-box source. This is reflected in §4 above.
 | # | Problem | Hypothesis | Test | Expected result | Actual result | Conclusion |
 |---|---|---|---|---|---|---|
 | 1 | Ghost/artifact around head | Two independently-detected, independently-shaped masks (pass 1 freeze vs pass 2 refine) create a non-coincident boundary in the same region | Make pass 2 reuse pass 1's exact face box and mask shape (top/side/bot/expand/blur) instead of re-detecting + using crop_stitch's defaults; fix pass 2's LAB `color_ref` from `out` to pristine `body_full` | Single coincident mask boundary; artifact/ghost/discoloration halo reduced or eliminated | **Implemented this round** (see below); GPU visual confirmation still needed | Pending user verification |
-| 2 | Head proportions/scale wrong | No scale anchor in full_frame's donor placement, and the one scale-clamp gate excludes the single-person case that triggers full_frame most often | Fix the `if multi_person and do_clamp` gate to also cover the single-person full-body-route case; A/B `full_frame_match_crop_identity=False` + `identity_scale_match=True` (activates the currently-dead `place_face_at_height_frac` branch) against the current default | Head/body proportion ratio measurably closer to 1.0 on a full-body test set | Not yet run | **Recommended next experiment** |
+| 2 | Head proportions/scale wrong | No scale anchor in full_frame's donor placement, and the one scale-clamp gate excludes the single-person case that triggers full_frame most often | Fix the `if multi_person and do_clamp` gate to also cover the single-person full-body-route case | Generated head shrinks+recenters onto the target's real detected face when oversized; scale/position ratio closer to 1.0 | **Implemented this round** (2026-08-07 follow-up): gate fixed, `full_frame_clamp_head_scale` flipped to `true`. Synthetic end-to-end test (`results/_head_scale_clamp_experiment/`, not committed): a 1.89x-oversized, off-center generated head clamped to ratio 1.00 and recentered on the target's face, then correctly freeze-composited (everything outside the mask restored from the pristine original). | GPU visual confirmation on the real desert photo still needed. `full_frame_match_crop_identity=False` A/B (the *generation-time* half of this problem -- donor reference conditioning still carries no target-scale signal) remains a follow-up if the post-hoc clamp alone isn't sufficient. |
 | 3 | Face quality gap vs crop_stitch | Confounded by LoRA choice (v1_2 vs v1_2_r64) and ref_boost (4.0 vs 3.5), not purely resolution | A/B `full_frame_identity_lora_name` forced to the same `r64` LoRA crop_stitch uses; isolate LoRA contribution from resolution contribution | Quantify how much of the quality gap is LoRA vs resolution | Not yet run | Recommended after #1/#2 are validated |
 | 4 | Missing visual evidence | `do_stitch` gate blocks full_frame's refine-pass debug frames from ever being saved | Extend the debug-save gate to `do_stitch or edit_mode == "full_frame"` | Next real GPU run with `save_debug=true` produces `debug_stitch_mask.png` etc. for the refine pass | **Implemented this round** | Enables experiments 1-3 to actually be visually verified next time |
 
@@ -358,11 +358,60 @@ visually) were implemented:
    frames -- these were silently discarded before.
 
 **Not implemented this round** (deferred per explicit "smallest change for
-the first experiment" instruction): the scale-anchor fix (§6 experiment 2),
-the LoRA-confound isolation (§6 experiment 3), and the larger
-refine-before-composite restructuring mentioned in §7.
+the first experiment" instruction): the LoRA-confound isolation (§6
+experiment 3), and the larger refine-before-composite restructuring
+mentioned in §7.
 
 **Validation status**: unit/logic-level verification only (no GPU
 available in this environment -- see the constraint noted at the top of
 this document). A real GPU run against the desert-photo test case is
 required to visually confirm this fix actually resolves the artifact.
+
+## 9. Follow-up round (2026-08-07): experiment #2, the scale/position clamp
+
+With the ghost fixed (confirmed by the user on a real render), the next
+reported symptom was exactly experiment #2 from §6: "head alignment and
+sizing are still incorrect." Implemented the smallest fix for it:
+
+- `_maybe_clamp_full_frame_head_scale` (extracted from inline code for
+  testability, mirroring the existing `_maybe_procrustes_edited_crop`
+  pattern): the `if multi_person and do_clamp:` gate is now just
+  `if do_clamp:`. `full_frame_clamp_head_scale` flipped to `true` in
+  `configs/krea2_identity_edit.yaml`.
+- Mechanism (pre-existing, unmodified): `clamp_edited_head_scale`
+  (`preprocess.py:157`) detects the face on both the pristine `body_full`
+  (the geometric anchor -- exactly what the user asked to use) and the raw
+  full_frame sample `out`. If the generated face is taller than the
+  target's real face by more than `max_edited_head_height_ratio` (1.08), it
+  shrinks the whole `out` image about the generated face's own center and
+  translates it so that center lands exactly on the target's real face
+  center -- one bounded (shrink-only, 0.55-1.0x), rotation/shear-free
+  similarity transform fixing scale AND position (both axes) together. This
+  runs *before* the freeze composite, so only the shrunk+recentered head
+  region survives into the final image; everything outside the mask is
+  still restored from the pristine original regardless.
+- Why this was previously off: the yaml comment cited `detect_best_face`
+  possibly grabbing the wrong face "on the full group frame" -- a
+  multi-person (>1 face) risk. The gate this round only newly activates the
+  clamp for the `multi_person=False` case, where that risk doesn't apply
+  (there's only one face to detect). Behavior for actual multi-person
+  full_frame runs is unchanged.
+
+**Validated**: 4 new unit tests (`tests/test_full_frame_head_scale_clamp.py`)
+plus a synthetic end-to-end experiment (mocked face detection, real
+`_maybe_clamp_full_frame_head_scale` + `_build_full_frame_freeze_mask` +
+`_freeze_full_frame_outside_selected` code, saved to
+`results/_head_scale_clamp_experiment/`, not committed): a 1.89x-oversized,
+off-center generated head was clamped to ratio 1.00 and correctly
+recentered on the target's face position. No GPU available to confirm on
+the actual photo.
+
+**Not addressed**: the *generation-time* half of the scale problem --
+`_build_full_frame_inputs`'s donor placement (`resize_contain`) still
+carries no target-scale signal into the raw Krea2 sample itself (§2.2,
+§6 experiment 2's second half). This clamp is a post-hoc correction, not a
+fix to the underlying conditioning; if the model drifts scale
+*consistently* rather than occasionally, the clamp's `0.55` minimum-shrink
+floor could still leave a visibly-too-large head in extreme cases. Revisit
+`full_frame_match_crop_identity=False` (activating the currently-dead
+`place_face_at_height_frac` branch) if the clamp alone proves insufficient.
