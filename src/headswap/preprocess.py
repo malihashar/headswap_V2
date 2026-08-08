@@ -161,10 +161,19 @@ def clamp_edited_head_scale(
     *,
     max_height_ratio: float = 1.08,
     target_ratio: float = 0.98,
+    min_height_ratio: float = 0.92,
+    max_grow: float = 1.45,
 ) -> tuple[Image.Image, dict[str, float]]:
     """
-    If the face in ``edited`` is larger than in ``original_scene``, shrink the
-    *edited* image about the face center (cv2 warp, border replicate).
+    Rescale ``edited`` about the face center so its face height matches
+    ``original_scene``'s, when it drifts outside
+    [``min_height_ratio``, ``max_height_ratio``] (cv2 warp, border replicate).
+
+    Corrects BOTH directions: a generated head that came out too large
+    (ratio > max_height_ratio) is shrunk, and one that came out too small
+    (ratio < min_height_ratio) is grown, up to ``max_grow``. Growing was
+    previously impossible (the scale factor was hard-clamped to <= 1.0), so
+    an undersized generated head silently kept its wrong proportions.
 
     IMPORTANT: never paste onto ``original_scene`` — that re-exposes the old
     face around a shrunk swap (double-face / ghosting in group shots).
@@ -183,12 +192,13 @@ def clamp_edited_head_scale(
         return edited, info
     ratio = float(fe.height) / float(fo.height)
     info["ratio_before"] = ratio
-    if ratio <= float(max_height_ratio):
+    if float(min_height_ratio) <= ratio <= float(max_height_ratio):
         info["ratio_after"] = ratio
         return edited, info
 
     shrink = (float(fo.height) * float(target_ratio)) / float(fe.height)
-    shrink = float(min(1.0, max(0.55, shrink)))
+    # Bounded both ways: shrink an oversized head, grow an undersized one.
+    shrink = float(min(float(max_grow), max(0.55, shrink)))
     info["shrink"] = shrink
     info["clamped"] = 1.0
 

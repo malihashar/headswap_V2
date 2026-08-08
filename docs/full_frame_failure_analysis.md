@@ -415,3 +415,140 @@ fix to the underlying conditioning; if the model drifts scale
 floor could still leave a visibly-too-large head in extreme cases. Revisit
 `full_frame_match_crop_identity=False` (activating the currently-dead
 `place_face_at_height_frac` branch) if the clamp alone proves insufficient.
+
+## 10. Architecture review round (2026-08-07, second follow-up): the refine/freeze ordering itself was the bug
+
+After §9 shipped, a real render still showed a faint ghost/halo above the
+hair, plus "head not looking straight." Per explicit instruction, this
+round did NOT default to another parameter patch: it re-investigated
+whether **full_frame generation -> crop/refine -> stitch is the right
+architecture at all**, using one independent agent in parallel with the
+main investigation (both converged on the same conclusion; see the exact
+task/report in this session's transcript if needed, not reproduced here in
+full).
+
+### Conclusion
+
+**Full_frame + a resolution-boosted local refine pass is NOT the wrong
+strategy.** Both investigations agree: whole-scene generation for body
+proportions, plus a dedicated high-resolution pass for face quality, is
+architecturally sound and is what routing (§0/`_resolve_body_route`,
+already implemented in an earlier session) correctly selects for
+full-body shots. **The bug was specifically in *when* and *how many times*
+compositing happened, not in the two-pass strategy itself.**
+
+Two compounding, code-confirmed mechanisms, both introduced or exposed by
+this round's own earlier fixes (§9's clamp, and the "not yet re-examined
+together" combination of clamp + the §8 refine unification):
+
+1. **Clamp/freeze-mask boundary mismatch.** `_maybe_clamp_full_frame_head_scale`
+   (added in §9) warps the ENTIRE raw `out` image -- shoulders, hairline,
+   background included -- via a similarity transform about the generated
+   face's own center (`clamp_edited_head_scale`, `preprocess.py:157-220`,
+   `cv2.warpAffine(arr, m, (w,h), borderMode=cv2.BORDER_REPLICATE)` over the
+   full array). The freeze mask, however, is a static ellipse built once
+   from `body_full`'s own face detection *before sampling even runs*
+   (`_build_full_frame_freeze_mask`, called from `_build_full_frame_inputs`)
+   and is never recomputed or re-registered against this warp. When the
+   clamp fires, hair/background content shifts relative to where it was
+   originally generated, but the mask boundary that decides what shows
+   through does not move with it -- producing a boundary artifact right at
+   the mask edge, i.e. near the hairline. This is a mechanism distinct from
+   (and in addition to) the mask-*shape*-mismatch already fixed in §8/commit
+   `43ae7ae`.
+2. **Refine's own composite still didn't match the freeze's.** Even after
+   §8 unified pass-1/pass-2 mask *geometry* (top/side/bot/expand/blur), the
+   refine pass's `_stitch_edited` call (`multi_person=False`, hardcoded)
+   fell through to crop_stitch's generic composite defaults --
+   `stitch_feather_px: 10`, `post_color_match_strength: 0.35`
+   (`configs/krea2_identity_edit.yaml`) -- instead of the freeze's own
+   `full_frame_freeze_feather_px: 30`, `full_frame_post_color_match_strength: 0.15`.
+   Two independently-parameterized soft composites (different Gaussian
+   kernel radius, different LAB pull strength) landing on the *same* mask
+   shape, moments apart, is still a plausible source of a faint double-ring
+   halo -- §8 fixed the mask's shape but not its blend parameters.
+
+Both mechanisms share a root cause: **the pipeline composites against the
+pristine original TWICE** (once in the freeze, once inside refine's own
+stitch) with a whole-image warp (the clamp) sandwiched in between one of
+them and a stale mask. Every extra composite-against-pristine-original is
+another opportunity for a seam; every step that runs between mask-build-time
+and mask-use-time without updating the mask is a registration risk.
+
+### Recommended (and implemented) architecture: collapse to one seam
+
+Reorder to: **sample -> clamp -> [optional procrustes] -> refine (on the
+raw/clamped, NOT-yet-frozen sample) -> ONE freeze composite at the very
+end.** Verified structurally safe by re-reading `_refine_full_frame_face`
+in full: it already reuses pass-1's `selected_face`/`all_faces` (no
+re-detection on `out`, fixed in §8), builds its crop/mask purely from that
+face box geometrically (no pixel dependency on `out`'s content), and its
+own `_stitch_edited` call already targets `color_ref=body_full` (the
+pristine original, fixed in §8) -- nothing in it assumes `out` is
+post-freeze. The only semantic effect of reordering is that the small
+amount of scene context around the refine crop comes from the raw/clamped
+full_frame sample instead of the freeze-composited one; since a single
+freeze still runs afterward and restores true pristine pixels everywhere
+outside the final mask regardless, this doesn't change what the user sees
+outside the head region.
+
+This directly fixes both mechanisms above by construction:
+- Only one boundary against the pristine original exists (the final
+  freeze) -- one mask, one feather radius, one LAB strength, one detection.
+  The clamp's whole-image warp is only ever "seen" by a mask once, at the
+  very end, on whatever the fully-generated (clamped + refined) content
+  actually looks like -- no intermediate freeze-then-reclamp mismatch.
+- Refine's own blend against the surrounding raw full_frame content is now
+  generated-vs-generated (same "look"/lighting family), not
+  generated-vs-pristine-original -- a much lower-risk seam than the one it
+  used to create.
+
+### What was NOT changed
+
+- `_maybe_clamp_full_frame_head_scale` / `clamp_edited_head_scale` itself:
+  unmodified. The reorder makes its output land inside a single downstream
+  freeze instead of an intermediate one, which is sufficient to fix the
+  boundary-mismatch mechanism without touching the clamp's own (already
+  bounded, already tested) math.
+- The *generation-time* scale-anchor gap (§9's "not addressed" item,
+  `full_frame_match_crop_identity`) -- still open, still a separate,
+  complementary lever if the clamp+reorder combination proves insufficient
+  on real photos.
+- Resolution (`full_frame_target_mp`/`max_dim`) and the LoRA/`ref_boost`
+  confound between full_frame and crop_stitch (§6 experiment 3) -- both
+  still open, both explicitly out of scope per "smallest sensible version
+  of that solution."
+- "Head not looking straight": no new smoking gun found beyond what §prompt-hint
+  already addresses. Two live-but-unconfirmed candidates remain: `ref_boost`
+  (an attention logit bias on the donor reference, `full_frame`'s default
+  4.0 vs `crop_stitch`'s 3.5) plausibly transferring donor pose/gaze
+  alongside identity, and the fact that full_frame's first pass and the
+  refine pass are each an independent stochastic Krea2 sample (both do
+  receive the same direction-hint-augmented prompt, so this isn't a blind
+  second guess, but it is still a second independent sampling opportunity
+  for drift). Neither was touched this round -- flagged for a future round
+  if the ghost/proportions fix doesn't also resolve the direction
+  complaint.
+
+### Implementation
+
+- `_stitch_edited` gained two optional overrides,
+  `feather_px_override`/`post_color_match_strength_override` (default
+  `None` = unchanged behavior for every other caller, including
+  crop_stitch's normal path).
+- `_refine_full_frame_face`'s own `_stitch_edited` call now passes
+  `feather_px_override=full_frame_freeze_feather_px` and
+  `post_color_match_strength_override=0.0` -- its blend now matches the
+  freeze's feather radius and does no LAB match of its own.
+- The refine call was moved from after the freeze block to between the
+  procrustes step and the freeze block inside `_run_after_models`'s
+  `elif edit_mode == "full_frame"` branch; the freeze composite is now the
+  last step before `_relock_head_direction`.
+
+**Validated**: 3 new unit tests
+(`tests/test_full_frame_single_seam_reorder.py`) covering the
+`_stitch_edited` override plumbing and `_refine_full_frame_face`'s call
+contract, plus the full existing test suite (193 passed, only the 2
+pre-existing unrelated failures noted at the top of this document). No GPU
+available to confirm the reorder actually removes the visible ghost on a
+real photo -- that confirmation is still owed.

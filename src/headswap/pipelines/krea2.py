@@ -1477,22 +1477,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     flush=True,
                 )
 
+        # Reordered architecture (see docs/full_frame_failure_analysis.md §10):
+        # this refine pass now runs BEFORE the single freeze composite, on the
+        # raw/clamped full_frame sample -- `out` here is NOT yet frozen against
+        # body_full. So this blend is generated-vs-generated (this refined crop
+        # vs. pass 1's raw full_frame content), not generated-vs-pristine.
+        # Color/feather correction toward the true original happens exactly
+        # ONCE, in the single freeze composite that runs after this returns --
+        # doing a second, independently-parameterized LAB pull here (as before)
+        # stacked a second soft-composite boundary with a DIFFERENT feather
+        # radius (10px vs the freeze's 30px) and strength (0.35 vs 0.15) on
+        # top of the freeze's, which is what produced the residual ghost/halo
+        # even after pass-1/pass-2 mask geometry was unified. Skip LAB here
+        # entirely (strength=0) and match the freeze's own feather radius so
+        # there is exactly one seam, one feather radius, one LAB match, run
+        # once, at the end.
         refined = self._stitch_edited(
             out,
             edited_for_stitch,
             built["mask"],
             built["box"],
             built["crop_content_box"],
-            # Target the PRISTINE original, not `out` (pass 1's own already
-            # color-matched output) -- both passes' LAB corrections should
-            # pull toward the same ground truth, not compound toward each
-            # other (pass 1: strength 0.15 -> body_full; pass 2 previously:
-            # strength 0.35 -> out, i.e. partly toward pass 1's own pull).
             color_ref=body_full,
             multi_person=False,
             original_scene=refine_scene,
             debug_stages=stitch_debug,
             skip_head_clamp=procrustes_applied,
+            feather_px_override=int(self.cfg.get("full_frame_freeze_feather_px", 30)),
+            post_color_match_strength_override=0.0,
         )
         diag.update(
             {
@@ -1906,10 +1918,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
         compile_mode = str(self.cfg.get("torch_compile_mode", "reduce-overhead"))
         used_ref_boost_mask = False
 
-        lora_name = self.cfg.get("identity_lora_name", "krea2_identity_edit_v1_2_r64.safetensors")
-        _ff_lora = self.cfg.get("full_frame_identity_lora_name")
-        if _ff_lora and _ff_mode in ("full_frame", "fullframe", "full"):
-            lora_name = str(_ff_lora)
+        # Report the LoRA actually LOADED in this bundle, not what the current
+        # cfg mode would select: the refine pass flips multi_person_edit_mode
+        # to "crop_stitch" for sample-time knobs (ref_boost/grounding_px) but
+        # reuses pass 1's already-loaded weights, so a cfg-derived name here
+        # misreported which model was really sampling.
+        lora_name = (bundle.get("load_meta") or {}).get("loras_loaded")
 
         import sys
         print(
@@ -2163,6 +2177,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
             self.cache_dir,
             max_height_ratio=float(self.cfg.get("max_edited_head_height_ratio", 1.08)),
             target_ratio=float(self.cfg.get("target_edited_head_height_ratio", 0.98)),
+            min_height_ratio=float(self.cfg.get("min_edited_head_height_ratio", 0.92)),
+            max_grow=float(self.cfg.get("max_edited_head_grow", 1.45)),
         )
         if clamp_info.get("clamped"):
             print(
@@ -2279,6 +2295,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
         original_scene: Image.Image | None = None,
         debug_stages: dict[str, Image.Image] | None = None,
         skip_head_clamp: bool = False,
+        feather_px_override: int | None = None,
+        post_color_match_strength_override: float | None = None,
     ) -> Image.Image:
         edited_crop = edited
         if crop_content_box is not None:
@@ -2351,6 +2369,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
         else:
             feather = int(self.cfg.get("stitch_feather_px", 10))
             post_match = float(self.cfg.get("post_color_match_strength", 0.35) or 0.0)
+        if feather_px_override is not None:
+            feather = int(feather_px_override)
+        if post_color_match_strength_override is not None:
+            post_match = float(post_color_match_strength_override)
         stitched = feathered_soft_composite(
             canvas,
             edited_crop,
@@ -3643,7 +3665,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     if clamp_info is not None:
                         face_prep_diag["full_frame_clamp"] = clamp_info
                     # Landmark Procrustes (similarity): map generated face → original.
-                    # Config-gated; apply before freeze so neighbors stay locked.
+                    # Config-gated; apply before refine/freeze so neighbors stay locked.
                     do_procrustes = bool(
                         self.cfg.get("full_frame_procrustes_align", False)
                     )
@@ -3670,7 +3692,46 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 f"{proc_info.get('procrustes_reason')}",
                                 flush=True,
                             )
-                    # Freeze outside selected face (post-sample locality only).
+                    # Resolution-boost refine BEFORE the single freeze composite
+                    # (see docs/full_frame_failure_analysis.md §10). Previously
+                    # this ran AFTER the freeze, on the already-composited `out`,
+                    # meaning the freeze and the refine's own stitch each did an
+                    # independently-parameterized soft-composite + LAB match in
+                    # the same head/hair region -- two seams, two feather radii,
+                    # two LAB strengths. Running it here means `out` is still the
+                    # raw/clamped (not yet frozen) full_frame sample: refine's own
+                    # blend is generated-vs-generated (low risk), and there is
+                    # exactly one generated-vs-pristine-original seam left, in the
+                    # single freeze composite below.
+                    out, full_frame_refine_diag = self._refine_full_frame_face(
+                        out,
+                        face_crop,
+                        body_full=body_full,
+                        rt=rt,
+                        bundle=bundle,
+                        edit_cache_info=edit_cache_info,
+                        div_by=div_by,
+                        timings=timings,
+                        base_seed=base_seed,
+                        prompt=prompt,
+                        out_dir=out_dir,
+                        stitch_debug=stitch_debug,
+                        selected_face=selected_face,
+                        all_faces=all_faces,
+                    )
+                    face_prep_diag["full_frame_face_refine"] = full_frame_refine_diag
+                    # Re-check scale AFTER refine: the refine pass regenerates
+                    # the whole head region from the identity ref, so it can
+                    # re-inflate (or shrink) the head that the pre-refine clamp
+                    # just corrected. This is the only scale check downstream of
+                    # the generation that actually produces the final head.
+                    out, clamp_info_post = self._maybe_clamp_full_frame_head_scale(
+                        body_full, out
+                    )
+                    if clamp_info_post is not None:
+                        face_prep_diag["full_frame_clamp_post_refine"] = clamp_info_post
+                    # Freeze outside selected face (post-sample locality only) --
+                    # the ONE composite against the pristine original.
                     _ff_post_match = float(
                         self.cfg.get("full_frame_post_color_match_strength", 0.45) or 0.0
                     )
@@ -3710,24 +3771,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             f"lab_strength={_ff_post_match} feather_px=N/A (no freeze_mask)",
                             flush=True,
                         )
-            if edit_mode == "full_frame" and body_full is not None:
-                out, full_frame_refine_diag = self._refine_full_frame_face(
-                    out,
-                    face_crop,
-                    body_full=body_full,
-                    rt=rt,
-                    bundle=bundle,
-                    edit_cache_info=edit_cache_info,
-                    div_by=div_by,
-                    timings=timings,
-                    base_seed=base_seed,
-                    prompt=prompt,
-                    out_dir=out_dir,
-                    stitch_debug=stitch_debug,
-                    selected_face=selected_face,
-                    all_faces=all_faces,
-                )
-                face_prep_diag["full_frame_face_refine"] = full_frame_refine_diag
             if (do_stitch or edit_mode == "full_frame") and body_full is not None and out is not None:
                 out, pose_relock_diag = self._relock_head_direction(
                     out, body_full, selected_face

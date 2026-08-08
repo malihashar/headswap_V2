@@ -28,12 +28,24 @@ def _load_ab():
 
 
 def test_production_config_stays_crop_stitch():
+    """The DEFAULT multi-person mode is still crop_stitch (full_frame is
+    reached via the body/lighting routes, not as the base default).
+
+    The full_frame_* value assertions this test used to make were a stale
+    A/B-era guard: full_frame_identity_lora_name / full_frame_ref_boost have
+    been set (not null) since the lighting-route work, and target_mp was
+    raised 1.25 -> 1.5 for face quality. Assert the invariant that actually
+    matters (the base mode) plus that full_frame stays inside its own
+    documented megapixel band.
+    """
     cfg = yaml.safe_load(CFG_PATH.read_text())
     assert cfg["multi_person_edit_mode"] == "crop_stitch"
-    assert cfg.get("full_frame_target_mp") == 1.25
-    assert cfg.get("full_frame_identity_lora_name") in (None, "null")
-    assert cfg.get("full_frame_ref_boost") in (None, "null")
     assert cfg.get("preserve_expression") is True
+    assert (
+        cfg["full_frame_min_mp"]
+        <= cfg["full_frame_target_mp"]
+        <= cfg["full_frame_max_mp"]
+    )
 
 
 def test_resize_to_megapixels_downscales_large_into_band():
