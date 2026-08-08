@@ -663,8 +663,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
         crop_pad: int,
         all_faces: list[FaceBox] | None = None,
         isolate_selected: bool = False,
+        blur_px: int | None = None,
     ) -> dict[str, Any]:
-        """Crop+mask one body face and size the identity reference to match."""
+        """Crop+mask one body face and size the identity reference to match.
+
+        ``blur_px`` overrides the mask's Gaussian blur radius (default:
+        ``mask_blur_px`` from config). Callers that need this crop's mask to
+        share an exact shape with a mask built elsewhere (e.g. the full_frame
+        refine pass matching the first pass's freeze mask) should pass the
+        same blur_px the other mask used, not just the same extend/expand
+        values -- blur radius is part of the mask's effective footprint too.
+        """
         all_faces = list(all_faces or [])
         multi_person = len(all_faces) > 1
         spp = self._single_person_parity()
@@ -674,7 +683,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
             backend=str(self.cfg.get("head_mask_backend", "ellipse") or "ellipse"),
             face_box=selected_face,
             expand_px=expand_px,
-            blur_px=int(self.cfg.get("mask_blur_px", 12)),
+            blur_px=int(
+                blur_px if blur_px is not None else self.cfg.get("mask_blur_px", 12)
+            ),
             top_extend=top_ext,
             side_extend=side_ext,
             bot_extend=bot_ext,
@@ -1280,6 +1291,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
         prompt: str,
         out_dir: Path | None,
         stitch_debug: dict[str, Image.Image],
+        selected_face: FaceBox | None = None,
+        all_faces: list[FaceBox] | None = None,
     ) -> tuple[Image.Image, dict[str, Any]]:
         """Crop_stitch-quality face refine pass on top of a full_frame result.
 
@@ -1288,42 +1301,61 @@ class Krea2IdentityEditPipeline(BasePipeline):
         is rendered (and grounded) at a fraction of crop_stitch's effective
         resolution -- e.g. a full-body photo with face_height_frac=0.12 in a
         ~1.25MP scene renders the face at roughly 1/3 the pixel height a
-        768px head crop gets. This second pass re-detects the (already
-        proportion-correct) head in ``out``, crops+masks it exactly like the
-        normal single-person crop_stitch path, re-samples just that region at
-        native crop_stitch resolution/grounding, and stitches it back with
-        the same feathered composite + LAB match crop_stitch already uses --
-        so only pixels inside the head+hair mask can change; body/limb
-        geometry from the full_frame pass is untouched by construction.
+        768px head crop gets. This second pass crops+masks the head, re-
+        samples just that region at native crop_stitch resolution/grounding,
+        and stitches it back so only pixels inside the head+hair mask can
+        change; body/limb geometry from the full_frame pass is untouched by
+        construction.
 
-        When ``full_frame_face_refine_procrustes`` is on (default), the
-        freshly re-sampled head crop is also landmark-aligned onto the
-        ORIGINAL, pristine ``body_full`` (not ``out``, which may itself carry
-        gaze/pose drift from the first full_frame pass) via
-        ``procrustes_align_edited_crop_to_body_box`` -- the same
+        Mask/face-box source (see docs/full_frame_failure_analysis.md §2.1):
+        this reuses the SAME ``selected_face``/``all_faces`` the first
+        (freeze-composite) pass detected on the pristine ``body_full``, and
+        builds its mask with the SAME ``full_frame_mask_*`` extend/expand/
+        blur parameters that pass's ``_build_full_frame_freeze_mask`` used
+        -- not a fresh detection on the already-generated ``out``, and not
+        crop_stitch's own (differently-shaped) ``mask_*`` defaults. Two
+        independently-detected, independently-shaped masks landing in
+        roughly the same head/hair region was the highest-confidence,
+        most-convergent explanation the investigation found for the
+        persistent ghost/halo artifact: the ring between the two masks'
+        extents only ever got one pass's edit, feathered at a different
+        radius, from a possibly different face-box center. Sharing one
+        face box and one mask shape means the two composites share one
+        boundary instead of two. Falls back to a fresh detection on ``out``
+        only if no ``selected_face`` is supplied (defensive/back-compat).
+
+        When ``full_frame_face_refine_procrustes`` is on (off by default,
+        see yaml comment -- an earlier related fix, kept available but not
+        the primary lever here), the freshly re-sampled head crop is also
+        landmark-aligned onto ``body_full`` via
+        ``procrustes_align_edited_crop_to_body_box``, the same
         content-local-space, inlier/residual-checked correction crop_stitch
-        already uses via ``enable_procrustes_correction``, applied here to
-        the small head crop *before* it is stitched in. Unlike a whole-image
-        pose warp, this can only ever move pixels that started out inside the
-        tight head crop, so it cannot drag in distant content (hair, body,
-        background) the way warping the whole composited frame can.
+        already uses via ``enable_procrustes_correction``.
         """
         diag: dict[str, Any] = {"applied": False}
         if not bool(self.cfg.get("full_frame_face_refine", True)):
             diag["reason"] = "disabled"
             return out, diag
 
-        rgb = pil_to_rgb_np(out)
-        selected, faces = select_face_box(
-            rgb,
-            self.cache_dir,
-            index=int(self.cfg.get("body_face_index", 0) or 0),
-            policy=str(self.cfg.get("body_face_policy", "largest") or "largest"),
-        )
+        selected = selected_face
+        faces = list(all_faces or ([selected_face] if selected_face is not None else []))
+        diag["reused_pass1_face_box"] = selected is not None
+        if selected is None:
+            rgb = pil_to_rgb_np(out)
+            selected, faces = select_face_box(
+                rgb,
+                self.cache_dir,
+                index=int(self.cfg.get("body_face_index", 0) or 0),
+                policy=str(self.cfg.get("body_face_policy", "largest") or "largest"),
+            )
         if selected is None:
             diag["reason"] = "no_face_on_full_frame_output"
             return out, diag
 
+        # crop_pad has no equivalent in _build_full_frame_freeze_mask (that
+        # mask isn't crop-windowed), so keep sourcing it from the normal
+        # crop_stitch flag resolution -- only the mask SHAPE itself needs to
+        # match pass 1, not the unrelated crop padding.
         flags = self._tight_crop_flags(out, selected, faces)
         built = self._build_scene_person(
             out,
@@ -1331,14 +1363,23 @@ class Krea2IdentityEditPipeline(BasePipeline):
             selected,
             div_by=div_by,
             use_tight=False,
-            top_ext=float(flags["top_ext"]),
-            side_ext=float(flags["side_ext"]),
-            bot_ext=float(flags["bot_ext"]),
-            expand_px=int(flags["expand_px"]),
+            # SAME mask geometry _build_full_frame_freeze_mask used for pass 1
+            # (not _tight_crop_flags'/crop_stitch's own mask_* defaults) so
+            # the two composites share one boundary. See docstring above.
+            top_ext=float(
+                self.cfg.get(
+                    "full_frame_mask_top_extend", self.cfg.get("mask_top_extend", 1.55)
+                )
+            ),
+            side_ext=float(self.cfg.get("full_frame_mask_side_extend", 0.42)),
+            bot_ext=float(self.cfg.get("full_frame_mask_bot_extend", 0.40)),
+            expand_px=int(self.cfg.get("full_frame_mask_expand_px", 12)),
+            blur_px=int(self.cfg.get("full_frame_mask_blur_px", 24)),
             crop_pad=int(flags["crop_pad"]),
             all_faces=faces,
             isolate_selected=False,
         )
+        diag["mask_geometry_source"] = "full_frame_pass1_params"
         refine_scene = built["scene"]
         refine_face_h = float(selected.height)
         crop_box = built["box"]
@@ -1442,7 +1483,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
             built["mask"],
             built["box"],
             built["crop_content_box"],
-            color_ref=out,
+            # Target the PRISTINE original, not `out` (pass 1's own already
+            # color-matched output) -- both passes' LAB corrections should
+            # pull toward the same ground truth, not compound toward each
+            # other (pass 1: strength 0.15 -> body_full; pass 2 previously:
+            # strength 0.35 -> out, i.e. partly toward pass 1's own pull).
+            color_ref=body_full,
             multi_person=False,
             original_scene=refine_scene,
             debug_stages=stitch_debug,
@@ -3649,6 +3695,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     prompt=prompt,
                     out_dir=out_dir,
                     stitch_debug=stitch_debug,
+                    selected_face=selected_face,
+                    all_faces=all_faces,
                 )
                 face_prep_diag["full_frame_face_refine"] = full_frame_refine_diag
             if (do_stitch or edit_mode == "full_frame") and body_full is not None and out is not None:
@@ -3670,7 +3718,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     debug_imgs["debug_body"] = body_full
                 if mask is not None:
                     debug_imgs["debug_mask"] = mask
-                if do_stitch:
+                # `do_stitch` is hardcoded False for edit_mode=="full_frame" (that
+                # path composites via _freeze_full_frame_outside_selected, not
+                # _stitch_edited) -- but full_frame's own refine pass DOES call
+                # _stitch_edited internally and populates this same stitch_debug
+                # dict (stitch_mask, composite_before_lab, composite_after_lab).
+                # Without also checking edit_mode here, those refine-pass frames
+                # were silently discarded even with save_debug=true -- promote
+                # them too so a real run can actually be visually inspected.
+                if do_stitch or edit_mode == "full_frame":
                     debug_imgs["debug_crop"] = scene
                     debug_imgs["debug_edited_crop"] = sample_meta["edited"]
                     debug_imgs.update(
