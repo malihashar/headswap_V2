@@ -476,3 +476,16 @@ face_top_pad: 0.70
 face_bot_pad: 0.02
 include_shoulders: false
 tight_identity_crop: true
+
+# --- EXPERIMENT E1: sampling-time containment (OFF by default) ---
+# When true AND edit_mode=crop_stitch, the sampler is seeded with the ENCODED
+# scene latent and the existing stitch mask is attached as `noise_mask`, so
+# ComfyUI re-pins every latent outside the mask to the source at each step
+# (comfy/samplers.py:641). Verified safe at denoise=1.0: Krea2 is
+# ModelType.FLUX, so CONST.noise_scaling multiplies latent_image by
+# (1 - sigma) = 0 at sigma_max -- the starting noise is unchanged. Reuses the
+# existing mask; changes no other geometry, denoise, or blending.
+# Known risk: distilled/Turbo LoRAs have been reported to make noise_mask a
+# silent no-op on other flow DiTs. If the output is identical to the input,
+# that is the cause -- not the wiring.
+sampling_containment: false

@@ -42,6 +42,7 @@ from headswap.preprocess import (
     clamp_edited_head_scale,
     crop_face_reference,
     crop_with_mask,
+    detect_best_face,
     dilate_mask,
     ensure_selected_face_mask_coverage,
     estimate_head_direction_label,
@@ -634,6 +635,55 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 self.cfg.get("isolate_mask_expand_px", max(expand_px, 22))
             )
             crop_pad = int(self.cfg.get("isolate_crop_pad", crop_pad))
+
+        # --- Scale-invariant head geometry -------------------------------
+        # The mask ellipse is PROPORTIONAL to face size (top/side/bot_extend
+        # are multiples of face w/h), but expand_px / blur_px / crop_pad /
+        # stitch_feather_px are ABSOLUTE PIXELS. That silently breaks when
+        # the face is small in frame: at body_full=1024, 18px expand + 12px
+        # blur is 7.3% of a 410px portrait face but 24.4% of a 123px
+        # full-body face -- the mask balloons ~3.3x more, relative to the
+        # head, for exactly the case that fails.
+        #
+        # This is NOT only a compositing concern. `crop_with_mask` derives
+        # the CROP BOX from `mask_bbox`, so the mask directly determines the
+        # image Krea2 receives. Measured with this code (1024px body_full):
+        #   portrait   -> head fills 58.2% of the crop the model sees
+        #   full-body  -> head fills 28.4% of the crop the model sees
+        # while the donor reference is resize_contain'd to fill ~100% of the
+        # canvas in BOTH cases. The model is shown a head occupying a third
+        # of the frame next to a donor filling all of it, and resolves that
+        # mismatch by generating an oversized head/hair -- the exact
+        # reported failure. Fixing the mask alone would not have helped;
+        # the framing handed to the model is what has to match.
+        #
+        # Fix: scale the absolute-pixel terms by face height so a
+        # small-in-frame face gets the same RELATIVE treatment as a
+        # portrait. Capped at 1.0 (scale DOWN only) so the known-good
+        # portrait/close-up paths stay bit-identical -- this can only ever
+        # change the small-face case that is currently broken.
+        geom_scale = 1.0
+        if bool(self.cfg.get("head_geometry_scale_invariant", True)) and (
+            selected_face is not None
+        ):
+            ref_face_px = float(
+                self.cfg.get("head_geometry_reference_face_px", 410.0) or 410.0
+            )
+            if ref_face_px > 0:
+                geom_scale = min(
+                    1.0, float(selected_face.height) / ref_face_px
+                )
+                geom_scale = max(
+                    float(self.cfg.get("head_geometry_min_scale", 0.25)),
+                    geom_scale,
+                )
+        blur_px = int(self.cfg.get("mask_blur_px", 12))
+        stitch_feather_px = int(self.cfg.get("stitch_feather_px", 10))
+        if geom_scale < 1.0:
+            expand_px = max(2, int(round(expand_px * geom_scale)))
+            crop_pad = max(2, int(round(crop_pad * geom_scale)))
+            blur_px = max(1, int(round(blur_px * geom_scale)))
+            stitch_feather_px = max(1, int(round(stitch_feather_px * geom_scale)))
         return {
             "multi_person": multi_person,
             "face_frac": face_frac,
@@ -646,6 +696,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "bot_ext": bot_ext,
             "expand_px": expand_px,
             "crop_pad": crop_pad,
+            "blur_px": blur_px,
+            "stitch_feather_px": stitch_feather_px,
+            "geom_scale": round(geom_scale, 4),
         }
 
     def _build_scene_person(
@@ -816,21 +869,118 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # Match donor face-to-canvas ratio to measured scene face height.
         # Allowed under SPP (krea2_crop) for oversized-head A/B — gated only by
         # identity_scale_match + multi/isolate, not by single_person_parity.
-        # Also on for the single-person full-body route (crop_stitch_clamp_
-        # head_scale, set only by _resolve_body_route when a full body was
-        # actually detected): that route already computes face_h_frac_scene
-        # above but previously discarded it, falling back to a scale-blind
-        # resize_contain -- the same donor-scale-blindness that was already
-        # fixed for multi-person, just never extended to this later-added
-        # single-subject case. Narrowly scoped so ordinary portrait/close-up
-        # crop_stitch (crop_stitch_clamp_head_scale unset) is unaffected.
+        #
+        # REVERTED for the single-person full-body route (was briefly gated
+        # on via crop_stitch_clamp_head_scale): a real GPU render showed
+        # massively oversized/duplicated hair. Root cause (two independent
+        # investigations): face_h_frac_native is measured against crop_h,
+        # which is the DILATED+BLURRED mask bbox, not the raw face box --
+        # already smaller than the true head silhouette -- and then
+        # identity_hair_height_boost (1.30) gets applied on top of that
+        # against face_crop, which crop_face_reference already pads ~1.55x
+        # for hair. The donor reference ends up telling Krea2 "the face+hair
+        # is this small" while the mask says "fill this much bigger area" --
+        # the model hallucinates extra hair to cover the gap. multi_person/
+        # isolate_selected crops don't show this because clamp_crop_away_
+        # neighbors independently tightens their crop_h first, masking the
+        # same latent formula defect. Not safe to reuse without separately
+        # fixing that formula -- out of scope for this pass. Single-person
+        # full-body crop_stitch now gets the exact same donor-reference prep
+        # as an ordinary portrait (plain resize_contain).
         scale_match = bool(self.cfg.get("identity_scale_match", True)) and (
-            multi_person
-            or isolate_selected
-            or bool(self.cfg.get("crop_stitch_clamp_head_scale", False))
+            multi_person or isolate_selected
         )
         scale_factor = float(self.cfg.get("identity_scale_factor", 0.90))
-        if bool(self.cfg.get("person_match_crop_size", True)):
+        # --- Donor/target face-scale normalization (measured, not assumed) ---
+        # Krea2Edit is dual-reference attention transfer with NO inpaint mask:
+        # it samples the whole crop from an empty latent at denoise=1.0. So the
+        # single strongest scale cue it gets is the RELATIVE size of the head in
+        # image 1 (scene) vs image 2 (person). `resize_contain` fills the person
+        # canvas, putting the donor head at ~55% of it, while the target head
+        # occupies whatever fraction the crop geometry happens to yield:
+        #   portrait  ~58%  (matches the donor -- and only by accident, because
+        #                    the mask ellipse gets clipped at the image top)
+        #   full-body ~32%  (nothing to clip against, so the full 1.55x top
+        #                    extension applies and the head fills far less)
+        # Handing the model a donor head ~2x the target's relative size makes it
+        # render the head at donor scale: oversized head/hair, and the original
+        # hair silhouette left uncovered around it -- the exact reported
+        # "oversized + duplicated hair" failure.
+        #
+        # Fix: measure BOTH fractions for real and match them. This is not the
+        # reverted identity_scale_match, whose formula had two compounding
+        # defects: it divided by the dilated+blurred mask bbox and then applied
+        # identity_hair_height_boost (1.30) on top of a face_crop that
+        # crop_face_reference had ALREADY padded ~1.55x for hair -- double
+        # counting. Here the donor's face height is DETECTED inside face_crop
+        # (no assumed constant, no hair boost), and the ratio is clamped to 1.0
+        # so the known-good portrait path stays a plain resize_contain.
+        donor_norm_info: dict[str, Any] = {"applied": False}
+        person_prep = "resize_contain"
+        person = None
+        if (
+            bool(self.cfg.get("person_match_crop_size", True))
+            and bool(self.cfg.get("donor_scale_normalize", True))
+            and not scale_match
+            and selected_face is not None
+            and box is not None
+        ):
+            crop_h_raw = max(1, box[3] - box[1])
+            target_face_frac = float(selected_face.height) / float(crop_h_raw)
+            donor_fb = detect_best_face(pil_to_rgb_np(face_crop), self.cache_dir)
+            img_frac: float | None = None
+            if donor_fb is not None and donor_fb.height > 4:
+                donor_face_frac = float(donor_fb.height) / float(
+                    max(1, face_crop.size[1])
+                )
+                if donor_face_frac > 1e-6:
+                    # Height of the donor IMAGE (not just its face) on the
+                    # canvas such that its FACE lands at target_face_frac.
+                    img_frac = target_face_frac / donor_face_frac
+                    img_frac = min(1.0, max(0.15, img_frac))
+                    # Already matched (the portrait case, ~0.99-1.0): fall
+                    # through to plain resize_contain so the known-good path
+                    # stays bit-identical rather than off-by-a-resample.
+                    if img_frac >= float(
+                        self.cfg.get("donor_scale_noop_threshold", 0.97)
+                    ):
+                        donor_norm_info = {
+                            "applied": False,
+                            "reason": "already_matched",
+                            "target_face_frac": round(target_face_frac, 4),
+                            "donor_face_frac": round(donor_face_frac, 4),
+                            "donor_img_frac": round(img_frac, 4),
+                        }
+                        img_frac = None
+                if donor_face_frac > 1e-6 and img_frac is not None:
+                    person = place_face_at_height_frac(
+                        face_crop.convert("RGB"),
+                        scene.size,
+                        height_frac=img_frac,
+                        fill=(0, 0, 0),
+                        max_height_frac=1.0,
+                        min_height_frac=0.15,
+                    )
+                    person_prep = "donor_scale_normalized"
+                    donor_norm_info = {
+                        "applied": True,
+                        "target_face_frac": round(target_face_frac, 4),
+                        "donor_face_frac": round(donor_face_frac, 4),
+                        "donor_img_frac": round(img_frac, 4),
+                    }
+                    print(
+                        f"[krea2 donor_scale] target_face={target_face_frac:.3f} "
+                        f"donor_face={donor_face_frac:.3f} -> donor_img={img_frac:.3f}",
+                        flush=True,
+                    )
+            if person is None and donor_norm_info.get("reason") is None:
+                donor_norm_info = {
+                    "applied": False,
+                    "reason": "no_face_detected_in_donor_crop",
+                }
+        if person is not None:
+            pass
+        elif bool(self.cfg.get("person_match_crop_size", True)):
             if scale_match:
                 person = place_face_at_height_frac(
                     face_crop.convert("RGB"),
@@ -904,8 +1054,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "identity_scale_match": bool(scale_match),
             "identity_scale_factor": float(scale_factor) if scale_match else 1.0,
             "person_prep": (
-                "place_face_at_height_frac" if scale_match else "resize_contain"
+                person_prep
+                if person_prep != "resize_contain"
+                else ("place_face_at_height_frac" if scale_match else "resize_contain")
             ),
+            "donor_scale_normalize": donor_norm_info,
             "single_person_parity": spp,
             "head_mask": mask_info,
             "crop_box": list(box),
@@ -1896,8 +2049,25 @@ class Krea2IdentityEditPipeline(BasePipeline):
         edit_cache_info: dict,
         seed: int | None = None,
         ref_boost_mask: Image.Image | None = None,
+        edit_mask: Image.Image | None = None,
     ) -> dict[str, Any]:
-        """One Krea2 dual-ref sample → decoded PIL. Shared by single + swap-all."""
+        """One Krea2 dual-ref sample → decoded PIL. Shared by single + swap-all.
+
+        ``edit_mask`` (EXPERIMENT E1, off unless ``sampling_containment`` is
+        set): an L mask in ``scene`` coordinates, white where the model may
+        generate. When supplied, the sampler is seeded with the ENCODED scene
+        latent instead of an empty one and that mask is attached as
+        ``noise_mask``, so ComfyUI's KSamplerX0Inpaint re-pins every latent
+        outside the mask to the source at every step
+        (``comfy/samplers.py:641``).
+
+        Safe by construction at denoise=1.0: Krea2 is ModelType.FLUX ->
+        CONST.noise_scaling = ``sigma*noise + (1-sigma)*latent_image``
+        (``comfy/model_sampling.py:97``), and sigma_max is 1.0, so the
+        latent_image term is multiplied by ZERO. The starting noise is
+        bit-identical whether we pass an empty or an encoded latent -- the
+        encoded latent's only effect is to make the mask pin functional.
+        """
         import torch
         from headswap.comfy.krea2_edit_fast import clear_krea2_edit_static_cache
 
@@ -1980,6 +2150,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         ref_boost_mask, torch
                     )
                     used_ref_boost_mask = True
+                # The krea2edit node pack requires target_latent to be the SAME
+                # latent handed to KSampler.latent_image; otherwise the patch
+                # pre-allocates against the wrong tensor. Only relevant when E1
+                # containment swaps that latent away from the empty one.
+                if bool(
+                    self.cfg.get("sampling_containment", False)
+                ) and edit_mask is not None and self._node_accepts_kwarg(
+                    rt, "Krea2EditModelPatch", "target_latent"
+                ):
+                    patch_kwargs["target_latent"] = get_value_at_index(scene_lat, 0)
                 patched = rt.call("Krea2EditModelPatch", **patch_kwargs)
                 model = get_value_at_index(patched, 0)
 
@@ -2015,7 +2195,31 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     negative = get_value_at_index(neg_enc, 0)
                 negative_mode = "grounded_vlm"
 
-            if rt.has("EmptySD3LatentImage"):
+            # EXPERIMENT E1: sampling-time containment. Seed the sampler with
+            # the encoded scene latent and attach the head mask as noise_mask
+            # so pixels outside it are re-pinned to the source every step.
+            containment_coverage: float | None = None
+            containment_on = bool(
+                self.cfg.get("sampling_containment", False)
+            ) and edit_mask is not None
+            if containment_on:
+                latent = dict(get_value_at_index(scene_lat, 0))
+                _m = edit_mask.convert("L")
+                if _m.size != scene.size:
+                    _m = _m.resize(scene.size, Image.Resampling.BILINEAR)
+                _mt = pil_mask_to_comfy_tensor(_m, torch)
+                latent["noise_mask"] = _mt.reshape(
+                    (-1, 1, _mt.shape[-2], _mt.shape[-1])
+                )
+                empty_node = "scene_latent+noise_mask"
+                containment_coverage = round(float(_mt.mean().item()), 4)
+                print(
+                    "[krea2 containment] scene_latent+noise_mask "
+                    f"coverage={containment_coverage:.3f} "
+                    f"mask={list(_m.size)} scene={list(scene.size)}",
+                    flush=True,
+                )
+            elif rt.has("EmptySD3LatentImage"):
                 empty = rt.call(
                     "EmptySD3LatentImage", width=w, height=h, batch_size=1
                 )
@@ -2058,6 +2262,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 mu_shift=mu_shift if apply_shift else None,
                 verbose=verbose,
             )
+            sampling_diag["sampling_containment"] = bool(containment_on)
+            if containment_coverage is not None:
+                sampling_diag["noise_mask_coverage"] = containment_coverage
             sampling_diag["kernels"] = kernel_info
             sampling_diag["torch_compile"] = compile_info
             sampling_diag["debug_count_unet_forwards"] = count_forwards
@@ -2864,42 +3071,27 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # flag that this run should get the post-stitch scale/position clamp
         # (crop_stitch's own clamp_edited_head_scale call is SPP-gated and
         # would otherwise never fire for a single-subject photo).
+        #
+        # REVERTED: this used to also raise max_body_dim (1024->2048) and
+        # scale mask_expand_px/mask_blur_px/stitch_feather_px proportionally
+        # for more native face detail. A real GPU render showed massively
+        # oversized/duplicated hair. Two independent, code-confirmed causes:
+        # (1) the resolution-ratio math assumed body_full always upscales by
+        # the configured ratio, but resize_max_keep_ar never upscales -- for
+        # any source photo whose native long side is under the new cap, the
+        # mask dilation/blur still got scaled by the full nominal ratio,
+        # over-inflating relative to the actual (smaller or zero) pixel
+        # gain; (2) crop_pad (hard-coded 12px) was never coupled to the
+        # doubled stitch_feather_px, so the crop box was sized for only the
+        # build-time blur -- the stitch-time feathered_soft_composite then
+        # applied a SECOND, wider blur and hard-cropped that widened alpha
+        # tail at the box edge, producing a visible rectangular ghost
+        # boundary distinct from the intended soft round halo. Both bugs
+        # only manifest for this route (no neighbor-clamp tightening, no
+        # prior validation) -- reverted rather than re-patched: full-body
+        # crop_stitch now uses the exact same crop/mask geometry as an
+        # ordinary portrait, unchanged and already proven.
         self.cfg["crop_stitch_clamp_head_scale"] = True
-        # Raise the native resolution the head+hair crop is sourced from.
-        # crop_long_side=768 (the size actually fed to Krea2) is INDEPENDENT
-        # of max_body_dim -- resize_long_side always downsamples the crop to
-        # 768 regardless of body_full's size (krea2.py ~808), so this costs
-        # zero extra inference time/VRAM. It only matters for a full-body
-        # photo where the face is a small fraction of the frame: at
-        # max_body_dim=1024 the face itself might be only ~100px natively
-        # before ANY crop/resize, so even a correct resize-to-768 crop
-        # started from very little real detail. Raising body_full's cap
-        # gives the crop far more native pixels to draw from. No coordinate-
-        # mapping risk: mask/box/canvas/detection all stay derived from this
-        # one body_full, nothing else needs to change.
-        _new_max_body_dim = int(self.cfg.get("body_route_max_body_dim", 2048))
-        _cur_max_body_dim = int(self.cfg.get("max_body_dim", 1024) or 1024)
-        if _new_max_body_dim > _cur_max_body_dim:
-            self.cfg["max_body_dim"] = _new_max_body_dim
-            meta["max_body_dim_raised"] = [_cur_max_body_dim, _new_max_body_dim]
-            # mask_expand_px/mask_blur_px/stitch_feather_px are FIXED PIXEL
-            # values applied to the mask at body_full's native resolution
-            # (never downsampled to crop_long_side=768 -- only the RGB scene
-            # is). The ellipse's own extend (top/side/bot_extend) scales
-            # proportionally with face size, but these don't -- so raising
-            # max_body_dim without also scaling them shrinks the soft-blend
-            # zone's fraction of the crop (e.g. ~10% -> ~5% at a 2x raise),
-            # risking a harder-edged jaw/neck seam than before. Scale them by
-            # the same ratio so the visual softness stays equivalent.
-            _res_ratio = float(_new_max_body_dim) / float(_cur_max_body_dim)
-            for _key, _default in (
-                ("mask_expand_px", 18),
-                ("mask_blur_px", 12),
-                ("stitch_feather_px", 10),
-            ):
-                _cur_val = int(self.cfg.get(_key, _default) or _default)
-                self.cfg[_key] = int(round(_cur_val * _res_ratio))
-            meta["mask_feather_scaled_by"] = round(_res_ratio, 3)
         meta["applied"] = True
         meta["route"] = "crop_stitch_scale_clamped"
         meta["reason"] = "single_person_full_body_detected"
@@ -3224,6 +3416,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         body_full: Image.Image | None = None
         mask = None
         box = None
+        crop_stitch_feather_px: int | None = None
         crop_content_box: tuple[int, int, int, int] | None = None
         freeze_mask: Image.Image | None = None
         ref_boost_mask_img: Image.Image | None = None
@@ -3459,6 +3652,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         f"policy={body_face_policy} index={body_face_index} "
                         f"face_frac={face_frac:.3f} tight_crop={use_tight} "
                         f"isolate={isolate_selected} "
+                        f"geom_scale={flags.get('geom_scale')} "
+                        f"expand_px={flags['expand_px']} blur_px={flags.get('blur_px')} "
+                        f"crop_pad={flags['crop_pad']} "
                         f"selected_box="
                         f"{None if selected_face is None else [selected_face.x0, selected_face.y0, selected_face.x1, selected_face.y1]}",
                         flush=True,
@@ -3476,7 +3672,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         crop_pad=int(flags["crop_pad"]),
                         all_faces=all_faces,
                         isolate_selected=isolate_selected,
+                        blur_px=int(flags["blur_px"]),
                     )
+                    # Feather the stitch by the same scale-invariant amount the
+                    # mask was built with, so the blend zone stays proportional
+                    # to the head instead of ballooning on a small-in-frame face.
+                    crop_stitch_feather_px = int(flags["stitch_feather_px"])
                     scene = built["scene"]
                     person = built["person"]
                     mask = built["mask"]
@@ -3696,6 +3897,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 ),
             )
             face_prep_diag["krea2_conditioning"] = cond_info
+            # EXPERIMENT E1 (crop_stitch only): the stitch mask, cropped to the
+            # crop window, is exactly the region the model is allowed to
+            # regenerate. Reuses the EXISTING mask -- no new mask geometry.
+            edit_mask_scene: Image.Image | None = None
+            if (
+                edit_mode == "crop_stitch"
+                and mask is not None
+                and box is not None
+                and bool(self.cfg.get("sampling_containment", False))
+            ):
+                edit_mask_scene = mask.convert("L").crop(box)
             sample_meta = self._sample_edit(
                 rt,
                 bundle,
@@ -3706,6 +3918,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 edit_cache_info=edit_cache_info,
                 seed=base_seed,
                 ref_boost_mask=ref_boost_mask_img if edit_mode == "full_frame" else None,
+                edit_mask=edit_mask_scene,
             )
             edited = sample_meta["edited"]
             procrustes_applied = False

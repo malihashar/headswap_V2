@@ -91,13 +91,14 @@ def test_resolve_body_route_flag_actually_activates_the_clamp(monkeypatch):
     assert pipe.cfg.get("crop_stitch_clamp_head_scale") is True
 
 
-def test_resolve_body_route_raises_max_body_dim_for_more_native_face_detail(monkeypatch):
-    """crop_long_side=768 (what Krea2 actually samples at) is independent of
-    max_body_dim, so raising it for the full-body route costs zero extra
-    inference time -- it just gives the crop more native pixels to draw from
-    before being downsampled to 768. Should not raise below the configured
-    body_route_max_body_dim ceiling, and should never LOWER an already-higher
-    user-configured value."""
+def test_resolve_body_route_does_not_touch_max_body_dim(monkeypatch):
+    """REVERTED: this route used to also raise max_body_dim 1024->2048 for
+    more native face detail. A real GPU render showed massively oversized/
+    duplicated hair, traced to two compounding bugs in how that raise scaled
+    mask/feather parameters (see the docstring in _resolve_body_route and
+    the commit message reverting it). Full-body crop_stitch now uses
+    whatever max_body_dim was already configured, completely untouched --
+    identical to the portrait path."""
     import headswap.pipelines.krea2 as krea2_mod
     from headswap.preprocess import FaceBox as FB
 
@@ -108,25 +109,19 @@ def test_resolve_body_route_raises_max_body_dim_for_more_native_face_detail(monk
     w, h = 992, 1600
     body = Image.new("RGB", (w, h))
 
-    pipe_default = _pipe({"enable_body_route": True, "body_route_use_segmentation": False})
-    meta = pipe_default._resolve_body_route(body)
-    assert pipe_default.cfg["max_body_dim"] == 2048
-    assert meta["max_body_dim_raised"] == [1024, 2048]
-
-    pipe_already_high = _pipe(
-        {"enable_body_route": True, "body_route_use_segmentation": False, "max_body_dim": 3000}
-    )
-    meta2 = pipe_already_high._resolve_body_route(body)
-    assert pipe_already_high.cfg["max_body_dim"] == 3000  # never lowered
-    assert "max_body_dim_raised" not in meta2
+    pipe = _pipe({"enable_body_route": True, "body_route_use_segmentation": False})
+    meta = pipe._resolve_body_route(body)
+    assert "max_body_dim" not in pipe.cfg
+    assert "max_body_dim_raised" not in meta
 
 
-def test_resolve_body_route_scales_mask_feather_with_max_body_dim(monkeypatch):
-    """mask_expand_px/mask_blur_px/stitch_feather_px are fixed-pixel values
-    applied at body_full's native resolution (never downsampled to
-    crop_long_side=768). Raising max_body_dim without scaling them shrinks
-    the soft-blend zone's fraction of the crop, risking a harder-edged
-    jaw/neck seam -- they must scale by the same ratio."""
+def test_resolve_body_route_does_not_touch_mask_or_feather_params(monkeypatch):
+    """REVERTED: mask_expand_px/mask_blur_px/stitch_feather_px used to be
+    scaled proportionally with the (now-reverted) max_body_dim raise. That
+    scaling, combined with crop_pad staying fixed, hard-clipped the widened
+    stitch-time blur tail at the crop box edge -- a rectangular ghost
+    boundary. Full-body crop_stitch now uses these exactly as configured,
+    same as an ordinary portrait."""
     import headswap.pipelines.krea2 as krea2_mod
     from headswap.preprocess import FaceBox as FB
 
@@ -148,19 +143,26 @@ def test_resolve_body_route_scales_mask_feather_with_max_body_dim(monkeypatch):
     )
     meta = pipe._resolve_body_route(body)
 
-    # max_body_dim 1024 -> 2048 is a 2x ratio.
-    assert pipe.cfg["mask_expand_px"] == 36
-    assert pipe.cfg["mask_blur_px"] == 24
-    assert pipe.cfg["stitch_feather_px"] == 20
-    assert meta["mask_feather_scaled_by"] == 2.0
+    assert pipe.cfg["mask_expand_px"] == 18
+    assert pipe.cfg["mask_blur_px"] == 12
+    assert pipe.cfg["stitch_feather_px"] == 10
+    assert "mask_feather_scaled_by" not in meta
 
 
-def test_scale_match_extends_to_body_route_without_touching_multi_person_gate():
-    """identity_scale_match's donor-face scale cue was already gated on for
-    multi-person/isolate_selected; this must extend it to the single-person
-    full-body route (crop_stitch_clamp_head_scale) without loosening the
-    gate for ordinary portrait crop_stitch (flag unset -> resize_contain,
-    same as tests/test_spp_strict_architecture.py's existing contract)."""
+def test_scale_match_does_not_extend_to_body_route():
+    """REVERTED: identity_scale_match's place_face_at_height_frac donor-scale
+    cue was briefly extended to the full-body route (crop_stitch_clamp_
+    head_scale). A real GPU render showed massively oversized/duplicated
+    hair, traced to a latent formula bug: face_h_frac_native is measured
+    against the DILATED+BLURRED mask bbox (already smaller than the true
+    head silhouette), then identity_hair_height_boost gets applied on top of
+    that against face_crop, which crop_face_reference already pads ~1.55x
+    for hair -- double-counting the hair padding. multi_person/
+    isolate_selected crops don't show this because clamp_crop_away_neighbors
+    independently tightens their crop first, masking the same defect --
+    not proven safe to reuse without separately fixing that formula.
+    Full-body crop_stitch's donor reference now uses plain resize_contain,
+    identical to an ordinary portrait, regardless of this flag."""
     from headswap.pipelines.krea2 import Krea2IdentityEditPipeline
     from headswap.preprocess import FaceBox as FB
 
@@ -187,20 +189,12 @@ def test_scale_match_extends_to_body_route_without_touching_multi_person_gate():
     face = FB(100, 60, 200, 200, 0.9)
     donor = Image.new("RGB", (96, 120), (10, 10, 10))
 
-    ordinary = _P()  # crop_stitch_clamp_head_scale unset -> False
-    ordinary_built = ordinary._build_scene_person(
-        body, donor, face, div_by=8, use_tight=False,
-        top_ext=1.55, side_ext=0.60, bot_ext=0.40, expand_px=18, crop_pad=12,
-        all_faces=[face], isolate_selected=False,
-    )
-    assert ordinary_built["diag"]["identity_scale_match"] is False
-    assert ordinary_built["diag"]["person_prep"] == "resize_contain"
-
-    body_routed = _P(crop_stitch_clamp_head_scale=True)
-    routed_built = body_routed._build_scene_person(
-        body, donor, face, div_by=8, use_tight=False,
-        top_ext=1.55, side_ext=0.60, bot_ext=0.40, expand_px=18, crop_pad=12,
-        all_faces=[face], isolate_selected=False,
-    )
-    assert routed_built["diag"]["identity_scale_match"] is True
-    assert routed_built["diag"]["person_prep"] == "place_face_at_height_frac"
+    for flag in (False, True):
+        pipe = _P(crop_stitch_clamp_head_scale=flag)
+        built = pipe._build_scene_person(
+            body, donor, face, div_by=8, use_tight=False,
+            top_ext=1.55, side_ext=0.60, bot_ext=0.40, expand_px=18, crop_pad=12,
+            all_faces=[face], isolate_selected=False,
+        )
+        assert built["diag"]["identity_scale_match"] is False
+        assert built["diag"]["person_prep"] == "resize_contain"
