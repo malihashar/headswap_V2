@@ -1156,14 +1156,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
             return (
                 prompt
                 + " CRITICAL: if the person in the first image is wearing a hat, "
-                "cap, headscarf, helmet, or any other head covering, KEEP that "
-                "headwear exactly as it appears in the first image — same shape, "
-                "position, colour and size, including any flaps, brim or straps. "
-                "It is clothing, not hair: do not remove it, do not replace it "
-                "with hair, and do not blend hair through it. Place the new "
-                "person's hair naturally UNDERNEATH and around it, showing only "
-                "the hair that would realistically be visible outside the "
-                "headwear."
+                "cap, headscarf, helmet or any other head covering, it is rigid "
+                "opaque FABRIC, not hair. Reproduce it exactly as in the first "
+                "image — same shape, size, position, colour, matte surface and "
+                "crisp clean edges, including any flaps, brim or straps. NO hair "
+                "may grow through, over, on top of, or out of the headwear: no "
+                "strands, wisps, frizz or fuzz on its surface or along its edges; "
+                "its silhouette must stay smooth and hard-edged. The second "
+                "person's hair is almost entirely hidden underneath it — show at "
+                "most a small amount of natural hair at the sideburns and nape, "
+                "below the headwear's lower edge. Do NOT transfer the second "
+                "person's hairstyle, hair length or hair volume onto the head."
             )
         return (
             prompt
