@@ -1177,18 +1177,23 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if bool(self.cfg.get("preserve_headwear", True)):
             return (
                 prompt
-                + " CRITICAL: if the person in the first image is wearing a hat, "
-                "cap, headscarf, helmet or any other head covering, it is rigid "
-                "opaque FABRIC, not hair. Reproduce it exactly as in the first "
-                "image — same shape, size, position, colour, matte surface and "
-                "crisp clean edges, including any flaps, brim or straps. NO hair "
-                "may grow through, over, on top of, or out of the headwear: no "
-                "strands, wisps, frizz or fuzz on its surface or along its edges; "
-                "its silhouette must stay smooth and hard-edged. The second "
-                "person's hair is almost entirely hidden underneath it — show at "
-                "most a small amount of natural hair at the sideburns and nape, "
-                "below the headwear's lower edge. Do NOT transfer the second "
-                "person's hairstyle, hair length or hair volume onto the head."
+                + " This is a HEAD SWAP, not a face swap: the second person's "
+                "hair MUST be transferred, not hidden. CRITICAL: if the person "
+                "in the first image is wearing a hat, cap, headscarf, helmet or "
+                "any other head covering, it is rigid opaque FABRIC, not hair — "
+                "reproduce it exactly as in the first image (same shape, size, "
+                "position, colour, matte surface, crisp clean edges, including "
+                "any flaps, brim or straps) and NO hair may grow through, over, "
+                "on top of, or out of it: no strands, wisps, frizz or fuzz on "
+                "its surface or along its edges; its silhouette stays smooth "
+                "and hard-edged. But the second person's actual hairstyle, hair "
+                "length, texture and volume MUST still be rendered wherever it "
+                "would realistically be visible outside that fabric: worn UNDER "
+                "the headwear and emerging naturally BELOW its lower edge — at "
+                "the sideburns, in front of the ears, and at the nape of the "
+                "neck. That visible hair must clearly match the second person's "
+                "real hairstyle (its texture, curl/coil pattern and colour), "
+                "not the first person's original hair or no hair at all."
             )
         return (
             prompt
