@@ -228,7 +228,20 @@ head_mask_backend: head_matte
 # Dilates the matte before intersecting, so a donor hairstyle slightly larger
 # than the target's still has room to grow. 0.0 would pin new hair to the old
 # silhouette exactly (the failure HID names, arXiv 2503.00861).
-head_matte_hair_margin_frac: 0.08
+head_matte_hair_margin_frac: 0.0
+# Edge softness follows the mask TYPE, applied only when a matte backend is
+# actually installed (the ellipse fallback keeps the wide values above).
+# GPU-measured on the hat case -- worst-case altered background pixel and
+# fraction of background touched:
+#   wide edge (blur 12 / feather 10 / margin 0.08): max 168, 0.204%
+#   tight edge (blur 3 / feather 3 / margin 0.0)  : max  76, 0.034%
+# A generous feather made sense for the ellipse, which only approximates the
+# head; on a real silhouette it straddles the true edge and regenerates a rim
+# of background -- the thin halo hugging the subject.
+head_matte_tight_edge: true
+head_matte_expand_px: 3
+head_matte_blur_px: 3
+head_matte_stitch_feather_px: 3
 seam_refine: false
 seam_refine_erode_px: 8
 seam_refine_dilate_px: 16

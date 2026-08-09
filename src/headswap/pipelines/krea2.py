@@ -67,7 +67,7 @@ from headswap.preprocess import (
     suppress_neighbor_faces_in_mask,
     expand_crop_box_wide,
 )
-from headswap.segmentation import build_head_hair_mask
+from headswap.segmentation import build_head_hair_mask, matte_backend_available
 
 
 @contextmanager
@@ -730,6 +730,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
         all_faces = list(all_faces or [])
         multi_person = len(all_faces) > 1
         spp = self._single_person_parity()
+        # Edge softness follows what the mask ACTUALLY is. The geometric
+        # ellipse only approximates the head, so it needs a generous feather
+        # to hide the mismatch. A real silhouette matte tracks the true edge,
+        # so the same generous feather instead straddles it -- partially
+        # regenerating a rim of background and leaving a thin halo hugging the
+        # subject (measured on the hat case: worst background pixel 168 with
+        # the wide edge vs 76 with the tight one, and 6x fewer background
+        # pixels altered). Tight values are applied ONLY when a matte backend
+        # is actually installed, so the ellipse fallback keeps its wide edge.
+        tight_edge = bool(self.cfg.get("head_matte_tight_edge", True)) and (
+            str(self.cfg.get("head_mask_backend", "ellipse") or "ellipse").strip().lower()
+            in ("head_matte", "matte", "silhouette")
+        ) and matte_backend_available()
+        if tight_edge:
+            expand_px = int(self.cfg.get("head_matte_expand_px", 3))
+            blur_px = int(self.cfg.get("head_matte_blur_px", 3))
         mask, mask_info = build_head_hair_mask(
             body_full,
             self.cache_dir,
@@ -1063,6 +1079,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
             ),
             "donor_scale_normalize": donor_norm_info,
             "single_person_parity": spp,
+            "tight_edge": bool(tight_edge),
+            "stitch_feather_px": (
+                int(self.cfg.get("head_matte_stitch_feather_px", 3))
+                if tight_edge
+                else int(self.cfg.get("stitch_feather_px", 10))
+            ),
             "head_mask": mask_info,
             "crop_box": list(box),
             "crop_native_size": [box[2] - box[0], box[3] - box[1]],
@@ -4015,6 +4037,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         original_scene=scene,
                         debug_stages=stitch_debug,
                         skip_head_clamp=procrustes_applied,
+                        # match the stitch feather to the mask type (see
+                        # _build_scene_person): a real matte earns a tight
+                        # edge, the ellipse fallback keeps the wide one.
+                        feather_px_override=(face_prep_diag or {}).get("stitch_feather_px"),
                     )
                     if head_scale_trace is not None:
                         head_scale_trace.record_stitched(out)

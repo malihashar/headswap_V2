@@ -124,6 +124,27 @@ def _try_birefnet_mask(
     return Image.fromarray(alpha), None
 
 
+_MATTE_AVAILABLE: bool | None = None
+
+
+def matte_backend_available() -> bool:
+    """Is a real silhouette matte actually installed? Cached.
+
+    Lets callers pick edge softness by what the mask ACTUALLY is: a real
+    matte follows the true silhouette and can take a tight edge, while the
+    geometric ellipse is only an approximation and needs generous feather to
+    hide the mismatch. Deciding this up front avoids matting twice.
+    """
+    global _MATTE_AVAILABLE
+    if _MATTE_AVAILABLE is None:
+        try:
+            import rembg  # noqa: F401
+            _MATTE_AVAILABLE = True
+        except Exception:
+            _MATTE_AVAILABLE = False
+    return _MATTE_AVAILABLE
+
+
 def _person_matte(body_pil: Image.Image) -> tuple[np.ndarray | None, str | None]:
     """Raw, UNGATED foreground/person alpha matte (rembg / BiRefNet)."""
     try:
