@@ -67,6 +67,7 @@ from headswap.preprocess import (
     suppress_neighbor_faces_in_mask,
     expand_crop_box_wide,
 )
+from headswap.headwear_erase import restore_background
 from headswap.segmentation import build_head_hair_mask, matte_backend_available
 
 
@@ -4065,6 +4066,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     )
                     if cs_clamp_info is not None:
                         face_prep_diag["crop_stitch_body_route_clamp"] = cs_clamp_info
+                    # The head-scale clamp shrinks+translates the WHOLE final
+                    # image about the face center (BORDER_REPLICATE for the
+                    # newly-exposed edge), which leaves a visible seam/vignette
+                    # in the background when it fires -- nothing downstream
+                    # was correcting for it. restore_background forces every
+                    # non-person pixel back to the pristine original photo
+                    # (union of result/plate person mattes), which repairs
+                    # that seam regardless of what geometric transform caused
+                    # it. Only meaningful when the clamp actually moved
+                    # pixels; still cheap/safe to run unconditionally since it
+                    # no-ops gracefully without a matte backend installed.
+                    if bool(self.cfg.get("restore_background_enabled", True)):
+                        out, rb_info = restore_background(out, body_full)
+                        face_prep_diag["restore_background"] = rb_info
                     # Optional post-stitch neighbor restore. OFF by default —
                     # production locality is crop-window exclusion + mask carve.
                     if (
