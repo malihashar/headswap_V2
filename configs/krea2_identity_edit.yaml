@@ -240,9 +240,23 @@ magic_hour_max_wait_s: 120.0
 # Falls back to `ellipse` automatically if rembg is not installed.
 head_mask_backend: head_matte
 # Dilates the matte before intersecting, so a donor hairstyle slightly larger
-# than the target's still has room to grow. 0.0 would pin new hair to the old
-# silhouette exactly (the failure HID names, arXiv 2503.00861).
-head_matte_hair_margin_frac: 0.0
+# than the target's still has room to grow. 0.0 pins new hair to the old
+# silhouette exactly (the failure HID names, arXiv 2503.00861) -- and this
+# was shipping at 0.0, unaddressed, despite this comment already naming the
+# risk. GPU-verified 2026-08-09 on the hat/full-body case: at 0.0 the donor's
+# voluminous dreadlocks render visibly flattened/thinned, pinned to the
+# original (hat-covered, small) head silhouette -- exactly the "chopped off"
+# look. 0.20 lets hair grow naturally; full-body visual comparison confirms
+# markedly fuller, more natural hair with no other regression. Background
+# invariant stays >99.98% exact (measured against the plate); a residual
+# ~30-75px micro-seam can appear at isolated hair-wisp edges (max ~100/255
+# there) but was not visible in the full-body render at normal viewing scale
+# -- only detectable via aggressive pixel-diff + 3x zoom on a 100px crop.
+# Raising restore_background's dilate_px does not clean this up (tested
+# 5/9/14/20 -- max diff stays 83-120 throughout, mean gets WORSE since a
+# wider dilate pulls in more background near every edge, not just this one),
+# so it is left at its default.
+head_matte_hair_margin_frac: 0.20
 # Edge softness follows the mask TYPE, applied only when a matte backend is
 # actually installed (the ellipse fallback keeps the wide values above).
 # GPU-measured on the hat case -- worst-case altered background pixel and
