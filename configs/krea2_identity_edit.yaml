@@ -80,7 +80,21 @@ wide_crop_pad_bot_frac: 2.50
 # can (see head_direction_relock, which does exactly that and is disabled
 # for this reason). The sanity gates below reject a bad landmark fit instead
 # of applying it.
-enable_procrustes_correction: true
+#
+# GPU-measured 2026-08-09 on the hat/full-body case: even a PASSING,
+# in-bounds correction (scale=0.906, rot=5.0deg, inliers=5, residual=12.4px --
+# well inside every gate above) produced a bright halo hugging the head in
+# the sky. Root cause isolated with an edge-energy probe: mean |Laplacian| on
+# a dilated/eroded band around the correction's blend ellipse was 1.25x the
+# surrounding sky (0.226 vs 0.181 over ~9.3k px) -- a real photometric seam
+# where the warped crop is blended back through
+# procrustes_align_edited_crop_to_body_box's face-only ellipse. The old hat's
+# original silhouette was ruled out first (edge energy 0.96x, i.e. no seam)
+# before finding this. Turning the flag off removed the halo completely on a
+# real render, with identity/expression/gaze unaffected. Off by default until
+# a version of this correction composites through the same tight head_matte
+# mask the rest of the pipeline uses, instead of its own ellipse.
+enable_procrustes_correction: false
 procrustes_min_inliers: 3
 procrustes_min_scale: 0.40
 procrustes_max_scale: 2.50

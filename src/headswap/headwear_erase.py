@@ -72,13 +72,22 @@ def headwear_mask(
 
 
 def erase_headwear(
-    body: Image.Image, mask: np.ndarray
+    body: Image.Image, mask: np.ndarray, *, feather_px: int = 3
 ) -> tuple[Image.Image, dict[str, Any]]:
     """Inpaint ``mask`` out of ``body``. Returns ``(plate, info)``.
 
     Falls back to the untouched image when the inpainting backend is absent,
     so a missing optional dependency degrades to today's behaviour instead of
     failing a swap.
+
+    Only pixels inside ``mask`` may change. LaMa returns a re-encoded copy of
+    the WHOLE frame, not just the hole it filled -- measured on the reference
+    case, 40.4% of pixels OUTSIDE the mask came back altered, worst case
+    177/255. Returning that verbatim silently resamples the background, body
+    and clothing, and because ``restore_background`` later restores the
+    background FROM this plate, the damage survives to the final image while
+    a plate-vs-result metric still reads ~0. So the fill is composited back
+    through the mask instead of replacing the frame.
     """
     info: dict[str, Any] = {"applied": False, "mask_px": int((mask > 0).sum())}
     if info["mask_px"] < 16:
@@ -96,8 +105,18 @@ def erase_headwear(
         return body, info
     if plate.size != body.size:
         plate = plate.resize(body.size, Image.Resampling.LANCZOS)
+    a = mask.astype(np.float32)
+    if feather_px > 0:
+        k = feather_px if feather_px % 2 else feather_px + 1
+        a = cv2.GaussianBlur(a, (k, k), 0)
+    a = np.clip(a / 255.0, 0.0, 1.0)[..., None]
+    out = (
+        np.asarray(plate.convert("RGB")).astype(np.float32) * a
+        + np.asarray(body.convert("RGB")).astype(np.float32) * (1.0 - a)
+    )
     info["applied"] = True
-    return plate.convert("RGB"), info
+    info["feather_px"] = int(feather_px)
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), info
 
 
 def restore_background(

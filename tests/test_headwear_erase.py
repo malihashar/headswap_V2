@@ -98,9 +98,17 @@ def test_erase_calls_backend_and_returns_plate(monkeypatch):
     fake = mock.MagicMock(); fake.return_value.return_value = plate
     monkeypatch.setitem(sys.modules, "simple_lama_inpainting",
                         mock.MagicMock(SimpleLama=fake))
-    out, info = erase_headwear(src, headwear_mask(src, FACE, _matte()))
+    mask = headwear_mask(src, FACE, _matte())
+    out, info = erase_headwear(src, mask, feather_px=0)
     assert info["applied"] is True
-    assert np.array_equal(np.asarray(out), np.asarray(plate))
+    out_arr = np.asarray(out)
+    # Only pixels inside the mask may take the inpainter's fill; LaMa returns
+    # a re-encoded copy of the WHOLE frame, and returning that verbatim was
+    # measured (GPU, reference case) to silently alter 40% of background
+    # pixels outside the mask -- so erase_headwear now composites the fill
+    # back through the mask instead of replacing the frame outright.
+    assert np.array_equal(out_arr[mask > 0], np.asarray(plate)[mask > 0])
+    assert np.array_equal(out_arr[mask == 0], np.asarray(src)[mask == 0])
 
 
 def test_restore_background_copies_background_verbatim(monkeypatch):

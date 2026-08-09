@@ -31,12 +31,15 @@ def test_yaml_defaults_stay_production_safe():
     cfg = yaml.safe_load(CFG_PATH.read_text())
     assert cfg["multi_person_edit_mode"] == "crop_stitch"
     assert cfg.get("crop_margin_mode", "tight") == "tight"
-    # Promoted to production default: corrects head-yaw/eye-gaze drift via a
-    # content-local (crop-space) landmark alignment with inlier/residual
-    # sanity gates -- see the comment above enable_procrustes_correction in
-    # the yaml for why this can't reproduce the whole-image-warp failure
-    # head_direction_relock hit.
-    assert cfg.get("enable_procrustes_correction") is True
+    # Demoted from production default 2026-08-09: GPU-measured on the
+    # hat/full-body case, even an in-bounds correction (all sanity gates
+    # passing) produced a bright halo hugging the head against the sky --
+    # isolated via an edge-energy probe to the face-only ellipse this
+    # correction blends through (1.25x elevated Laplacian energy vs the
+    # surrounding sky). See the comment above enable_procrustes_correction
+    # in the yaml for the full measurement and how the hat-silhouette
+    # hypothesis was ruled out first.
+    assert cfg.get("enable_procrustes_correction") is False
 
 
 def test_arms_are_prod_procrustes_wide_only():
