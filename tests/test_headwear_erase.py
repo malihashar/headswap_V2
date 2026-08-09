@@ -101,3 +101,37 @@ def test_erase_calls_backend_and_returns_plate(monkeypatch):
     out, info = erase_headwear(src, headwear_mask(src, FACE, _matte()))
     assert info["applied"] is True
     assert np.array_equal(np.asarray(out), np.asarray(plate))
+
+
+def test_restore_background_copies_background_verbatim(monkeypatch):
+    """Only the PERSON may differ from the source; background must be exact."""
+    from headswap.headwear_erase import restore_background
+    import headswap.segmentation as seg
+
+    plate = Image.new("RGB", (W, H), (200, 180, 150))
+    ImageDraw.Draw(plate).rectangle([100, 200, 200, H], fill=(30, 30, 35))
+    # result: same person, but the sky has drifted brighter (the ghost-oval bug)
+    result = Image.new("RGB", (W, H), (245, 225, 195))
+    ImageDraw.Draw(result).rectangle([100, 200, 200, H], fill=(40, 40, 48))
+
+    person = np.zeros((H, W), np.uint8); person[200:H, 100:200] = 255
+    monkeypatch.setattr(seg, "_person_matte", lambda im: (person.copy(), None))
+
+    out, info = restore_background(result, plate, dilate_px=0, blur_px=0)
+    assert info["applied"] is True
+    o = np.asarray(out).astype(int); p = np.asarray(plate).astype(int)
+    bg = person == 0
+    assert np.abs(o - p).mean(axis=2)[bg].max() == 0, "background must be verbatim"
+    # and the person region still carries the generated pixels
+    assert o[H - 5, 150, 0] > p[H - 5, 150, 0]
+
+
+def test_restore_background_degrades_without_matte(monkeypatch):
+    from headswap.headwear_erase import restore_background
+    import headswap.segmentation as seg
+
+    monkeypatch.setattr(seg, "_person_matte", lambda im: (None, "missing"))
+    src = _scene()
+    out, info = restore_background(src, src)
+    assert info["applied"] is False
+    assert info["reason"] == "no_matte_backend"
