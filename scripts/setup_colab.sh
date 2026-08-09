@@ -180,6 +180,21 @@ python -c "import rembg" 2>/dev/null \
   && echo "   rembg OK" \
   || echo "   WARN: rembg not importable; head_matte will fall back to ellipse"
 
+# erase_headwear (headwear_erase.py) needs LaMa inpainting. simple-lama-inpainting
+# silently downgrades pillow to 9.5.0 and numpy to 1.26.4 as transitive deps, which
+# breaks CuPy (built against numpy 2.x) and makes rembg import fail -- so head_matte
+# and restore_background() (the halo fix) silently fall back/no-op with NO error,
+# and every downstream render looks like a pipeline regression instead of a pin
+# problem. Install it first, then force pillow/numpy back to a working pin.
+echo "-> Installing simple-lama-inpainting (erase_headwear) + repairing its numpy/pillow downgrade..."
+pip install -q simple-lama-inpainting 2>&1 | tail -2 || echo "   WARN: simple-lama-inpainting install failed; erase_headwear will fall back/skip"
+pip install -q --force-reinstall --no-deps pillow==11.3.0
+pip install -q "numpy>=2.3,<2.5"
+python -c "
+import rembg  # noqa: F401
+print('   rembg OK after simple-lama pin repair')
+" 2>/dev/null || echo "   WARN: rembg broken after simple-lama install; head_matte will fall back to ellipse"
+
 echo "Setup complete."
 echo "COMFYUI_PATH=$COMFYUI_PATH"
 echo "HEADSWAP_MODEL_STORE=$HEADSWAP_MODEL_STORE"
