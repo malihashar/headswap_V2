@@ -1254,7 +1254,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # per-image head-direction hint still applies -- it's not a multi-person
         # add-on, it's a concrete replacement for the generic "keep the same
         # direction" boilerplate already in the base prompt (see yaml).
+        #
+        # single_person_parity defaults true, so _single_person_parity() is
+        # true for EVERY render in the default production config -- single or
+        # multi-person. That silently made the "Hair often survives..."
+        # reinforcement below dead code in production (never appended to any
+        # real render), which is the multi_hair_replace_prompt config flag's
+        # entire purpose. GPU-confirmed against two known-good reference
+        # renders of the same target/donor pair (2026-08-07, predating this
+        # session): the one WITHOUT this reinforcement kept the target's own
+        # long hair with only the face swapped; the one WITH it correctly
+        # replaced the hair with the donor's actual (short, pigtailed)
+        # hairstyle -- i.e. a real head swap vs. a face swap, which is this
+        # entire project's stated goal. So the hair-force clause is applied
+        # here too, unconditionally on multi_hair_replace_prompt (default
+        # true), not gated behind multi_person/use_tight like the other
+        # multi-only add-ons (head-scale reminder, multi_extra_prompt) that
+        # stay skipped for single-person parity as originally intended.
         if self._single_person_parity():
+            if bool(self.cfg.get("multi_hair_replace_prompt", True)):
+                prompt = (
+                    prompt
+                    + " Replace the hair completely with the hairstyle from the "
+                    "second image — hairline, length, color, and parting. Do not "
+                    "leave any of the first person's original hair. Completely "
+                    "cover and remove the original face — no ghosting, double "
+                    "face, or leftover ear/cheek from the first person beside "
+                    "the new head."
+                )
             return self._apply_expression_policy(
                 self._append_headwear_policy(
                     self._append_direction_hint(prompt, direction_hint)
