@@ -3058,6 +3058,15 @@ def match_neck_stub_to_head_tone(
     40->70px too: the exposed skin in a collar/V-neck gap can extend
     further from the mask edge than the original narrow seam this was
     tuned against.
+
+    The ring is clipped to the BOTTOM half of the mask's bounding box
+    (chin/neck/chest side only). Un-clipped, ``dilate(mask) - mask`` forms a
+    band around the mask's ENTIRE perimeter, including above the hair --
+    invisible at low strength, but GPU-observed 2026-08-10: raising
+    l_strength to actually fix the neck also pulled that top-of-head sliver
+    of SKY strongly toward the (much darker) donor skin tone, producing a
+    large, obvious dark halo above the head. The neck stub this function
+    exists for is never above the face.
     """
     if ring_px <= 0:
         return result
@@ -3079,6 +3088,12 @@ def match_neck_stub_to_head_tone(
         core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_ring, k_ring))
     )
     ring = dilated.astype(bool) & (~core.astype(bool))
+    ys, _xs = np.where(core.astype(bool))
+    if ys.size > 0:
+        y0, y1 = int(ys.min()), int(ys.max())
+        below_chin = np.zeros_like(core, dtype=bool)
+        below_chin[y0 + int(0.5 * (y1 - y0)) :, :] = True
+        ring = ring & below_chin
     if int(ring.sum()) < 50:
         return result
     res_lab = cv2.cvtColor(res / 255.0, cv2.COLOR_RGB2LAB)
