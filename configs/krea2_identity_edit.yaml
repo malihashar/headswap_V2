@@ -135,10 +135,20 @@ post_color_match_edge_only_px: 24
 # donor-toned face sits directly next to an un-recolored original-tone neck
 # stub and reads as a tone seam even though the paste/feather geometry is
 # otherwise correct (2026-08-10).
+# Ring widened 40->70px and split into per-channel strength: GPU-observed
+# 2026-08-10 that a uniform 0.65 on all three LAB channels still read as a
+# visible skin-tone mismatch. Lightness (L) overcorrecting flattens the
+# neck's own shading, but hue/chroma (a/b) undercorrecting leaves the neck
+# reading as the wrong person's skin, just dimmed toward the right one --
+# so L stays moderate while a/b pushes much closer to the donor's actual
+# color. The 70px ring also reaches the exposed skin in a V-neck/collar
+# gap, which the original 40px tuning (against a narrower seam) missed.
 neck_stub_tone_match: true
-neck_stub_tone_match_ring_px: 40
+neck_stub_tone_match_ring_px: 70
 neck_stub_tone_match_interior_erode_px: 20
 neck_stub_tone_match_strength: 0.65
+neck_stub_tone_match_l_strength: 0.45
+neck_stub_tone_match_ab_strength: 0.95
 
 # Multi-person production (decision-gate YES_ARCHITECTURE):
 #   detect faces → select one → SAME single-person crop recipe → Krea2 → stitch.

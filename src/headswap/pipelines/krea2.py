@@ -2884,11 +2884,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
             stitched = match_neck_stub_to_head_tone(
                 stitched,
                 stitch_mask,
-                ring_px=int(self.cfg.get("neck_stub_tone_match_ring_px", 40)),
+                ring_px=int(self.cfg.get("neck_stub_tone_match_ring_px", 70)),
                 interior_erode_px=int(
                     self.cfg.get("neck_stub_tone_match_interior_erode_px", 20)
                 ),
                 strength=float(self.cfg.get("neck_stub_tone_match_strength", 0.65)),
+                l_strength=float(self.cfg.get("neck_stub_tone_match_l_strength", 0.45)),
+                ab_strength=float(self.cfg.get("neck_stub_tone_match_ab_strength", 0.95)),
             )
             if debug_stages is not None:
                 debug_stages["composite_after_neck_tone"] = stitched.copy()

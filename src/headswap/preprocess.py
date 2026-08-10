@@ -3027,9 +3027,11 @@ def match_neck_stub_to_head_tone(
     result: Image.Image,
     mask: Image.Image,
     *,
-    ring_px: int = 40,
+    ring_px: int = 70,
     interior_erode_px: int = 20,
     strength: float = 0.65,
+    l_strength: float | None = 0.45,
+    ab_strength: float | None = 0.95,
 ) -> Image.Image:
     """Tint the exposed original neck just outside the paste mask toward the
     donor's own skin tone -- color only, no new content is pasted.
@@ -3046,8 +3048,20 @@ def match_neck_stub_to_head_tone(
     is pure donor face, not itself edge-blended) -- the opposite direction
     from ``lab_histogram_match_face``, which pulls edited pixels toward the
     original. No pixels inside the mask are touched.
+
+    ``l_strength``/``ab_strength`` override ``strength`` per-channel when
+    given (L = lightness, a/b = hue/chroma). GPU-observed 2026-08-10: a
+    uniform strength on all three channels still read as a visible tone
+    mismatch -- shading (L) needs a lighter touch or the neck flattens, but
+    hue (a/b) needs to move MUCH closer to the donor's actual color or the
+    neck still reads as the wrong person's skin, just dimmed. Ring widened
+    40->70px too: the exposed skin in a collar/V-neck gap can extend
+    further from the mask edge than the original narrow seam this was
+    tuned against.
     """
-    if strength <= 0 or ring_px <= 0:
+    if ring_px <= 0:
+        return result
+    if strength <= 0 and (l_strength or 0) <= 0 and (ab_strength or 0) <= 0:
         return result
     res = pil_to_rgb_np(result).astype(np.float32)
     m = np.asarray(mask.convert("L")).astype(np.float32) / 255.0
@@ -3073,12 +3087,20 @@ def match_neck_stub_to_head_tone(
     ring_weight = cv2.GaussianBlur(
         ring_weight, (0, 0), sigmaX=max(1.0, ring_px * 0.25)
     )
+    per_channel_strength = [
+        l_strength if l_strength is not None else strength,
+        ab_strength if ab_strength is not None else strength,
+        ab_strength if ab_strength is not None else strength,
+    ]
     for c in range(3):
+        ch_strength = per_channel_strength[c]
+        if ch_strength <= 0:
+            continue
         donor_mean = float(res_lab[:, :, c][deep_core.astype(bool)].mean())
         ring_vals = res_lab[:, :, c][ring]
         if ring_vals.size == 0:
             continue
-        shift = (donor_mean - float(ring_vals.mean())) * strength
+        shift = (donor_mean - float(ring_vals.mean())) * ch_strength
         res_lab[:, :, c] = res_lab[:, :, c] + shift * ring_weight
     out = cv2.cvtColor(res_lab.astype(np.float32), cv2.COLOR_LAB2RGB)
     return np_to_pil(np.clip(out * 255.0, 0, 255))
