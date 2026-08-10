@@ -175,8 +175,32 @@ def clamp_edited_head_scale(
     previously impossible (the scale factor was hard-clamped to <= 1.0), so
     an undersized generated head silently kept its wrong proportions.
 
-    IMPORTANT: never paste onto ``original_scene`` — that re-exposes the old
-    face around a shrunk swap (double-face / ghosting in group shots).
+    IMPORTANT: for the FACE region, never paste onto ``original_scene`` --
+    that re-exposes the old face around a shrunk swap (double-face /
+    ghosting in group shots). The exposed BORDER strip the shrink/grow warp
+    itself uncovers is a separate, narrower case (see below) where a patch
+    from ``original_scene`` is the least-bad of the options tried.
+
+    Three approaches were GPU-tried for that exposed border on 2026-08-09.
+    ``cv2.BORDER_REPLICATE`` stretches the warped image's own edge
+    row/column outward, producing a warped, vertically-striped duplicate of
+    whatever was at that edge (a ghost copy of the subject's feet/shoes) --
+    rejected outright. Leaving the gap flat black and relying on a
+    downstream person-matte (e.g. ``restore_background``) to repair it
+    sounded cleanest in principle, but measured: a solid black rectangle
+    against sandy ground, directly below a pair of shoes, is genuinely
+    ambiguous to rembg (46% of gap pixels scored "person", 54%
+    "background" -- not a confident background read), so the matte left
+    most of the black hole exactly as it was instead of repairing it --
+    also rejected. Pasting from ``original_scene`` using the warp's own
+    EXACT geometric coverage mask (zero ambiguity -- we know precisely
+    which pixels the affine transform didn't reach, unlike a neural
+    matte's guess) can reproduce a soft echo of the person's real,
+    unshrunk limbs where the gap overlaps their original position, but
+    this was the least-bad artifact of the three on GPU inspection, so it
+    is what ships -- a visually minor, geometrically-principled compromise
+    over a guaranteed-wrong flat black hole or a matte that measurably
+    can't tell the difference either way.
     """
     info = {
         "clamped": 0.0,
@@ -219,8 +243,48 @@ def clamp_edited_head_scale(
         m,
         (w, h),
         flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REPLICATE,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
     )
+    # Patch the border the warp uncovers directly from original_scene, using
+    # the EXACT geometric coverage mask (not a neural matte -- see below for
+    # why that matters). Two other approaches were GPU-tried and rejected on
+    # 2026-08-09: BORDER_REPLICATE stretched the warped image's own edge
+    # outward into a striped duplicate of whatever was there (a ghost copy
+    # of the subject's feet); leaving the gap flat black and relying on a
+    # downstream person-matte (e.g. restore_background) to repair it from
+    # original_scene sounded cleanest in principle, but measured: a solid
+    # black rectangle against sandy ground, directly below a pair of shoes,
+    # is genuinely ambiguous to rembg (46% of gap pixels scored "person",
+    # 54% "background" -- not a confident background read), so the matte
+    # left most of the black hole exactly as-is instead of repairing it.
+    # Pasting here, using the warp's own exact coverage mask (zero
+    # ambiguity -- we know precisely which pixels the affine transform
+    # didn't reach), can reproduce a soft echo of the person's real,
+    # unshrunk limbs where the gap overlaps their original position -- an
+    # accepted, visually minor trade-off against a guaranteed-wrong flat
+    # black hole or a neural matte that measurably can't tell the
+    # difference either way.
+    valid = cv2.warpAffine(
+        np.full((h, w), 255, dtype=np.uint8),
+        m,
+        (w, h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    if valid.min() < 255:
+        orig_arr = pil_to_rgb_np(original_scene)
+        if orig_arr.shape[:2] != (h, w):
+            orig_arr = np.asarray(
+                original_scene.resize((w, h), Image.Resampling.LANCZOS)
+            )
+        alpha = (valid.astype(np.float32) / 255.0)[..., None]
+        warped = (
+            warped.astype(np.float32) * alpha
+            + orig_arr.astype(np.float32) * (1.0 - alpha)
+        )
+        warped = np.clip(warped, 0, 255).astype(np.uint8)
     out = np_to_pil(warped)
     fe2 = detect_best_face(pil_to_rgb_np(out), cache_dir)
     if fe2 is not None and fo.height > 0:
