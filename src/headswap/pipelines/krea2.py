@@ -2584,12 +2584,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # (2.4/3.2/3.2x) pushed that internal hard-paste boundary deep
         # INSIDE the feathered region instead of at its edge, showing up as
         # its own hard rectangle seam in the middle of the photo.
-        # 1.1/1.9/0.9 GPU-confirmed clean (no box seam, only a faint residual
-        # near the hairline); widening to 1.3/2.4/1.0 reintroduced a visible
-        # rectangle -- revert (2026-08-10).
-        half_w = fh * float(self.cfg.get("crop_stitch_head_clamp_side_mult", 1.1))
+        # 1.1/1.9/0.9 GPU-confirmed clean of the rectangle seam, but that was
+        # WITH the (now-fixed) identity-leaking border_fill -- widening back
+        # then reintroduced the rectangle because the leak got worse with
+        # more border to patch. That leak is fixed now (border_fill=
+        # local_out_crop below), so box size is no longer fighting identity
+        # leakage -- but 1.1 on the sides is still too tight for voluminous/
+        # wavy donor hair: GPU-observed 2026-08-10, hair reaching past the
+        # box's opaque core got blended between its pre-shrink and post-
+        # shrink positions in the feather zone, showing as duplicated/
+        # doubled hair strands. Widened sides/bottom to actually contain the
+        # hair; top was never implicated, left alone.
+        half_w = fh * float(self.cfg.get("crop_stitch_head_clamp_side_mult", 1.8))
         top = fh * float(self.cfg.get("crop_stitch_head_clamp_top_mult", 1.9))
-        bot = fh * float(self.cfg.get("crop_stitch_head_clamp_bot_mult", 0.9))
+        bot = fh * float(self.cfg.get("crop_stitch_head_clamp_bot_mult", 1.3))
         W, H = out.size
         x0, x1 = max(0, int(cx - half_w)), min(W, int(cx + half_w))
         y0, y1 = max(0, int(cy - top)), min(H, int(cy + bot))
@@ -2609,6 +2617,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
             target_ratio=float(self.cfg.get("target_edited_head_height_ratio", 0.98)),
             min_height_ratio=float(self.cfg.get("min_edited_head_height_ratio", 0.92)),
             max_grow=float(self.cfg.get("max_edited_head_grow", 1.45)),
+            # GPU-observed 2026-08-10: this box is tight around the head, so
+            # local_body_crop (the ORIGINAL, un-swapped target) is mostly the
+            # target's own head/hair -- its default border-fill role leaked a
+            # fragment of the target's real hairline as a disconnected dark
+            # island above the new head when the exposed strip overlapped
+            # where her original head was. local_out_crop (the already-
+            # correct, pre-warp swapped result) can never reintroduce the
+            # wrong identity there.
+            border_fill=local_out_crop,
         )
         if not clamp_info.get("clamped"):
             return out, clamp_info

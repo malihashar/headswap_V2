@@ -163,6 +163,7 @@ def clamp_edited_head_scale(
     target_ratio: float = 0.98,
     min_height_ratio: float = 0.92,
     max_grow: float = 1.45,
+    border_fill: Image.Image | None = None,
 ) -> tuple[Image.Image, dict[str, float]]:
     """
     Rescale ``edited`` about the face center so its face height matches
@@ -179,7 +180,15 @@ def clamp_edited_head_scale(
     that re-exposes the old face around a shrunk swap (double-face /
     ghosting in group shots). The exposed BORDER strip the shrink/grow warp
     itself uncovers is a separate, narrower case (see below) where a patch
-    from ``original_scene`` is the least-bad of the options tried.
+    from ``original_scene`` is the least-bad of the options tried -- EXCEPT
+    when the caller's crop is tight around the head itself (see
+    ``border_fill``): there, ``original_scene`` IS mostly the old head/hair,
+    so its border patch can leak a fragment of the ORIGINAL person's hair as
+    a disconnected dark island wherever the exposed strip happens to
+    overlap where their real head was (GPU-observed 2026-08-10, tight local
+    head-clamp box with the face near the top of frame). ``border_fill``
+    lets such a caller patch the border from its own already-correct
+    result instead, which can never reintroduce the wrong identity.
 
     Three approaches were GPU-tried for that exposed border on 2026-08-09.
     ``cv2.BORDER_REPLICATE`` stretches the warped image's own edge
@@ -274,10 +283,11 @@ def clamp_edited_head_scale(
         borderValue=0,
     )
     if valid.min() < 255:
-        orig_arr = pil_to_rgb_np(original_scene)
+        fill_src = border_fill if border_fill is not None else original_scene
+        orig_arr = pil_to_rgb_np(fill_src)
         if orig_arr.shape[:2] != (h, w):
             orig_arr = np.asarray(
-                original_scene.resize((w, h), Image.Resampling.LANCZOS)
+                fill_src.resize((w, h), Image.Resampling.LANCZOS)
             )
         alpha = (valid.astype(np.float32) / 255.0)[..., None]
         warped = (

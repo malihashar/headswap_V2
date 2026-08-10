@@ -53,22 +53,50 @@ def test_disabled_by_default_is_a_no_op():
 
 
 def test_enabled_by_body_route_clamps_oversized_stitched_head(monkeypatch):
+    """Content-based fake detector (matches the drawn ellipse's own color),
+    not a whole-image-mean stub -- a mean-based stub is fooled by the
+    border_fill change (local_out_crop, not local_body_crop) that fixed the
+    hairline-leak bug, since it shifts the crop's overall mean.
+
+    Canvas is realistically-proportioned (a small face in a tall full-body
+    frame), not the previous tiny 300x300 test image: with the actual
+    production box margins (side/top/bot multipliers well over 1x face
+    height), a small canvas made the local box cover nearly the entire
+    image, which isn't representative of a real render and made this test
+    fragile to margin tuning that GPU-renders had already validated."""
     pipe = _pipe({"crop_stitch_clamp_head_scale": True})
-    w, h = 300, 300
+    w, h = 1000, 2000
+    gen_color = (220, 180, 150)
+    tgt_color = (150, 180, 220)
     body_full = Image.new("RGB", (w, h), (10, 10, 10))
     out = Image.new("RGB", (w, h), (200, 200, 200))
-    d = ImageDraw.Draw(out)
-    d.ellipse([120, 40, 220, 160], fill=(220, 180, 150))
-    out_mean = float(np.asarray(out).mean())
+    # A realistic oversized ratio (GPU-observed production values run
+    # ~1.2-1.3x, never anywhere near 2x).
+    cx, cy = w // 2, int(h * 0.18)
+    ImageDraw.Draw(body_full).ellipse(
+        [cx - 50, cy - 50, cx + 50, cy + 50], fill=tgt_color
+    )  # height 100
+    ImageDraw.Draw(out).ellipse(
+        [cx - 65, cy - 65, cx + 65, cy + 65], fill=gen_color
+    )  # height 130 -> ratio 1.3
 
-    target_face = FaceBox(80, 80, 160, 160, 0.9)  # height 80
-    gen_face = FaceBox(120, 40, 220, 160, 0.9)  # height 120 -> ratio 1.5
-    _stub_detect_best_face(monkeypatch, [(10.0, target_face), (out_mean, gen_face)])
+    def _fake(rgb, cache_dir, conf_thresh=0.30):
+        arr = np.asarray(rgb)
+        for color in (gen_color, tgt_color):
+            mask = np.all(np.abs(arr.astype(int) - np.array(color)) <= 4, axis=-1)
+            ys, xs = np.where(mask)
+            if ys.size:
+                return FaceBox(int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()), 0.9)
+        return None
+
+    monkeypatch.setattr(preprocess_mod, "detect_best_face", _fake)
+    import headswap.pipelines.krea2 as krea2_mod
+    monkeypatch.setattr(krea2_mod, "detect_best_face", _fake)
 
     result, info = pipe._maybe_clamp_crop_stitch_head_scale(body_full, out)
 
     assert info["clamped"] == 1.0
-    assert info["ratio_before"] == 1.5
+    assert info["ratio_before"] == 1.3
     assert info["ratio_after"] < info["ratio_before"]
     assert not np.array_equal(np.asarray(result), np.asarray(out))
 
