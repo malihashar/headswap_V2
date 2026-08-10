@@ -3102,6 +3102,21 @@ def match_neck_stub_to_head_tone(
     ring_weight = cv2.GaussianBlur(
         ring_weight, (0, 0), sigmaX=max(1.0, ring_px * 0.25)
     )
+    # Skin-color gate: only recolor ring pixels whose CURRENT hue is already
+    # plausibly skin -- not just spatially near the mask. GPU-observed
+    # 2026-08-10: without this, a collar/garment edge that happens to cross
+    # the ring (e.g. white piping against red fabric right at the V-neck)
+    # gets partially shifted on one side of the edge and not the other,
+    # reading as a duplicated/ghosted trim line. Non-skin pixels (white
+    # trim: near-zero chroma; saturated garment fabric: hue far from skin)
+    # are excluded regardless of position.
+    donor_a = float(res_lab[:, :, 1][deep_core.astype(bool)].mean())
+    donor_b = float(res_lab[:, :, 2][deep_core.astype(bool)].mean())
+    ab_dist = np.sqrt(
+        (res_lab[:, :, 1] - donor_a) ** 2 + (res_lab[:, :, 2] - donor_b) ** 2
+    )
+    skin_gate = np.clip(1.0 - ab_dist / 25.0, 0.0, 1.0)
+    ring_weight = ring_weight * skin_gate
     per_channel_strength = [
         l_strength if l_strength is not None else strength,
         ab_strength if ab_strength is not None else strength,
