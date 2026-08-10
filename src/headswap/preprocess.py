@@ -2960,12 +2960,27 @@ def paste_aligned_face(
 
 
 def lab_histogram_match_face(
-    result: Image.Image, body: Image.Image, mask: Image.Image, strength: float = 0.35
+    result: Image.Image,
+    body: Image.Image,
+    mask: Image.Image,
+    strength: float = 0.35,
+    edge_only_px: int = 0,
 ) -> Image.Image:
     """Mild LAB mean match inside mask to reduce neck/skin discontinuity.
 
     Target stats = original body pixels under the mask (the face being replaced),
     not a dilated exterior ring (which on night shots is jacket/sky).
+
+    ``edge_only_px`` restricts WHERE the shift is applied, not the shift
+    itself: with it set, the mean color delta is still measured over the
+    whole masked region, but only painted back within ``edge_only_px`` of the
+    mask boundary -- the solid interior (face/forehead/cheeks) is left alone.
+    Without this, the full-mask weighting (``shift * m``) pulls the donor's
+    identity skin tone partway back toward the target's original skin tone
+    everywhere under the mask, including deep in the face -- GPU-observed as
+    the swapped face reading as a blend toward the wrong person's skin color
+    rather than the donor's own tone (2026-08-10). A seam only needs
+    correcting at the seam.
     """
     if strength <= 0:
         return result
@@ -2977,6 +2992,14 @@ def lab_histogram_match_face(
     core = m > 0.5
     if int(core.sum()) < 50:
         return result
+    weight = m
+    if edge_only_px > 0:
+        k = edge_only_px * 2 + 1
+        eroded = cv2.erode(
+            core.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)),
+        )
+        weight = m * (1.0 - eroded.astype(np.float32))
     res_lab = cv2.cvtColor(res / 255.0, cv2.COLOR_RGB2LAB)
     bod_lab = cv2.cvtColor(bod / 255.0, cv2.COLOR_RGB2LAB)
     for c in range(3):
@@ -2985,6 +3008,67 @@ def lab_histogram_match_face(
         if src_vals.size == 0 or tgt_vals.size == 0:
             continue
         shift = float(tgt_vals.mean() - src_vals.mean()) * strength
-        res_lab[:, :, c] = res_lab[:, :, c] + shift * m
+        res_lab[:, :, c] = res_lab[:, :, c] + shift * weight
+    out = cv2.cvtColor(res_lab.astype(np.float32), cv2.COLOR_LAB2RGB)
+    return np_to_pil(np.clip(out * 255.0, 0, 255))
+
+
+def match_neck_stub_to_head_tone(
+    result: Image.Image,
+    mask: Image.Image,
+    *,
+    ring_px: int = 40,
+    interior_erode_px: int = 20,
+    strength: float = 0.65,
+) -> Image.Image:
+    """Tint the exposed original neck just outside the paste mask toward the
+    donor's own skin tone -- color only, no new content is pasted.
+
+    The paste mask (``mask``) has to stay tight: widening it to reach the
+    real collarline pastes the edited crop's own (donor) clothing/necklace
+    content over the target's real clothes -- GPU-observed as a double
+    necklace (2026-08-10). But that means the sliver of neck just past the
+    mask edge is still 100% the TARGET's original, un-swapped skin tone,
+    which reads as a seam against the donor-toned face right next to it.
+
+    This shifts ONLY that thin exterior ring's LAB mean toward the mean tone
+    sampled from deep inside the mask (a heavily-eroded core, so the sample
+    is pure donor face, not itself edge-blended) -- the opposite direction
+    from ``lab_histogram_match_face``, which pulls edited pixels toward the
+    original. No pixels inside the mask are touched.
+    """
+    if strength <= 0 or ring_px <= 0:
+        return result
+    res = pil_to_rgb_np(result).astype(np.float32)
+    m = np.asarray(mask.convert("L")).astype(np.float32) / 255.0
+    if m.shape[:2] != res.shape[:2]:
+        m = cv2.resize(m, (res.shape[1], res.shape[0]), interpolation=cv2.INTER_LINEAR)
+    core = (m > 0.5).astype(np.uint8)
+    k_deep = interior_erode_px * 2 + 1
+    deep_core = cv2.erode(
+        core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_deep, k_deep))
+    )
+    if int(deep_core.sum()) < 50:
+        return result
+    k_ring = ring_px * 2 + 1
+    dilated = cv2.dilate(
+        core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_ring, k_ring))
+    )
+    ring = dilated.astype(bool) & (~core.astype(bool))
+    if int(ring.sum()) < 50:
+        return result
+    res_lab = cv2.cvtColor(res / 255.0, cv2.COLOR_RGB2LAB)
+    ring_weight = np.zeros(res.shape[:2], dtype=np.float32)
+    ring_weight[ring] = 1.0
+    ring_weight = cv2.GaussianBlur(
+        ring_weight, (0, 0), sigmaX=max(1.0, ring_px * 0.25)
+    )
+    for c in range(3):
+        donor_mean = float(res_lab[:, :, c][deep_core.astype(bool)].mean())
+        ring_vals = res_lab[:, :, c][ring]
+        if ring_vals.size == 0:
+            continue
+        shift = (donor_mean - float(ring_vals.mean())) * strength
+        res_lab[:, :, c] = res_lab[:, :, c] + shift * ring_weight
     out = cv2.cvtColor(res_lab.astype(np.float32), cv2.COLOR_LAB2RGB)
     return np_to_pil(np.clip(out * 255.0, 0, 255))

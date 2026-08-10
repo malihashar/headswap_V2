@@ -125,6 +125,8 @@ def restore_background(
     *,
     dilate_px: int = 5,
     blur_px: int = 9,
+    alpha_floor: int = 40,
+    alpha_ceil: int = 245,
 ) -> tuple[Image.Image, dict[str, Any]]:
     """Force every pixel outside the person back to ``plate``.
 
@@ -141,7 +143,27 @@ def restore_background(
 
     Note the matte is taken from the RESULT too, not just the plate, so newly
     generated hair extending beyond the original silhouette is kept.
+
+    GPU-verified 2026-08-10: without the alpha_floor/alpha_ceil snap below,
+    this reproduced a translucent head-and-shoulders "ghost" hovering above
+    the real head -- the exact "double-blurred alpha tail" failure
+    ``feathered_soft_composite``/``clean_alpha_tails`` in preprocess.py was
+    already built to prevent, just never applied here. Isolated by dumping
+    every stage: the raw diffusion crop and the stitch composite (which DOES
+    call clean_alpha_tails) were both clean; the ghost only appeared after
+    THIS function's blend, which blurs the union matte (blur_px=9) and uses
+    the raw blurred value as alpha with no floor/ceil -- a long, faint
+    (alpha 1-30) tail beyond the real silhouette that partially preserves
+    ``result`` instead of snapping fully to ``plate`` there.
+
+    floor=10 measurably shrank the ghost but a faint trace remained on
+    GPU-swept floor values [10, 20, 35, 50] -- clean_alpha_tails RESCALES the
+    surviving [floor, ceil] band rather than shrinking its spatial extent, so
+    a low floor still leaves a wide-but-faint halo, just dimmer. floor=40 was
+    the highest value in that sweep that still measurably tightened the halo
+    without visibly hardening the true head/hair edge (2026-08-10).
     """
+    from headswap.preprocess import clean_alpha_tails
     from headswap.segmentation import _person_matte
 
     if result.size != plate.size:
@@ -158,6 +180,8 @@ def restore_background(
     if blur_px > 0:
         k = blur_px if blur_px % 2 else blur_px + 1
         m = cv2.GaussianBlur(m, (k, k), 0)
+    if alpha_floor > 0 or alpha_ceil < 255:
+        m = np.asarray(clean_alpha_tails(Image.fromarray(m), floor=alpha_floor, ceil=alpha_ceil))
     a = (m.astype(np.float32) / 255.0)[..., None]
     out = (
         np.asarray(result).astype(np.float32) * a

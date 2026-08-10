@@ -110,11 +110,35 @@ mask_expand_px: 18
 mask_blur_px: 12
 # Tall top_extend so original hair is inside the edit/stitch region (otherwise
 # body hair survives outside the mask while only the face is replaced).
+# Tried raising this to 0.55 to push the mask past the collarline (2026-08-10)
+# -- GPU-verified WORSE: the mask then reached far enough down to include the
+# donor's edited-crop necklace/collar content, which got pasted straight over
+# the target's own clothing -> visible double necklace/double collar. Reverted
+# to 0.40. The neck seam needs a THIN-BAND fix (feather + alpha-tail cleanup +
+# mild local LAB), not a bigger mask -- a bigger mask composites more of the
+# edited crop's own (wrong) clothing, not more skin.
 mask_top_extend: 1.55
 mask_side_extend: 0.60
 mask_bot_extend: 0.40
 stitch_feather_px: 10
 post_color_match_strength: 0.35
+# Restrict WHERE that strength is painted back to a thin ring at the mask
+# boundary (px), not the whole head. Un-gated, this pulled the donor's own
+# skin tone partway back toward the target's original tone everywhere under
+# the mask -- including the untouched face interior -- which reads as the
+# swap "losing" identity skin color, not just a smoothed seam (2026-08-10).
+post_color_match_edge_only_px: 24
+# Separately, tint the sliver of the target's ORIGINAL exposed neck just past
+# the paste mask edge toward the donor's own tone (color only, no new content
+# pasted -- unlike widening the paste mask itself, which pastes the edited
+# crop's own clothing over the target's real clothes). Without this the
+# donor-toned face sits directly next to an un-recolored original-tone neck
+# stub and reads as a tone seam even though the paste/feather geometry is
+# otherwise correct (2026-08-10).
+neck_stub_tone_match: true
+neck_stub_tone_match_ring_px: 40
+neck_stub_tone_match_interior_erode_px: 20
+neck_stub_tone_match_strength: 0.65
 
 # Multi-person production (decision-gate YES_ARCHITECTURE):
 #   detect faces → select one → SAME single-person crop recipe → Krea2 → stitch.

@@ -52,6 +52,7 @@ from headswap.preprocess import (
     hard_freeze_neighbor_faces,
     identity_face_boost_mask,
     lab_histogram_match_face,
+    match_neck_stub_to_head_tone,
     narrow_band_seam_refine,
     pad_to_square,
     pil_to_rgb_np,
@@ -2544,29 +2545,108 @@ class Krea2IdentityEditPipeline(BasePipeline):
         (`crop_stitch_clamp_head_scale`, set by `_resolve_body_route` only
         when a single-person full body was actually detected) so ordinary
         portrait/close-up crop_stitch runs are completely unaffected.
+
+        GPU-observed 2026-08-10: this used to hand the ENTIRE canvas to
+        `clamp_edited_head_scale`, which warps whatever image it is given
+        about the face center -- fine for a head-sized crop (how the
+        stitch_multi path already uses it, on `edited_crop`), but here it
+        shrank the WHOLE PHOTO (body, clothes, background together) just to
+        fix a head-only size mismatch. That produced two visible defects at
+        once: a thin rectangular seam around the entire frame (where the
+        shrunk interior meets the hard-pasted, unshrunk original border --
+        a subtle geometric misalignment in otherwise-identical background
+        content), and a duplicated/terraced hem at the bottom of the dress
+        (the same border-fill, now cutting through actual subject content
+        instead of empty background/sky). Both disappear by construction if
+        the warp only ever touches a head-sized region: crop a generous box
+        around the head out of both `out` and `body_full`, clamp just that
+        crop (identical geometry to the stitch_multi call site), and
+        feather-paste it back -- the body, clothes, and background outside
+        that box are never touched, so there is nothing left to seam or
+        duplicate.
         """
         do_clamp = bool(
             self.cfg.get("crop_stitch_clamp_head_scale", False)
         ) and bool(self.cfg.get("clamp_edited_head_scale", True))
         if not do_clamp:
             return out, None
-        clamped, clamp_info = clamp_edited_head_scale(
-            body_full,
-            out,
+        face_o = detect_best_face(pil_to_rgb_np(out), self.cache_dir)
+        if face_o is None or face_o.height < 8:
+            return out, None
+        fh = float(face_o.height)
+        cx = 0.5 * (face_o.x0 + face_o.x1)
+        cy = 0.5 * (face_o.y0 + face_o.y1)
+        # Tight box (close to the actual head+hair mask geometry used
+        # elsewhere -- mask_top/side/bot_extend) so the shrink warp's own
+        # exposed-border zone (roughly (1-shrink)/2 of the box dimensions)
+        # lands close to THIS box's own edge, where the feather below
+        # already blends it away. GPU-observed 2026-08-10: a much larger box
+        # (2.4/3.2/3.2x) pushed that internal hard-paste boundary deep
+        # INSIDE the feathered region instead of at its edge, showing up as
+        # its own hard rectangle seam in the middle of the photo.
+        # 1.1/1.9/0.9 GPU-confirmed clean (no box seam, only a faint residual
+        # near the hairline); widening to 1.3/2.4/1.0 reintroduced a visible
+        # rectangle -- revert (2026-08-10).
+        half_w = fh * float(self.cfg.get("crop_stitch_head_clamp_side_mult", 1.1))
+        top = fh * float(self.cfg.get("crop_stitch_head_clamp_top_mult", 1.9))
+        bot = fh * float(self.cfg.get("crop_stitch_head_clamp_bot_mult", 0.9))
+        W, H = out.size
+        x0, x1 = max(0, int(cx - half_w)), min(W, int(cx + half_w))
+        y0, y1 = max(0, int(cy - top)), min(H, int(cy + bot))
+        if x1 - x0 < 16 or y1 - y0 < 16:
+            return out, None
+        box = (x0, y0, x1, y1)
+        local_body = body_full
+        if local_body.size != out.size:
+            local_body = local_body.resize(out.size, Image.Resampling.LANCZOS)
+        local_out_crop = out.crop(box)
+        local_body_crop = local_body.crop(box)
+        clamped_local, clamp_info = clamp_edited_head_scale(
+            local_body_crop,
+            local_out_crop,
             self.cache_dir,
             max_height_ratio=float(self.cfg.get("max_edited_head_height_ratio", 1.08)),
             target_ratio=float(self.cfg.get("target_edited_head_height_ratio", 0.98)),
             min_height_ratio=float(self.cfg.get("min_edited_head_height_ratio", 0.92)),
             max_grow=float(self.cfg.get("max_edited_head_grow", 1.45)),
         )
-        if clamp_info.get("clamped"):
-            print(
-                f"[krea2] crop_stitch (full-body route) clamped head scale "
-                f"ratio {clamp_info['ratio_before']:.2f}→"
-                f"{clamp_info['ratio_after']:.2f} shrink={clamp_info['shrink']:.3f}",
-                flush=True,
-            )
-        return clamped, clamp_info
+        if not clamp_info.get("clamped"):
+            return out, clamp_info
+        print(
+            f"[krea2] crop_stitch (full-body route) clamped head scale "
+            f"ratio {clamp_info['ratio_before']:.2f}→"
+            f"{clamp_info['ratio_after']:.2f} shrink={clamp_info['shrink']:.3f} "
+            f"(local box {box}, whole frame untouched)",
+            flush=True,
+        )
+        import cv2
+        import numpy as np
+
+        # Elliptical opaque core, not a rectangle: the box is centered on a
+        # round head, and a rectangular inset leaves the mask's straight
+        # edges cutting across sky/hair at an angle that doesn't match
+        # either -- more visible than an ellipse that roughly tracks the
+        # head's own silhouette.
+        feather = max(4, int(round(fh * 0.35)))
+        bw, bh = clamped_local.size
+        m = np.zeros((bh, bw), dtype=np.uint8)
+        cv2.ellipse(
+            m,
+            (bw // 2, bh // 2),
+            (max(1, bw // 2 - feather), max(1, bh // 2 - feather)),
+            0, 0, 360, 255, -1,
+        )
+        k = feather * 2 + 1
+        m = cv2.GaussianBlur(m, (k, k), 0)
+        alpha = (m.astype(np.float32) / 255.0)[..., None]
+        blended = (
+            np.asarray(clamped_local.convert("RGB")).astype(np.float32) * alpha
+            + np.asarray(local_out_crop.convert("RGB")).astype(np.float32) * (1.0 - alpha)
+        )
+        blended_img = Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8))
+        out_final = out.copy()
+        out_final.paste(blended_img, (x0, y0))
+        return out_final, clamp_info
 
     def _maybe_procrustes_edited_crop(
         self,
@@ -2725,11 +2805,23 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 )
         stitch_mask = mask
         # Dilate before feather so the opaque core fully covers the old head
-        # (stops original face/ear ghosting next to neighbors).
-        if stitch_multi:
-            dilate_px = int(self.cfg.get("multi_stitch_mask_dilate_px", 14))
-            if dilate_px > 0:
-                stitch_mask = dilate_mask(mask, dilate_px)
+        # (stops original face/ear ghosting next to neighbors). A small dilate
+        # applies even on the single-person path now: GPU-observed a faint
+        # "double chin" ghost at the jaw even with a correctly-sized mask --
+        # the un-dilated core tracked the NEW head's silhouette almost
+        # exactly, so a sliver of the OLD jaw sat inside the feather band
+        # instead of being fully opaque-covered (2026-08-10). This only grows
+        # the opaque core by a few px, not the mask's overall extent (extend
+        # the extent -- e.g. mask_bot_extend -- and the crop's own edited
+        # clothing/necklace content gets pasted over the target's real
+        # clothes instead; verified worse).
+        dilate_px = int(
+            self.cfg.get("multi_stitch_mask_dilate_px", 14)
+            if stitch_multi
+            else self.cfg.get("stitch_mask_dilate_px", 4)
+        )
+        if dilate_px > 0:
+            stitch_mask = dilate_mask(mask, dilate_px)
         # Multi-person: stronger feather + LAB match — jaw/neck seams are the
         # dominant failure mode when the donor face lighting ≠ body flash.
         if stitch_multi:
@@ -2763,10 +2855,26 @@ class Krea2IdentityEditPipeline(BasePipeline):
             debug_stages["stitch_mask"] = stitch_mask.convert("L").copy()
             debug_stages["composite_before_lab"] = stitched.copy()
         stitched = lab_histogram_match_face(
-            stitched, color_ref, stitch_mask, strength=post_match
+            stitched,
+            color_ref,
+            stitch_mask,
+            strength=post_match,
+            edge_only_px=int(self.cfg.get("post_color_match_edge_only_px", 24)),
         )
         if debug_stages is not None:
             debug_stages["composite_after_lab"] = stitched.copy()
+        if bool(self.cfg.get("neck_stub_tone_match", True)):
+            stitched = match_neck_stub_to_head_tone(
+                stitched,
+                stitch_mask,
+                ring_px=int(self.cfg.get("neck_stub_tone_match_ring_px", 40)),
+                interior_erode_px=int(
+                    self.cfg.get("neck_stub_tone_match_interior_erode_px", 20)
+                ),
+                strength=float(self.cfg.get("neck_stub_tone_match_strength", 0.65)),
+            )
+            if debug_stages is not None:
+                debug_stages["composite_after_neck_tone"] = stitched.copy()
         # Stage E: optional narrow-band seam refine (face interior locked).
         if bool(self.cfg.get("seam_refine", False)):
             # stitch_mask is crop-local; paste onto full-canvas mask for refine.
@@ -4084,6 +4192,33 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             if out_dir
                             else None,
                         }
+                    # restore_background BEFORE the clamp, not after (order
+                    # matters -- GPU-observed a large translucent double-
+                    # exposure "ghost" of the ORIGINAL head hovering above the
+                    # new, smaller one, 2026-08-10). restore_background's
+                    # matte-union blend assumes ``out`` and ``body_full`` show
+                    # the SAME person at the SAME scale/position -- true here,
+                    # right after the stitch, since only the head/hair mask
+                    # region differs from body_full at this point. Run it
+                    # here, it is a clean safety net for any diffusion-crop
+                    # background drift the stitch's own feathered_soft_composite
+                    # missed. Run it AFTER the clamp instead (as this used to)
+                    # and that assumption breaks: the clamp shrinks the WHOLE
+                    # frame about the face center, so ``out``'s person is now
+                    # at a different scale/position than ``body_full``'s --
+                    # body_full's matte then confidently marks the OLD, larger
+                    # head's true (original) position as "person" too, and the
+                    # blurred matte-union transition there blends in a faint
+                    # but large translucent trace of the original head instead
+                    # of cleanly showing sky. The clamp's own border-fill (see
+                    # clamp_edited_head_scale) already handles the shrink's
+                    # exposed edge correctly -- it's a HARD 0/255 paste using
+                    # the warp's exact coverage mask, not a soft neural matte,
+                    # so it doesn't have this failure mode and can safely run
+                    # last.
+                    if bool(self.cfg.get("restore_background_enabled", True)):
+                        out, rb_info = restore_background(out, body_full)
+                        face_prep_diag["restore_background"] = rb_info
                     # Body-route safety net (see _resolve_body_route /
                     # _maybe_clamp_crop_stitch_head_scale docstrings): only
                     # active when a single-person full body was detected --
@@ -4093,20 +4228,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     )
                     if cs_clamp_info is not None:
                         face_prep_diag["crop_stitch_body_route_clamp"] = cs_clamp_info
-                    # The head-scale clamp shrinks+translates the WHOLE final
-                    # image about the face center (BORDER_REPLICATE for the
-                    # newly-exposed edge), which leaves a visible seam/vignette
-                    # in the background when it fires -- nothing downstream
-                    # was correcting for it. restore_background forces every
-                    # non-person pixel back to the pristine original photo
-                    # (union of result/plate person mattes), which repairs
-                    # that seam regardless of what geometric transform caused
-                    # it. Only meaningful when the clamp actually moved
-                    # pixels; still cheap/safe to run unconditionally since it
-                    # no-ops gracefully without a matte backend installed.
-                    if bool(self.cfg.get("restore_background_enabled", True)):
-                        out, rb_info = restore_background(out, body_full)
-                        face_prep_diag["restore_background"] = rb_info
                     # Optional post-stitch neighbor restore. OFF by default —
                     # production locality is crop-window exclusion + mask carve.
                     if (
