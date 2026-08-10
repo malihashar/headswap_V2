@@ -3115,7 +3115,7 @@ def match_neck_stub_to_head_tone(
     ab_dist = np.sqrt(
         (res_lab[:, :, 1] - donor_a) ** 2 + (res_lab[:, :, 2] - donor_b) ** 2
     )
-    skin_gate = np.clip(1.0 - ab_dist / 25.0, 0.0, 1.0)
+    skin_gate = np.clip(1.0 - ab_dist / 15.0, 0.0, 1.0)
     ring_weight = ring_weight * skin_gate
     per_channel_strength = [
         l_strength if l_strength is not None else strength,
