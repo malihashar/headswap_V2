@@ -1,14 +1,23 @@
-numpy>=1.24
-Pillow>=10.0
-opencv-python-headless>=4.8
-PyYAML>=6.0
-tqdm>=4.66
-requests>=2.31
+# Pinned to exact versions (2026-08-10), not >= ranges: unpinned deps let pip
+# resolve a different exact version on every Colab rebuild, which shifted
+# floating-point precision in face detection (insightface/onnxruntime) enough
+# to change where the head-scale clamp's box landed run-to-run -- the same
+# commit produced a clean render in one Colab instance and a visibly seamed
+# one in the next, purely from this drift. Pinning does not fully eliminate
+# variance (Colab's own preinstalled torch/CUDA base image is outside this
+# file's control and can still shift between allocations), but it removes
+# the largest controllable source of it.
+numpy==2.3.4
+Pillow==11.3.0
+opencv-python-headless==4.10.0.84
+PyYAML==6.0.2
+tqdm==4.67.1
+requests==2.32.3
 # Colab setup forces HF_HUB_DISABLE_XET=1; do not install hf_xet for large downloads there.
-huggingface_hub>=0.24.0
+huggingface_hub==0.25.2
 # Identity scoring (ArcFace) used by the Colab quality gate
-insightface>=0.7
-onnxruntime>=1.16
+insightface==0.7.3
+onnxruntime==1.19.2
 # Jupyter/Colab already has a running asyncio loop; Comfy bootstrap needs this
-nest_asyncio>=1.6
-pytest>=7.4
+nest_asyncio==1.6.0
+pytest==8.3.3
