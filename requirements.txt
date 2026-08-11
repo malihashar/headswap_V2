@@ -14,14 +14,18 @@ PyYAML==6.0.2
 tqdm==4.67.1
 requests==2.32.3
 # Colab setup forces HF_HUB_DISABLE_XET=1; do not install hf_xet for large downloads there.
-# NOT pinned (unlike the others in this file): GPU-verified 2026-08-10 that
-# pinning this to an exact older version (0.25.2) broke ComfyUI's own import
-# chain -- Colab's preinstalled transformers/gradio/diffusers need a much
-# newer huggingface_hub (>=1.x) than headswap_V2 itself does, and downgrading
-# it for this package alone made `import transformers` fail with
-# "cannot import name 'is_offline_mode'". Leave it to whatever version
-# Colab's own preinstalled packages already require.
-huggingface_hub>=0.24.0
+# NOT tightly pinned (unlike the others in this file): GPU-verified
+# 2026-08-10 that pinning this to an exact older version (0.25.2) broke
+# ComfyUI's own import chain -- Colab's preinstalled transformers/gradio/
+# diffusers need a much newer huggingface_hub than headswap_V2 itself does,
+# and downgrading it for this package alone made `import transformers` fail
+# with "cannot import name 'is_offline_mode' from 'huggingface_hub'". A
+# floor of >=0.24.0 wasn't enough either -- on an environment where some
+# earlier install had already left an old version in place, `pip install -r`
+# doesn't touch an already-"satisfying" package, so the broken old version
+# survived a plain reinstall. Floor raised to match what diffusers itself
+# requires, so a fresh resolve can't land below the version ComfyUI needs.
+huggingface_hub>=0.34.0
 # Identity scoring (ArcFace) used by the Colab quality gate
 insightface==0.7.3
 onnxruntime==1.19.2
