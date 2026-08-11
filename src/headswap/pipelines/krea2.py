@@ -2797,6 +2797,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     clamp_info["debug_transformed_path"] = str(xform_path)
             except Exception as exc:  # noqa: BLE001 — never block the run
                 print(f"[krea2 debug] full_frame_head_clamp dump failed: {exc}", flush=True)
+        # Harmonization was skipped in _stitch_edited for this path (see the
+        # comment there) specifically so it can run here instead, against
+        # THIS mask -- the actual post-warp head position -- rather than the
+        # pre-warp one. `mask` is already full-canvas sized (built from
+        # `warped`, the full frame), so pass box=None.
+        if mask is not None and bool(self.cfg.get("harmonization_enabled", True)):
+            clamped = self._apply_harmonization(
+                clamped,
+                body_full,
+                mask,
+                box=None,
+            )
         return clamped, clamp_info
 
     def _maybe_procrustes_edited_crop(
@@ -3198,7 +3210,19 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
             debug_stages["debug_gen_mask_boundary_overlay"] = overlay
             debug_stages["debug_neck_seam_crop"] = neck_crop
-        if bool(self.cfg.get("harmonization_enabled", True)):
+        # Skip here when the full-frame clamp will run later: it warps the
+        # WHOLE frame and rebuilds its own head+hair mask from where the head
+        # actually lands post-warp, so harmonizing THIS (pre-warp) boundary
+        # position color-corrects a ring that gets moved out from under the
+        # correction by the time the final composite exists. Harmonization
+        # runs again after the clamp instead (see
+        # _maybe_clamp_crop_stitch_head_scale_full_frame), using its own
+        # post-warp mask so the corrected ring and the true final seam
+        # coincide (2026-08-11).
+        run_harmonization_here = bool(
+            self.cfg.get("harmonization_enabled", True)
+        ) and not bool(self.cfg.get("crop_stitch_full_frame_head_clamp", False))
+        if run_harmonization_here:
             pre_harm = stitched.copy()
             stitched = self._apply_harmonization(
                 pre_harm,
@@ -3207,7 +3231,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 box=box,
                 debug_stages=debug_stages,
             )
-        elif bool(self.cfg.get("neck_stub_tone_match", True)):
+        elif bool(self.cfg.get("neck_stub_tone_match", True)) and not bool(
+            self.cfg.get("crop_stitch_full_frame_head_clamp", False)
+        ):
             stitched = match_neck_stub_to_head_tone(
                 stitched,
                 stitch_mask,
