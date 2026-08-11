@@ -3270,3 +3270,148 @@ def match_neck_stub_to_head_tone(
             res_lab[:, :, c] = res_lab[:, :, c] + shift * ring_weight
     out = cv2.cvtColor(res_lab.astype(np.float32), cv2.COLOR_LAB2RGB)
     return np_to_pil(np.clip(out * 255.0, 0, 255))
+
+
+def build_harmonization_mask(
+    body: Image.Image,
+    gen_mask: Image.Image,
+    *,
+    dilate_px: int = 24,
+    bot_extend_frac: float = 0.15,
+    skin_thresh: float = 0.45,
+    include_arms: bool = True,
+) -> tuple[Image.Image, dict[str, float | int | bool]]:
+    """Build a skin-adaptive harmonization mask wider than the generation mask.
+
+    The generation mask controls Krea2 regen and stitch geometry; this mask
+    covers only the seam ring plus exposed original-body skin (neck, and arms
+    when visible). Never used for generation.
+    """
+    info: dict[str, float | int | bool] = {
+        "harmonization_dilate_px": int(dilate_px),
+        "harmonization_bot_extend_frac": float(bot_extend_frac),
+        "harmonization_skin_thresh": float(skin_thresh),
+        "harmonization_include_arms": bool(include_arms),
+    }
+    w, h = body.size
+    m = np.asarray(gen_mask.convert("L")).astype(np.float32) / 255.0
+    if m.shape[:2] != (h, w):
+        m = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
+    core = (m > 0.5).astype(np.uint8)
+    if int(core.sum()) < 20:
+        info["harm_area_px"] = 0
+        info["harm_skin_frac"] = 0.0
+        return Image.new("L", (w, h), 0), info
+
+    dilated = np.asarray(
+        dilate_mask(Image.fromarray(core * 255), max(0, int(dilate_px))).convert("L")
+    )
+    dilated_bool = dilated > 128
+
+    ys, xs = np.where(core.astype(bool))
+    y0, y1 = int(ys.min()), int(ys.max())
+    x0, x1 = int(xs.min()), int(xs.max())
+    mh = max(1, y1 - y0)
+    chin_y = y0 + int(0.45 * mh)
+    extend_y = min(h, int(y1 + max(1.0, float(bot_extend_frac)) * mh))
+    lateral = int(0.85 * mh) if include_arms else int(0.35 * mh)
+    x0a = max(0, x0 - lateral)
+    x1a = min(w, x1 + lateral)
+    below = np.zeros((h, w), dtype=bool)
+    below[chin_y:extend_y, x0a:x1a] = True
+    candidate = dilated_bool | below
+
+    bod = pil_to_rgb_np(body).astype(np.uint8)
+    skin_like = _skin_likelihood_strict(bod)
+    skin_mask = skin_like >= float(skin_thresh)
+    harm_bool = candidate & skin_mask & (~core.astype(bool))
+
+    harm_u8 = harm_bool.astype(np.uint8) * 255
+    harm_img = Image.fromarray(harm_u8)
+    harm_area = int(harm_bool.sum())
+    skin_in_candidate = int((candidate & skin_mask).sum())
+    info["harm_area_px"] = harm_area
+    info["harm_skin_frac"] = (
+        float(harm_area) / float(max(1, skin_in_candidate)) if skin_in_candidate else 0.0
+    )
+    if harm_area > 0:
+        hy, hx = np.where(harm_bool)
+        info["harm_bbox"] = (
+            int(hx.min()),
+            int(hy.min()),
+            int(hx.max()) + 1,
+            int(hy.max()) + 1,
+        )
+    else:
+        info["harm_bbox"] = (0, 0, 0, 0)
+    gy, gx = np.where(core.astype(bool))
+    info["gen_bbox"] = (
+        int(gx.min()),
+        int(gy.min()),
+        int(gx.max()) + 1,
+        int(gy.max()) + 1,
+    )
+    return harm_img, info
+
+
+def harmonize_skin_tone(
+    result: Image.Image,
+    body: Image.Image,
+    gen_mask: Image.Image,
+    harm_mask: Image.Image,
+    *,
+    strength: float = 0.55,
+    feather_px: int = 16,
+    interior_erode_px: int = 20,
+) -> tuple[Image.Image, dict[str, float | str | bool]]:
+    """LAB mean match on harmonization mask only — color/tone, no geometry."""
+    info: dict[str, float | str | bool] = {
+        "harmonization_method": "lab_mean_std",
+        "harmonization_strength": float(strength),
+        "harmonization_feather_px": float(feather_px),
+        "harmonization_applied": False,
+    }
+    if strength <= 0:
+        info["harmonization_reason"] = "strength_zero"
+        return result, info
+
+    res = pil_to_rgb_np(result).astype(np.float32)
+    gm = np.asarray(gen_mask.convert("L")).astype(np.float32) / 255.0
+    hm = np.asarray(harm_mask.convert("L")).astype(np.float32) / 255.0
+    h, w = res.shape[:2]
+    if gm.shape[:2] != (h, w):
+        gm = cv2.resize(gm, (w, h), interpolation=cv2.INTER_LINEAR)
+    if hm.shape[:2] != (h, w):
+        hm = cv2.resize(hm, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    core = (gm > 0.5).astype(np.uint8)
+    k_deep = interior_erode_px * 2 + 1
+    deep_core = cv2.erode(
+        core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_deep, k_deep))
+    )
+    harm_core = (hm > 0.5) & (~core.astype(bool))
+    if int(deep_core.sum()) < 50 or int(harm_core.sum()) < 30:
+        info["harmonization_reason"] = "insufficient_pixels"
+        return result, info
+
+    weight = hm.copy()
+    weight[core.astype(bool)] = 0.0
+    if feather_px > 0:
+        k = max(3, int(feather_px) * 2 + 1)
+        weight = cv2.GaussianBlur(weight, (k, k), 0)
+        weight = weight * (1.0 - gm)
+
+    res_lab = cv2.cvtColor(res / 255.0, cv2.COLOR_RGB2LAB)
+    deep_bool = deep_core.astype(bool)
+    for c in range(3):
+        ref_mean = float(res_lab[:, :, c][deep_bool].mean())
+        harm_vals = res_lab[:, :, c][harm_core]
+        if harm_vals.size == 0:
+            continue
+        shift = (ref_mean - float(harm_vals.mean())) * strength
+        res_lab[:, :, c] = res_lab[:, :, c] + shift * weight
+
+    out = cv2.cvtColor(res_lab.astype(np.float32), cv2.COLOR_LAB2RGB)
+    info["harmonization_applied"] = True
+    info["harmonization_reason"] = "ok"
+    return np_to_pil(np.clip(out * 255.0, 0, 255)), info

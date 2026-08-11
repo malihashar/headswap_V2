@@ -154,6 +154,17 @@ collapse_soft_chin_ghost_chin_frac: 0.35
 # Single-person: dilate opaque stitch core a few px (covers old jaw sliver).
 stitch_mask_dilate_px: 12
 
+# --- Dual mask: generation vs harmonization --------------------------------
+# Generation mask (head_matte + mask_*_extend) controls Krea2 regen and stitch
+# geometry only. Harmonization mask is wider, skin-adaptive, color-only.
+harmonization_enabled: true
+harmonization_dilate_px: 24
+harmonization_bot_extend: 0.15
+harmonization_skin_thresh: 0.45
+harmonization_strength: 0.55
+harmonization_feather_px: 16
+harmonization_include_arms: true
+
 # Multi-person production (decision-gate YES_ARCHITECTURE):
 #   detect faces → select one → SAME single-person crop recipe → Krea2 → stitch.
 #   Allowed multi-only logic: face select + neighbor exclusion from crop.

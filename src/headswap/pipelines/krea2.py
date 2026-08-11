@@ -51,6 +51,8 @@ from headswap.preprocess import (
     get_face_landmarks5,
     hard_freeze_neighbor_faces,
     identity_face_boost_mask,
+    build_harmonization_mask,
+    harmonize_skin_tone,
     lab_histogram_match_face,
     match_neck_stub_to_head_tone,
     clean_alpha_tails,
@@ -1564,9 +1566,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
             out = lab_histogram_match_face(
                 out, body_full, stitch_mask, strength=post_match
             )
+        if bool(self.cfg.get("harmonization_enabled", True)):
+            out = self._apply_harmonization(
+                out,
+                body_full,
+                freeze_mask,
+                box=(0, 0, w, h),
+            )
         print(
             f"[krea2 blend] mode=full_frame method=lab_match+feather "
-            f"feather_px={feather} lab_strength={post_match}",
+            f"feather_px={feather} lab_strength={post_match} "
+            f"harmonize={bool(self.cfg.get('harmonization_enabled', True))}",
             flush=True,
         )
         return out
@@ -2778,6 +2788,75 @@ class Krea2IdentityEditPipeline(BasePipeline):
         info["face_only_blend"] = True
         return blended, info
 
+    @staticmethod
+    def _generation_mask_on_canvas(
+        gen_mask: Image.Image,
+        canvas_size: tuple[int, int],
+        box: tuple[int, int, int, int] | None,
+    ) -> Image.Image:
+        """Map crop-local generation mask to full canvas coordinates."""
+        if gen_mask.size == canvas_size:
+            return gen_mask.convert("L")
+        full = Image.new("L", canvas_size, 0)
+        if box is None:
+            return full
+        x0, y0, x1, y1 = box
+        bw, bh = max(1, x1 - x0), max(1, y1 - y0)
+        m_r = gen_mask.convert("L").resize((bw, bh), Image.Resampling.BILINEAR)
+        full.paste(m_r, (x0, y0))
+        return full
+
+    def _apply_harmonization(
+        self,
+        stitched: Image.Image,
+        body: Image.Image,
+        gen_mask: Image.Image,
+        *,
+        box: tuple[int, int, int, int] | None = None,
+        debug_stages: dict[str, Image.Image] | None = None,
+    ) -> Image.Image:
+        """Post-stitch color harmonization using a separate skin-adaptive mask."""
+        if not bool(self.cfg.get("harmonization_enabled", True)):
+            return stitched
+        gen_full = self._generation_mask_on_canvas(gen_mask, stitched.size, box)
+        harm_mask, harm_info = build_harmonization_mask(
+            body,
+            gen_full,
+            dilate_px=int(self.cfg.get("harmonization_dilate_px", 24)),
+            bot_extend_frac=float(self.cfg.get("harmonization_bot_extend", 0.15)),
+            skin_thresh=float(self.cfg.get("harmonization_skin_thresh", 0.45)),
+            include_arms=bool(self.cfg.get("harmonization_include_arms", True)),
+        )
+        stitched, apply_info = harmonize_skin_tone(
+            stitched,
+            body,
+            gen_full,
+            harm_mask,
+            strength=float(self.cfg.get("harmonization_strength", 0.55)),
+            feather_px=int(self.cfg.get("harmonization_feather_px", 16)),
+            interior_erode_px=int(
+                self.cfg.get("neck_stub_tone_match_interior_erode_px", 20)
+            ),
+        )
+        print(
+            "[krea2 harmonize] "
+            f"gen_bbox={harm_info.get('gen_bbox')} "
+            f"harm_bbox={harm_info.get('harm_bbox')} "
+            f"harm_area_px={harm_info.get('harm_area_px')} "
+            f"skin_frac={float(harm_info.get('harm_skin_frac', 0.0)):.3f} "
+            f"method={apply_info.get('harmonization_method')} "
+            f"strength={apply_info.get('harmonization_strength')} "
+            f"feather_px={apply_info.get('harmonization_feather_px')} "
+            f"applied={apply_info.get('harmonization_applied')} "
+            f"reason={apply_info.get('harmonization_reason')}",
+            flush=True,
+        )
+        if debug_stages is not None:
+            debug_stages["debug_gen_mask"] = gen_full.copy()
+            debug_stages["debug_harmonization_mask"] = harm_mask.copy()
+            debug_stages["composite_after_harmonize"] = stitched.copy()
+        return stitched
+
     def _stitch_edited(
         self,
         canvas: Image.Image,
@@ -2961,7 +3040,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
         )
         if debug_stages is not None:
             debug_stages["composite_after_lab"] = stitched.copy()
-        if bool(self.cfg.get("neck_stub_tone_match", True)):
+        if bool(self.cfg.get("harmonization_enabled", True)):
+            stitched = self._apply_harmonization(
+                stitched,
+                color_ref,
+                mask,
+                box=box,
+                debug_stages=debug_stages,
+            )
+        elif bool(self.cfg.get("neck_stub_tone_match", True)):
             stitched = match_neck_stub_to_head_tone(
                 stitched,
                 stitch_mask,
