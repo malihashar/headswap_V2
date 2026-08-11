@@ -24,12 +24,13 @@ def test_production_yaml_disables_crop_stitch_head_clamp():
     assert cfg.get("crop_stitch_clamp_head_scale") is False
     assert cfg.get("crop_stitch_pre_stitch_clamp") is True
     assert cfg.get("head_matte_stitch_feather_px", 3) == 8
-    assert cfg.get("stitch_mask_dilate_px", 4) == 8
+    assert cfg.get("stitch_mask_dilate_px", 4) == 10
     assert float(cfg.get("mask_bot_extend", 0.40)) <= 0.40
     assert cfg.get("exposed_skin_tone_match", False) is False
     assert cfg.get("mask_crop_stitch") is True
     assert cfg.get("neck_stub_tone_match") is True
     assert int(cfg.get("neck_stub_tone_match_ring_px", 40)) == 70
     assert cfg.get("collapse_soft_chin_ghost") is True
-    assert float(cfg.get("donor_scale_factor", 1.0)) == 0.88
+    assert float(cfg.get("donor_scale_factor", 1.0)) == 0.82
+    assert float(cfg.get("target_edited_head_height_ratio", 0.98)) == 0.96
     assert cfg.get("preserve_expression") is False
