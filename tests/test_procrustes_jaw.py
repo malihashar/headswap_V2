@@ -78,4 +78,4 @@ def test_get_jaw_alignment_points_fallback_from_box_prior():
     pts, backend, _ = get_jaw_alignment_points(rgb, None, prefer_box=box)
     assert pts is not None
     assert pts.shape[0] >= 6
-    assert backend in ("box_prior", "insightface_jaw106", "insightface_jaw5", "none")
+    assert backend in ("box_prior", "insightface_jaw5", "insightface", "none")

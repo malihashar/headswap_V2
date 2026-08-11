@@ -2564,22 +2564,10 @@ def get_jaw_alignment_points(
     cache_dir,
     prefer_box: FaceBox | None = None,
 ) -> tuple[np.ndarray | None, str, str | None]:
-    """Jaw/chin + eye alignment points for Procrustes (N, 2) float32."""
+    """Jaw/chin + eye alignment points for Procrustes (6, 2) float32."""
     face = _insightface_pick_face(rgb, cache_dir, prefer_box)
     if face is not None:
-        pts106 = getattr(face, "landmark_2d_106", None)
         kps = np.asarray(getattr(face, "kps", None), dtype=np.float32)
-        if pts106 is not None:
-            pts = np.asarray(pts106, dtype=np.float32)
-            if pts.ndim == 2 and pts.shape[0] >= 32:
-                nose_y = float(kps[2, 1]) if kps.shape == (5, 2) else float(
-                    np.median(pts[:, 1])
-                )
-                lower = pts[pts[:, 1] >= nose_y - 0.02 * max(1.0, face.bbox[3] - face.bbox[1])]
-                if len(lower) >= 4 and kps.shape == (5, 2):
-                    eyes = kps[:2]
-                    combined = np.vstack([eyes, lower])
-                    return combined.astype(np.float32), "insightface_jaw106", None
         if kps.shape == (5, 2):
             return _jaw_points_from_landmarks5(kps), "insightface_jaw5", None
 
@@ -2785,9 +2773,17 @@ def procrustes_align_edited_crop_to_body_box(
         axis=1,
     ).astype(np.float32)
 
-    matrix, inliers = cv2.estimateAffinePartial2D(
-        src_lm.astype(np.float32), dst_lm, method=cv2.LMEDS
-    )
+    if src_lm.shape != dst_lm.shape or src_lm.shape[0] < 3:
+        info["procrustes_reason"] = f"jaw_point_mismatch:{src_lm.shape} vs {dst_lm.shape}"
+        return edited_rgb, info
+
+    try:
+        matrix, inliers = cv2.estimateAffinePartial2D(
+            src_lm.astype(np.float32), dst_lm, method=cv2.LMEDS
+        )
+    except cv2.error as exc:
+        info["procrustes_reason"] = f"estimateAffinePartial2D_cv_error:{exc}"
+        return edited_rgb, info
     if matrix is None:
         info["procrustes_reason"] = "estimateAffinePartial2D_failed"
         return edited_rgb, info
