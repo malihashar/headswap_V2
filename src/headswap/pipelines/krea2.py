@@ -1567,8 +1567,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 out, body_full, stitch_mask, strength=post_match
             )
         if bool(self.cfg.get("harmonization_enabled", True)):
+            pre_harm = out.copy()
             out = self._apply_harmonization(
-                out,
+                pre_harm,
                 body_full,
                 freeze_mask,
                 box=(0, 0, w, h),
@@ -2808,18 +2809,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
     def _apply_harmonization(
         self,
-        stitched: Image.Image,
+        pre_harm: Image.Image,
         body: Image.Image,
         gen_mask: Image.Image,
         *,
         box: tuple[int, int, int, int] | None = None,
         debug_stages: dict[str, Image.Image] | None = None,
     ) -> Image.Image:
-        """Post-stitch color harmonization using a separate skin-adaptive mask."""
+        """Post-stitch color harmonization; gen interior locked to pre_harm."""
         if not bool(self.cfg.get("harmonization_enabled", True)):
-            return stitched
-        gen_full = self._generation_mask_on_canvas(gen_mask, stitched.size, box)
-        harm_mask, harm_info = build_harmonization_mask(
+            return pre_harm
+        gen_full = self._generation_mask_on_canvas(gen_mask, pre_harm.size, box)
+        full_harm, harm_ring, harm_info = build_harmonization_mask(
             body,
             gen_full,
             dilate_px=int(self.cfg.get("harmonization_dilate_px", 24)),
@@ -2828,10 +2829,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             include_arms=bool(self.cfg.get("harmonization_include_arms", True)),
         )
         stitched, apply_info = harmonize_skin_tone(
-            stitched,
+            pre_harm,
             body,
             gen_full,
-            harm_mask,
+            full_harm,
+            harm_ring,
             strength=float(self.cfg.get("harmonization_strength", 0.55)),
             feather_px=int(self.cfg.get("harmonization_feather_px", 16)),
             interior_erode_px=int(
@@ -2841,19 +2843,24 @@ class Krea2IdentityEditPipeline(BasePipeline):
         print(
             "[krea2 harmonize] "
             f"gen_bbox={harm_info.get('gen_bbox')} "
-            f"harm_bbox={harm_info.get('harm_bbox')} "
-            f"harm_area_px={harm_info.get('harm_area_px')} "
+            f"full_harm_bbox={harm_info.get('full_harm_bbox')} "
+            f"harm_ring_px={harm_info.get('harm_ring_area_px')} "
+            f"full_harm_px={harm_info.get('full_harm_area_px')} "
+            f"gen_subset={harm_info.get('gen_subset_of_harm')} "
             f"skin_frac={float(harm_info.get('harm_skin_frac', 0.0)):.3f} "
             f"method={apply_info.get('harmonization_method')} "
             f"strength={apply_info.get('harmonization_strength')} "
             f"feather_px={apply_info.get('harmonization_feather_px')} "
+            f"gen_interior_max_diff={apply_info.get('gen_interior_max_diff')} "
+            f"gen_interior_ok={apply_info.get('gen_interior_ok')} "
             f"applied={apply_info.get('harmonization_applied')} "
             f"reason={apply_info.get('harmonization_reason')}",
             flush=True,
         )
         if debug_stages is not None:
             debug_stages["debug_gen_mask"] = gen_full.copy()
-            debug_stages["debug_harmonization_mask"] = harm_mask.copy()
+            debug_stages["debug_harmonization_mask"] = full_harm.copy()
+            debug_stages["debug_harm_ring_mask"] = harm_ring.copy()
             debug_stages["composite_after_harmonize"] = stitched.copy()
         return stitched
 
@@ -3041,8 +3048,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if debug_stages is not None:
             debug_stages["composite_after_lab"] = stitched.copy()
         if bool(self.cfg.get("harmonization_enabled", True)):
+            pre_harm = stitched.copy()
             stitched = self._apply_harmonization(
-                stitched,
+                pre_harm,
                 color_ref,
                 mask,
                 box=box,
