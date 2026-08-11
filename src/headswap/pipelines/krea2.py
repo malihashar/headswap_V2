@@ -49,6 +49,7 @@ from headswap.preprocess import (
     expand_crop_box_for_face_fill,
     feathered_soft_composite,
     get_face_landmarks5,
+    dump_neck_seam_debug,
     hard_freeze_neighbor_faces,
     identity_face_boost_mask,
     build_harmonization_mask,
@@ -72,7 +73,7 @@ from headswap.preprocess import (
     suppress_neighbor_faces_in_mask,
     expand_crop_box_wide,
 )
-from headswap.headwear_erase import restore_background
+from headswap.metrics.head_scale import head_scale_metrics
 from headswap.segmentation import build_head_hair_mask, matte_backend_available
 
 
@@ -2704,6 +2705,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         selected_face: FaceBox | None,
         face_prep_diag: dict[str, Any],
         crop_content_box: tuple[int, int, int, int] | None = None,
+        stitch_mask: Image.Image | None = None,
     ) -> tuple[Image.Image, bool]:
         """Optional Procrustes on crop_stitch edited crop before stitch.
 
@@ -2712,6 +2714,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
         """
         if not bool(self.cfg.get("enable_procrustes_correction", False)):
             return edited, False
+        alignment = str(self.cfg.get("procrustes_alignment", "jaw") or "jaw")
+        min_inliers = int(self.cfg.get("procrustes_min_inliers", 3))
+        if alignment.lower() == "jaw":
+            min_inliers = int(
+                self.cfg.get("procrustes_jaw_min_inliers", max(4, min_inliers))
+            )
         aligned, info = procrustes_align_edited_crop_to_body_box(
             edited,
             body_full,
@@ -2719,7 +2727,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
             self.cache_dir,
             crop_content_box=crop_content_box,
             prefer_body_box=selected_face,
-            min_inliers=int(self.cfg.get("procrustes_min_inliers", 3)),
+            alignment=alignment,
+            min_inliers=min_inliers,
             min_scale=float(self.cfg.get("procrustes_min_scale", 0.40)),
             max_scale=float(self.cfg.get("procrustes_max_scale", 2.50)),
             max_rotation_deg=float(self.cfg.get("procrustes_max_rotation_deg", 12.0)),
@@ -2732,16 +2741,24 @@ class Krea2IdentityEditPipeline(BasePipeline):
         import sys
 
         if info.get("procrustes"):
+            tag = "procrustes_jaw" if alignment.lower() == "jaw" else "procrustes"
             print(
-                "[krea2] procrustes_correction "
+                f"[krea2 {tag}] "
+                f"alignment={alignment} "
                 f"scale={info.get('scale')} rot_deg={info.get('rotation_deg')} "
                 f"t={info.get('translation')} inliers={info.get('inliers')} "
                 f"residual_px={info.get('residual_px')} "
+                f"chin_shift_px={info.get('chin_shift_px')} "
                 f"content_box={info.get('content_box')}",
                 flush=True,
             )
-            blended, blend_info = self._blend_procrustes_face_only(edited, aligned)
-            face_prep_diag["procrustes_face_only_blend"] = blend_info
+            if stitch_mask is not None:
+                blended, blend_info = self._blend_procrustes_through_mask(
+                    edited, aligned, stitch_mask
+                )
+            else:
+                blended, blend_info = self._blend_procrustes_face_only(edited, aligned)
+            face_prep_diag["procrustes_blend"] = blend_info
             return blended, True
         print(
             "[krea2] procrustes_correction skipped: "
@@ -2749,6 +2766,29 @@ class Krea2IdentityEditPipeline(BasePipeline):
             flush=True,
         )
         return edited, False
+
+    def _blend_procrustes_through_mask(
+        self,
+        edited: Image.Image,
+        aligned: Image.Image,
+        mask: Image.Image,
+    ) -> tuple[Image.Image, dict[str, Any]]:
+        """Composite procrustes warp through generation/stitch head mask."""
+        info: dict[str, Any] = {"mask_blend": False, "method": "stitch_mask"}
+        w, h = edited.size
+        m = mask.convert("L")
+        if m.size != (w, h):
+            m = m.resize((w, h), Image.Resampling.BILINEAR)
+        feather = int(self.cfg.get("procrustes_mask_blend_feather_px", 8))
+        blended = feathered_soft_composite(
+            edited,
+            aligned,
+            m,
+            (0, 0, w, h),
+            extra_blur_px=max(2, feather),
+        )
+        info["mask_blend"] = True
+        return blended, info
 
     def _blend_procrustes_face_only(
         self, edited: Image.Image, aligned: Image.Image
@@ -3047,6 +3087,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
         )
         if debug_stages is not None:
             debug_stages["composite_after_lab"] = stitched.copy()
+            gen_full = self._generation_mask_on_canvas(stitch_mask, canvas.size, box)
+            overlay, neck_crop, _neck_info = dump_neck_seam_debug(
+                stitched,
+                gen_full,
+                color_ref,
+                self.cache_dir,
+            )
+            debug_stages["debug_gen_mask_boundary_overlay"] = overlay
+            debug_stages["debug_neck_seam_crop"] = neck_crop
         if bool(self.cfg.get("harmonization_enabled", True)):
             pre_harm = stitched.copy()
             stitched = self._apply_harmonization(
@@ -4237,6 +4286,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         face_box,
                         face_prep_diag,
                         crop_content_box=built["crop_content_box"],
+                        stitch_mask=built["mask"],
                     )
                     with _stage(timings, "postprocessing"):
                         canvas = self._stitch_edited(
@@ -4346,6 +4396,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     selected_face,
                     face_prep_diag,
                     crop_content_box=crop_content_box,
+                    stitch_mask=mask,
                 )
                 sample_meta["edited"] = edited
             if head_scale_trace is not None:
@@ -4587,6 +4638,26 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 )
                 face_prep_diag["head_direction_relock"] = pose_relock_diag
             faces_succeeded = [0] if do_stitch or edit_mode == "full_frame" else []
+
+        if (
+            body_full is not None
+            and out is not None
+            and selected_face is not None
+        ):
+            hs = head_scale_metrics(body_full, out, selected_face, self.cache_dir)
+            face_prep_diag["head_scale"] = hs
+            ratio = hs.get("head_to_body_scale_ratio")
+            lo = float(self.cfg.get("head_scale_ratio_warn_lo", 0.92))
+            hi = float(self.cfg.get("head_scale_ratio_warn_hi", 1.08))
+            warn = ratio is not None and not (lo <= float(ratio) <= hi)
+            print(
+                "[krea2 head_scale] "
+                f"ratio={ratio} target≈1.0 "
+                f"body_face_h={hs.get('body_face_h_px')} "
+                f"result_face_h={hs.get('result_face_h_px')} "
+                f"warn={warn}",
+                flush=True,
+            )
 
         dbg = {}
         if out_dir is not None and save_debug:

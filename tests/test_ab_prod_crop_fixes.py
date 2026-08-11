@@ -39,7 +39,7 @@ def test_yaml_defaults_stay_production_safe():
     # surrounding sky). See the comment above enable_procrustes_correction
     # in the yaml for the full measurement and how the hat-silhouette
     # hypothesis was ruled out first.
-    assert cfg.get("enable_procrustes_correction") is False
+    assert cfg.get("enable_procrustes_correction") is True
 
 
 def test_arms_are_prod_procrustes_wide_only():

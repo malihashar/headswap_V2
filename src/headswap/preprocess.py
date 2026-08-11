@@ -2528,6 +2528,132 @@ def _landmark_centroid_in_box(
     )
 
 
+def _insightface_pick_face(
+    rgb: np.ndarray,
+    cache_dir,
+    prefer_box: FaceBox | None = None,
+):
+    """Return best InsightFace detection or None."""
+    app = ensure_insightface_app(cache_dir)
+    if app is None:
+        return None
+    try:
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        faces = app.get(bgr)
+        if not faces:
+            return None
+        if prefer_box is not None:
+            scored = [
+                (_iou_box(prefer_box, *map(float, f.bbox)), f) for f in faces
+            ]
+            scored.sort(key=lambda t: t[0], reverse=True)
+            if scored[0][0] > 0.05:
+                return scored[0][1]
+        return max(
+            faces,
+            key=lambda f: float(
+                (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])
+            ),
+        )
+    except Exception:
+        return None
+
+
+def get_jaw_alignment_points(
+    rgb: np.ndarray,
+    cache_dir,
+    prefer_box: FaceBox | None = None,
+) -> tuple[np.ndarray | None, str, str | None]:
+    """Jaw/chin + eye alignment points for Procrustes (N, 2) float32."""
+    face = _insightface_pick_face(rgb, cache_dir, prefer_box)
+    if face is not None:
+        pts106 = getattr(face, "landmark_2d_106", None)
+        kps = np.asarray(getattr(face, "kps", None), dtype=np.float32)
+        if pts106 is not None:
+            pts = np.asarray(pts106, dtype=np.float32)
+            if pts.ndim == 2 and pts.shape[0] >= 32:
+                nose_y = float(kps[2, 1]) if kps.shape == (5, 2) else float(
+                    np.median(pts[:, 1])
+                )
+                lower = pts[pts[:, 1] >= nose_y - 0.02 * max(1.0, face.bbox[3] - face.bbox[1])]
+                if len(lower) >= 4 and kps.shape == (5, 2):
+                    eyes = kps[:2]
+                    combined = np.vstack([eyes, lower])
+                    return combined.astype(np.float32), "insightface_jaw106", None
+        if kps.shape == (5, 2):
+            return _jaw_points_from_landmarks5(kps), "insightface_jaw5", None
+
+    lm, backend, note = get_face_landmarks5(rgb, cache_dir, prefer_box=prefer_box)
+    if lm is None:
+        return None, backend, note or "landmarks_missing"
+    return _jaw_points_from_landmarks5(lm), backend, note
+
+
+def _jaw_points_from_landmarks5(lm: np.ndarray) -> np.ndarray:
+    """Derive chin + jaw corners from 5-point layout."""
+    le, re, nose, lmouth, rmouth = lm[:5]
+    mouth = 0.5 * (lmouth + rmouth)
+    iod = float(math.hypot(re[0] - le[0], re[1] - le[1]))
+    iod = max(iod, 1.0)
+    chin = mouth + np.array([0.0, 0.38 * iod], dtype=np.float32)
+    jaw_l = chin + np.array([-0.55 * iod, -0.08 * iod], dtype=np.float32)
+    jaw_r = chin + np.array([0.55 * iod, -0.08 * iod], dtype=np.float32)
+    return np.stack([le, re, nose, chin, jaw_l, jaw_r], axis=0).astype(np.float32)
+
+
+def dump_neck_seam_debug(
+    image: Image.Image,
+    gen_mask_full: Image.Image,
+    body: Image.Image,
+    cache_dir,
+    *,
+    prefer_box: FaceBox | None = None,
+) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
+    """RCA overlays: gen-mask boundary vs jaw landmarks + neck seam crop."""
+    info: dict[str, Any] = {}
+    img = image.convert("RGB").copy()
+    w, h = img.size
+    if gen_mask_full.size != (w, h):
+        gen_mask_full = gen_mask_full.convert("L").resize((w, h), Image.Resampling.NEAREST)
+
+    m = (np.asarray(gen_mask_full.convert("L")) > 128).astype(np.uint8)
+    boundary = cv2.morphologyEx(m, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+    ys, xs = np.where(boundary > 0)
+    draw = ImageDraw.Draw(img)
+    for x, y in zip(xs[:: max(1, len(xs) // 800)], ys[:: max(1, len(ys) // 800)]):
+        draw.point((int(x), int(y)), fill=(0, 200, 255))
+
+    body_rgb = pil_to_rgb_np(body.convert("RGB"))
+    if body.size != (w, h):
+        body_rgb = cv2.resize(body_rgb, (w, h), interpolation=cv2.INTER_LINEAR)
+    box = prefer_box or detect_best_face(body_rgb, cache_dir)
+    jaw_pts, backend, _ = get_jaw_alignment_points(body_rgb, cache_dir, prefer_box=box)
+    info["jaw_backend"] = backend
+    chin_y = None
+    if jaw_pts is not None:
+        for x, y in jaw_pts:
+            r = 4
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=(255, 220, 0))
+        chin_y = float(np.max(jaw_pts[:, 1]))
+
+    if box is not None:
+        fh = max(1, box.height)
+        cy = chin_y if chin_y is not None else float(box.y1)
+        y0 = int(max(0, cy - 0.05 * fh))
+        y1 = int(min(h, cy + 0.35 * fh))
+        cx = int(0.5 * (box.x0 + box.x1))
+        half_w = int(max(40, 0.55 * box.width))
+        x0 = max(0, cx - half_w)
+        x1 = min(w, cx + half_w)
+        info["neck_crop_box"] = [x0, y0, x1, y1]
+        neck_crop = img.crop((x0, y0, x1, y1))
+    else:
+        info["neck_crop_box"] = None
+        neck_crop = img.crop((0, int(0.25 * h), w, int(0.45 * h)))
+
+    return img, neck_crop, info
+
+
 def procrustes_align_edited_crop_to_body_box(
     edited: Image.Image,
     body: Image.Image,
@@ -2536,6 +2662,7 @@ def procrustes_align_edited_crop_to_body_box(
     *,
     crop_content_box: tuple[int, int, int, int] | None = None,
     prefer_body_box: FaceBox | None = None,
+    alignment: str = "jaw",
     min_inliers: int = 3,
     min_scale: float = 0.40,
     max_scale: float = 2.50,
@@ -2563,11 +2690,13 @@ def procrustes_align_edited_crop_to_body_box(
     info: dict[str, Any] = {
         "procrustes": False,
         "procrustes_reason": None,
+        "procrustes_alignment": str(alignment),
         "scale": None,
         "rotation_deg": None,
         "translation": None,
         "inliers": None,
         "residual_px": None,
+        "chin_shift_px": None,
         "content_box": None,
     }
     edited_rgb = edited.convert("RGB")
@@ -2613,18 +2742,29 @@ def procrustes_align_edited_crop_to_body_box(
             int(gx0), int(gy0), int(gx1), int(gy1), float(prefer_body_box.conf)
         )
 
-    src_lm, src_backend, src_note = get_face_landmarks5(
-        pil_to_rgb_np(content), cache_dir, prefer_box=prefer_gen
-    )
-    dst_lm_body, dst_backend, dst_note = get_face_landmarks5(
-        pil_to_rgb_np(body_rgb), cache_dir, prefer_box=prefer_body_box
-    )
+    use_jaw = str(alignment).lower() == "jaw"
+    if use_jaw:
+        src_lm, src_backend, src_note = get_jaw_alignment_points(
+            pil_to_rgb_np(content), cache_dir, prefer_box=prefer_gen
+        )
+        dst_lm_body, dst_backend, dst_note = get_jaw_alignment_points(
+            pil_to_rgb_np(body_rgb), cache_dir, prefer_box=prefer_body_box
+        )
+    else:
+        src_lm, src_backend, src_note = get_face_landmarks5(
+            pil_to_rgb_np(content), cache_dir, prefer_box=prefer_gen
+        )
+        dst_lm_body, dst_backend, dst_note = get_face_landmarks5(
+            pil_to_rgb_np(body_rgb), cache_dir, prefer_box=prefer_body_box
+        )
     info["src_landmarks_backend"] = src_backend
     info["dst_landmarks_backend"] = dst_backend
     if src_lm is None or dst_lm_body is None:
         info["procrustes_reason"] = src_note or dst_note or "landmarks_missing"
         return edited_rgb, info
-    if src_backend != "insightface" or dst_backend != "insightface":
+    if not use_jaw and (
+        src_backend != "insightface" or dst_backend != "insightface"
+    ):
         info["procrustes_reason"] = "low_confidence_need_insightface"
         return edited_rgb, info
 
@@ -2671,6 +2811,9 @@ def procrustes_align_edited_crop_to_body_box(
     info["inliers"] = n_in
     info["residual_px"] = round(residual, 3)
     info["face_shift_px"] = round(shift, 2)
+    src_chin_y = float(np.max(src_lm[:, 1]))
+    dst_chin_y = float(np.max(dst_lm[:, 1]))
+    info["chin_shift_px"] = round(abs(dst_chin_y - src_chin_y), 2)
 
     if n_in < int(min_inliers):
         info["procrustes_reason"] = f"low_inliers:{n_in}"

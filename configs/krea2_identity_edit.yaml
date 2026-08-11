@@ -94,7 +94,10 @@ wide_crop_pad_bot_frac: 2.50
 # real render, with identity/expression/gaze unaffected. Off by default until
 # a version of this correction composites through the same tight head_matte
 # mask the rest of the pipeline uses, instead of its own ellipse.
-enable_procrustes_correction: false
+enable_procrustes_correction: true
+procrustes_alignment: jaw
+procrustes_jaw_min_inliers: 4
+procrustes_mask_blend_feather_px: 8
 procrustes_min_inliers: 3
 procrustes_min_scale: 0.40
 procrustes_max_scale: 2.50
