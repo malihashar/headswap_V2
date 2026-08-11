@@ -513,6 +513,15 @@ crop_stitch_clamp_head_scale: false
 # as full_frame_head_clamp_mask_*.png when save_debug=true.
 crop_stitch_full_frame_head_clamp: false
 full_frame_head_clamp_mask_feather_px: 48
+# Head+hair-only mask for the clamp composite (NOT the stitch mask extents).
+# bot_extend=0.08 stops at the chin — using stitch's 0.40 pulled donor collar
+# clothing into the result. top_extend=1.80 covers voluminous hair above the
+# face box; coverage-intersect drops any mask mass on empty warp borders so
+# black crown silhouettes cannot composite.
+full_frame_head_clamp_mask_top_extend: 1.80
+full_frame_head_clamp_mask_side_extend: 0.35
+full_frame_head_clamp_mask_bot_extend: 0.08
+full_frame_head_clamp_mask_expand_px: 6
 # Pre-stitch clamp on the edited crop for single-person (soft-composited through
 # the head mask). Does NOT call the post-stitch local-box paste above.
 crop_stitch_pre_stitch_clamp: true

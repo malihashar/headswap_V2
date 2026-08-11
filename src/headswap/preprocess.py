@@ -313,12 +313,15 @@ def clamp_edited_head_scale_full_frame(
     target_ratio: float = 0.98,
     min_height_ratio: float = 0.92,
     max_grow: float = 1.45,
-    mask_top_extend: float = 1.55,
-    mask_side_extend: float = 0.60,
-    mask_bot_extend: float = 0.40,
+    # Head+hair only — deliberately tighter than the stitch mask (which
+    # extends into neck/collar). bot_extend≈0.08 stops at the chin so donor
+    # clothing never enters the clamp composite.
+    mask_top_extend: float = 1.80,
+    mask_side_extend: float = 0.35,
+    mask_bot_extend: float = 0.08,
     mask_expand_px: int = 6,
     mask_feather_px: int = 48,
-) -> tuple[Image.Image, dict[str, float], Image.Image | None]:
+) -> tuple[Image.Image, dict[str, float], Image.Image | None, Image.Image | None]:
     """Full-frame similarity head-scale clamp with post-transform soft composite.
 
     Unlike the local-box clamp (which cropped a head sub-region, warped it, and
@@ -329,15 +332,17 @@ def clamp_edited_head_scale_full_frame(
          mapping the generated face onto the original target face.
       2. Applies that transform to the **entire** generated frame — nothing
          can be clipped by a pre-sized box.
-      3. Builds the compositing mask **after** the warp, from where the
-         transformed head actually lands.
+      3. Builds a **head+hair-only** compositing mask **after** the warp
+         (tight bot/side extents — no shoulder/collar), then intersects it
+         with the warp's coverage so ``BORDER_CONSTANT`` black pixels never
+         enter the composite (fixes the hard black crown silhouette).
       4. Soft-composites over the full frame:
          ``final = mask * transformed + (1-mask) * original``
          with a generously Gaussian-feathered mask boundary.
 
-    Returns ``(result, info, composite_mask_or_None)``. The mask is returned
-    so callers can dump it for seam/ghost diagnosis (``None`` when the clamp
-    did not fire).
+    Returns ``(result, info, composite_mask_or_None, transformed_or_None)``.
+    Both mask and transformed are returned so callers can dump them for
+    seam/ghost/black-region diagnosis (``None`` when the clamp did not fire).
     """
     info: dict[str, float] = {
         "clamped": 0.0,
@@ -347,18 +352,21 @@ def clamp_edited_head_scale_full_frame(
         "tx": 0.0,
         "ty": 0.0,
         "mask_feather_px": float(mask_feather_px),
+        "mask_bot_extend": float(mask_bot_extend),
+        "mask_top_extend": float(mask_top_extend),
+        "coverage_frac": 1.0,
     }
     if original_scene.size != edited.size:
         edited = edited.resize(original_scene.size, Image.Resampling.LANCZOS)
     fo = detect_best_face(pil_to_rgb_np(original_scene), cache_dir)
     fe = detect_best_face(pil_to_rgb_np(edited), cache_dir)
     if fo is None or fe is None or fo.height < 8 or fe.height < 8:
-        return edited, info, None
+        return edited, info, None, None
     ratio = float(fe.height) / float(fo.height)
     info["ratio_before"] = ratio
     if float(min_height_ratio) <= ratio <= float(max_height_ratio):
         info["ratio_after"] = ratio
-        return edited, info, None
+        return edited, info, None, None
 
     shrink = (float(fo.height) * float(target_ratio)) / float(fe.height)
     shrink = float(min(float(max_grow), max(0.55, shrink)))
@@ -386,6 +394,18 @@ def clamp_edited_head_scale_full_frame(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     )
+    # Exact geometric coverage of the warp — pixels the affine never reached
+    # are 0 (black border). Intersecting the composite mask with this stops
+    # solid-black crown/edge silhouettes from leaking into the result.
+    coverage = cv2.warpAffine(
+        np.full((h, w), 255, dtype=np.uint8),
+        m,
+        (w, h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    info["coverage_frac"] = float(coverage.mean()) / 255.0
 
     # Where the transformed head lands: map the generated face box through m.
     # Analytic (not re-detect) so the mask is deterministic even if InsightFace
@@ -409,26 +429,31 @@ def clamp_edited_head_scale_full_frame(
     mx1, my1 = min(w, mx1), min(h, my1)
     if mx1 - mx0 < 8 or my1 - my0 < 8:
         # Degenerate warp — fall back to original unscaled edit.
-        return edited, info, None
+        return edited, info, None, None
     landed = FaceBox(mx0, my0, mx1, my1, float(fe.conf))
 
-    # Mask AFTER transform, from where the head landed.
+    # Mask AFTER transform, from where the head landed — head+hair only.
     warped_pil = np_to_pil(warped)
     composite_mask = head_hair_mask_from_face(
         warped_pil,
         cache_dir,
         expand_px=int(mask_expand_px),
-        blur_px=0,  # feather separately with a generous Gaussian below
+        blur_px=0,  # feather separately below
         top_extend=float(mask_top_extend),
         side_extend=float(mask_side_extend),
         bot_extend=float(mask_bot_extend),
         face_box=landed,
     )
     mask_arr = np.asarray(composite_mask.convert("L"), dtype=np.float32)
+    # Drop any mask mass that sits on empty warp border (would composite black).
+    cov = coverage.astype(np.float32) / 255.0
+    mask_arr = mask_arr * cov
     feather = max(0, int(mask_feather_px))
     if feather > 0:
         k = feather * 2 + 1
         mask_arr = cv2.GaussianBlur(mask_arr, (k, k), 0)
+    # Re-apply coverage after feather so soft edges cannot reintroduce black.
+    mask_arr = mask_arr * cov
     alpha = (mask_arr / 255.0)[..., None]
     orig_arr = pil_to_rgb_np(original_scene).astype(np.float32)
     if orig_arr.shape[:2] != (h, w):
@@ -444,7 +469,7 @@ def clamp_edited_head_scale_full_frame(
         info["ratio_after"] = float(fe2.height) / float(fo.height)
     else:
         info["ratio_after"] = ratio * shrink
-    return out, info, mask_out
+    return out, info, mask_out, warped_pil
 
 
 def dilate_mask(mask: Image.Image, px: int) -> Image.Image:

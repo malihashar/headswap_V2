@@ -2732,7 +2732,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if body.size != out.size:
             body = body.resize(out.size, Image.Resampling.LANCZOS)
         feather = int(self.cfg.get("full_frame_head_clamp_mask_feather_px", 48))
-        clamped, clamp_info, mask = clamp_edited_head_scale_full_frame(
+        # Head+hair-only defaults — do NOT fall back to stitch mask extents
+        # (mask_bot_extend=0.40 / side=0.60), which pull collar/shoulder into
+        # the clamp composite and cause donor-clothing leakage.
+        clamped, clamp_info, mask, transformed = clamp_edited_head_scale_full_frame(
             body,
             out,
             self.cache_dir,
@@ -2741,28 +2744,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
             min_height_ratio=float(self.cfg.get("min_edited_head_height_ratio", 0.92)),
             max_grow=float(self.cfg.get("max_edited_head_grow", 1.45)),
             mask_top_extend=float(
-                self.cfg.get(
-                    "full_frame_head_clamp_mask_top_extend",
-                    self.cfg.get("mask_top_extend", 1.55),
-                )
+                self.cfg.get("full_frame_head_clamp_mask_top_extend", 1.80)
             ),
             mask_side_extend=float(
-                self.cfg.get(
-                    "full_frame_head_clamp_mask_side_extend",
-                    self.cfg.get("mask_side_extend", 0.60),
-                )
+                self.cfg.get("full_frame_head_clamp_mask_side_extend", 0.35)
             ),
             mask_bot_extend=float(
-                self.cfg.get(
-                    "full_frame_head_clamp_mask_bot_extend",
-                    self.cfg.get("mask_bot_extend", 0.40),
-                )
+                self.cfg.get("full_frame_head_clamp_mask_bot_extend", 0.08)
             ),
             mask_expand_px=int(
-                self.cfg.get(
-                    "full_frame_head_clamp_mask_expand_px",
-                    self.cfg.get("head_matte_expand_px", 6),
-                )
+                self.cfg.get("full_frame_head_clamp_mask_expand_px", 6)
             ),
             mask_feather_px=feather,
         )
@@ -2773,27 +2764,39 @@ class Krea2IdentityEditPipeline(BasePipeline):
             f"ratio {clamp_info['ratio_before']:.2f}→"
             f"{clamp_info['ratio_after']:.2f} shrink={clamp_info['shrink']:.3f} "
             f"t=[{clamp_info.get('tx', 0):.1f}, {clamp_info.get('ty', 0):.1f}] "
-            f"feather_px={feather}",
+            f"feather_px={feather} bot_ext={clamp_info.get('mask_bot_extend', 0):.2f} "
+            f"coverage={clamp_info.get('coverage_frac', 1):.3f}",
             flush=True,
         )
-        if save_debug and mask is not None:
+        if save_debug:
             try:
                 import time as _time
 
                 dump_dir = Path(out_dir) if out_dir is not None else Path("/tmp/headswap_debug")
                 dump_dir.mkdir(parents=True, exist_ok=True)
                 ts = int(_time.time())
-                mask_path = dump_dir / f"full_frame_head_clamp_mask_{ts}.png"
-                mask.save(mask_path)
-                print(
-                    f"[krea2 debug] full_frame_head_clamp_mask saved → {mask_path}  "
-                    f"white=transformed_head(kept), black=original_frame(restored)  "
-                    f"size={mask.size}",
-                    flush=True,
-                )
-                clamp_info["debug_mask_path"] = str(mask_path)
+                if mask is not None:
+                    mask_path = dump_dir / f"full_frame_head_clamp_mask_{ts}.png"
+                    mask.save(mask_path)
+                    print(
+                        f"[krea2 debug] full_frame_head_clamp_mask saved → {mask_path}  "
+                        f"white=transformed_head(kept), black=original_frame(restored)  "
+                        f"size={mask.size}",
+                        flush=True,
+                    )
+                    clamp_info["debug_mask_path"] = str(mask_path)
+                if transformed is not None:
+                    xform_path = dump_dir / f"full_frame_head_clamp_transformed_{ts}.png"
+                    transformed.save(xform_path)
+                    print(
+                        f"[krea2 debug] full_frame_head_clamp_transformed saved → {xform_path}  "
+                        f"(pre-composite warped frame — inspect crown for black borders)  "
+                        f"size={transformed.size}",
+                        flush=True,
+                    )
+                    clamp_info["debug_transformed_path"] = str(xform_path)
             except Exception as exc:  # noqa: BLE001 — never block the run
-                print(f"[krea2 debug] full_frame_head_clamp_mask dump failed: {exc}", flush=True)
+                print(f"[krea2 debug] full_frame_head_clamp dump failed: {exc}", flush=True)
         return clamped, clamp_info
 
     def _maybe_procrustes_edited_crop(
