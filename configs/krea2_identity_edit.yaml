@@ -496,16 +496,19 @@ target_edited_head_height_ratio: 0.94
 # 1.0, so an undersized head kept its wrong proportions silently).
 min_edited_head_height_ratio: 0.92
 max_edited_head_grow: 1.45
-# OFF by default (2026-08-10). e42caad turned this on for every single-person
-# crop_stitch run to fix head-scale drift; on real full-body desert/sky shots
-# the post-stitch local-box clamp still produced: (1) a visible rectangular
-# paste window around the head (sky mismatch inside the box), (2) a floating
-# ghost scalp at the top of frame when the local box hits y=0 and the shrink
-# leaves pre-warp hair in the border strip, (3) a pale double-neck V from the
-# soft elliptical re-blend of pre-/post-shrink crops. User wants the old
-# head-swap composite unchanged; optional soft neck blend is neck_stub_* only.
-# Re-enable only after local A/B proves no rect/ghost on full-body sky plates.
-crop_stitch_clamp_head_scale: false
+# ON (2026-08-10). Was off pending a fix for three symptoms:
+# (1) a rectangular paste-window seam, (2) a floating ghost scalp when the
+# local box hit y=0, (3) a pale double-neck V from the soft elliptical
+# re-blend. All three addressed since: border_fill=local_out_crop on
+# clamp_edited_head_scale (the border patch no longer leaks the wrong
+# person's original head into the exposed strip), box margins widened to
+# 1.8/1.9/1.3 (side/top/bot, up from 1.1/1.9/0.9 -- contains voluminous
+# donor hair instead of splitting it across the feather boundary), and
+# feather=fh*0.35 (wide enough to fully cover the shrink warp's own exposed
+# border). Re-enabling to re-validate on target_girl_robe.png x
+# donor_toddler.png -- re-disable if a full-body sky plate reproduces any
+# of the three symptoms above.
+crop_stitch_clamp_head_scale: true
 # Pre-stitch clamp on the edited crop for single-person (soft-composited through
 # the head mask). Does NOT call the post-stitch local-box paste above.
 crop_stitch_pre_stitch_clamp: true
