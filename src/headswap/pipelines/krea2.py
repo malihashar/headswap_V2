@@ -73,6 +73,7 @@ from headswap.preprocess import (
     suppress_neighbor_faces_in_mask,
     expand_crop_box_wide,
 )
+from headswap.headwear_erase import restore_background
 from headswap.metrics.head_scale import head_scale_metrics
 from headswap.segmentation import build_head_hair_mask, matte_backend_available
 
