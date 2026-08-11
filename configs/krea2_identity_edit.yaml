@@ -293,19 +293,12 @@ head_matte_hair_margin_frac: 0.20
 head_matte_tight_edge: true
 head_matte_expand_px: 3
 head_matte_blur_px: 3
-# GPU-verified 2026-08-09 on a donor/target pair with a real skin-tone
-# difference (young boy donor onto an adult runner): feather=3 (right for the
-# background-halo case above, where donor/target skin tones were similar)
-# leaves a hard, visible seam at the neck/collar where donor skin tone meets
-# the target's own unmodified skin -- raising post_color_match_strength does
-# NOT fix this (tested 0.35/0.55/0.70, seam unchanged in all three; it's a
-# color-tone knob, not a geometry one). Widening the feather does: tested
-# 3/12/22, 12 visibly smooths the transition with no hairline/sky halo
-# regression (re-checked against the original background-halo fix). This
-# does widen the blend zone against BACKGROUND too where the mask meets sky,
-# but that boundary already has near-zero color delta after erase+restore,
-# so it doesn't reintroduce the arc.
-head_matte_stitch_feather_px: 12
+# Tight matte edge (matches pre-e42caad production). Widening to 12 (e42caad)
+# was meant to soft-hide a neck tone seam, but on full-body desert/sky shots it
+# also widens the blend into background; combined with the always-on head-scale
+# clamp that commit added, users saw a rectangular crop window + floating scalp.
+# Neck tone is handled by neck_stub_tone_match (thin ring), not a fat feather.
+head_matte_stitch_feather_px: 3
 seam_refine: false
 seam_refine_erode_px: 8
 seam_refine_dilate_px: 16
@@ -475,29 +468,26 @@ target_edited_head_height_ratio: 0.98
 # 1.0, so an undersized head kept its wrong proportions silently).
 min_edited_head_height_ratio: 0.92
 max_edited_head_grow: 1.45
-# clamp_edited_head_scale above is gated by `stitch_multi = multi_person and
-# not single_person_parity()` inside _stitch_edited -- single_person_parity
-# defaults true, so that clamp is DEAD CODE for every single-subject photo,
-# which is every photo this pipeline actually runs on by default. GPU-verified
-# 2026-08-09 on 4 different donor/target pairs: with no clamp active, head
-# scale ranged 0.78x-1.35x of the target's real head size (one badly
-# undersized, one 35% oversized) -- the oversized case also produced a
-# visibly asymmetric shoulder/collar line (the mismatched head scale drags
-# the stitch seam out of alignment with the body below it). This flag routes
-# through _maybe_clamp_crop_stitch_head_scale (built for the body-route case
-# but generic to any single-person stitch) and corrects every case to
-# ~0.97-1.03x, including a close-up (non-full-body) shot -- confirmed the
-# clamp isn't restricted to full-body framing.
-crop_stitch_clamp_head_scale: true
+# OFF by default (2026-08-10). e42caad turned this on for every single-person
+# crop_stitch run to fix head-scale drift; on real full-body desert/sky shots
+# the post-stitch local-box clamp still produced: (1) a visible rectangular
+# paste window around the head (sky mismatch inside the box), (2) a floating
+# ghost scalp at the top of frame when the local box hits y=0 and the shrink
+# leaves pre-warp hair in the border strip, (3) a pale double-neck V from the
+# soft elliptical re-blend of pre-/post-shrink crops. User wants the old
+# head-swap composite unchanged; optional soft neck blend is neck_stub_* only.
+# Re-enable only after local A/B proves no rect/ghost on full-body sky plates.
+crop_stitch_clamp_head_scale: false
 # Geometry RCA: dump S0–S4 face/head boxes (no recipe changes). Also on when save_debug.
 head_scale_trace: false
 multi_head_scale_prompt: true
 # Force hairstyle transfer (body hair often survives without this).
 multi_hair_replace_prompt: true
-# When true (default): prompt forces body/scene expression onto the result.
-# When false: strip expression-lock language and allow the donor identity's
-# natural expression (A/B arms h/i). Does not change geometry/identity LoRA.
-preserve_expression: true
+# When true: prompt forces body/scene expression + eye/head direction onto the
+# result. When false: strip expression-lock and eye-direction-lock language and
+# allow the donor identity's natural expression/gaze (not locked to body's
+# sideways look). Does not change geometry/identity LoRA.
+preserve_expression: false
 
 # Per-image head-direction prompt hint. The generic "keep the same direction"
 # instruction below doesn't reliably stop yaw/gaze drift on its own. When

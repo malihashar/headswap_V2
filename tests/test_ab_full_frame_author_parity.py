@@ -40,7 +40,7 @@ def test_production_config_stays_crop_stitch():
     """
     cfg = yaml.safe_load(CFG_PATH.read_text())
     assert cfg["multi_person_edit_mode"] == "crop_stitch"
-    assert cfg.get("preserve_expression") is True
+    assert cfg.get("preserve_expression") is False
     assert (
         cfg["full_frame_min_mp"]
         <= cfg["full_frame_target_mp"]

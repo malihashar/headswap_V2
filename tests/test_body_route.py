@@ -139,10 +139,12 @@ def test_resolve_body_route_single_person_full_body_stays_crop_stitch(monkeypatc
 
     assert meta["applied"] is True
     assert meta["full_body_detected"] is True
-    assert meta["route"] == "crop_stitch_scale_clamped"
+    assert meta["route"] == "crop_stitch"
     assert meta["multi_person_edit_mode"] == "crop_stitch"
     assert "multi_person_edit_mode" not in pipe.cfg  # never forced to full_frame
-    assert pipe.cfg["crop_stitch_clamp_head_scale"] is True
+    # Must not force the head-scale clamp on (rect/ghost regression).
+    assert "crop_stitch_clamp_head_scale" not in pipe.cfg
+    assert meta.get("crop_stitch_clamp_head_scale") is False
 
 
 def test_resolve_body_route_portrait_leaves_crop_stitch_untouched(monkeypatch):

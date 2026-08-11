@@ -1208,16 +1208,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
         )
 
     def _apply_expression_policy(self, prompt: str) -> str:
-        """Honor ``preserve_expression`` (default true).
+        """Honor ``preserve_expression`` (default false in production yaml).
 
         When false, strip prompt clauses that force the body/scene expression
-        onto the result and append donor-expression freedom language. Geometry,
-        identity, and hair instructions are left intact.
+        AND eye/head-direction lock onto the result, then append donor
+        expression + natural gaze freedom language. Identity and hair
+        instructions are left intact.
         """
         text = str(prompt or "").strip()
         if bool(self.cfg.get("preserve_expression", True)):
             return text
-        # Known expression-lock clauses (yaml prompt + align_paste refine + add-ons).
+        # Known expression-lock + gaze/yaw-lock clauses (yaml prompt + refine).
         patterns = [
             # Primary yaml CRITICAL block (expression + follow-on Keep mouth…).
             r"CRITICAL:\s*copy the facial expression from the first image exactly"
@@ -1227,6 +1228,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             r"micro-expressions from the first image only[^.]*\.",
             r"Preserve the facial expression, mouth shape, eye gaze, and head\s*"
             r"pose from the first image exactly\.?",
+            # Head yaw / eye-direction lock (locks sideways body gaze onto donor).
+            r"CRITICAL:\s*keep the head facing the exact same direction as the "
+            r"first image\s*[—\-].*?match the first image\.",
+            r"The eyes must look in the exact same direction as the first image[^.]*\.",
+            r"Head yaw,\s*pitch, and roll must exactly match the first image\.?",
         ]
         out = text
         for pat in patterns:
@@ -1237,7 +1243,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
         freedom = (
             "Allow the facial expression from the second image (donor identity) — "
             "do not force the first person's smile, no-smile, or mouth shape onto "
-            "the result. Prefer the natural expression of the identity person."
+            "the result. Prefer the natural expression of the identity person. "
+            "Prefer natural donor gaze — eyes looking toward the camera or "
+            "following the donor's natural eye direction, not locked to the "
+            "body's sideways look from the first image."
         )
         if "Allow the facial expression from the second image" not in out:
             out = (out + " " + freedom).strip()
@@ -2542,9 +2551,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
         exactly the case `_resolve_body_route` now needs it for. Rather than
         touch the existing, validated SPP-CC gate (used by every crop_stitch
         run today), this is a separate, explicitly-flagged call
-        (`crop_stitch_clamp_head_scale`, set by `_resolve_body_route` only
-        when a single-person full body was actually detected) so ordinary
-        portrait/close-up crop_stitch runs are completely unaffected.
+        (`crop_stitch_clamp_head_scale`, OFF by default — opt-in only).
+        Ordinary portrait/close-up crop_stitch runs are unaffected unless the
+        flag is explicitly enabled.
 
         GPU-observed 2026-08-10: this used to hand the ENTIRE canvas to
         `clamp_edited_head_scale`, which warps whatever image it is given
@@ -3222,13 +3231,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
         at all.
 
         So: single-person full-body -> stays on crop_stitch (its proven,
-        ghost-free path), with `_maybe_clamp_crop_stitch_head_scale` (see
-        below, called from the crop_stitch stitch site) as the scale/position
-        safety net anchored to the real photo -- crop_stitch's existing
-        `clamp_edited_head_scale` call is gated behind `single_person_parity`
-        and never fires for single-subject photos otherwise. Genuine
-        multi-person full-body photos still route to full_frame, unchanged --
-        that's the case it was actually built and validated for.
+        ghost-free path). The optional post-stitch head-scale clamp
+        (`crop_stitch_clamp_head_scale`) stays OFF by default -- enabling it
+        for every full-body run (e42caad+) caused rectangular crop-box seams
+        and floating scalp ghosts on real sky plates. Opt in via config after
+        A/B. Genuine multi-person full-body photos still route to full_frame,
+        unchanged -- that's the case it was actually built and validated for.
         """
         enabled = bool(self.cfg.get("enable_body_route", True))
         print(f"[krea2 body_route] enable_body_route={enabled}", flush=True)
@@ -3304,39 +3312,31 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
             return meta
 
-        # Single-person full-body: stay on crop_stitch (see docstring). Just
-        # flag that this run should get the post-stitch scale/position clamp
-        # (crop_stitch's own clamp_edited_head_scale call is SPP-gated and
-        # would otherwise never fire for a single-subject photo).
+        # Single-person full-body: stay on crop_stitch (see docstring).
         #
-        # REVERTED: this used to also raise max_body_dim (1024->2048) and
-        # scale mask_expand_px/mask_blur_px/stitch_feather_px proportionally
-        # for more native face detail. A real GPU render showed massively
-        # oversized/duplicated hair. Two independent, code-confirmed causes:
-        # (1) the resolution-ratio math assumed body_full always upscales by
-        # the configured ratio, but resize_max_keep_ar never upscales -- for
-        # any source photo whose native long side is under the new cap, the
-        # mask dilation/blur still got scaled by the full nominal ratio,
-        # over-inflating relative to the actual (smaller or zero) pixel
-        # gain; (2) crop_pad (hard-coded 12px) was never coupled to the
-        # doubled stitch_feather_px, so the crop box was sized for only the
-        # build-time blur -- the stitch-time feathered_soft_composite then
-        # applied a SECOND, wider blur and hard-cropped that widened alpha
-        # tail at the box edge, producing a visible rectangular ghost
-        # boundary distinct from the intended soft round halo. Both bugs
-        # only manifest for this route (no neighbor-clamp tightening, no
-        # prior validation) -- reverted rather than re-patched: full-body
-        # crop_stitch now uses the exact same crop/mask geometry as an
-        # ordinary portrait, unchanged and already proven.
-        self.cfg["crop_stitch_clamp_head_scale"] = True
+        # Do NOT force crop_stitch_clamp_head_scale here. e42caad+ turned that
+        # clamp on for every full-body single-person run; real desert/sky
+        # plates still showed a rectangular head-box paste + floating scalp at
+        # the top of frame + pale double-neck V (local-box shrink + elliptical
+        # reblend). Production default is clamp OFF -- old soft-stitch look.
+        # Opt in via config when validating a safer clamp.
+        #
+        # REVERTED earlier: raising max_body_dim / scaling mask+feather for
+        # this route caused oversized/duplicated hair and a rectangular ghost
+        # at the crop-box edge (feather wider than crop_pad). Full-body
+        # crop_stitch uses the same crop/mask geometry as a portrait.
         meta["applied"] = True
-        meta["route"] = "crop_stitch_scale_clamped"
+        meta["route"] = "crop_stitch"
         meta["reason"] = "single_person_full_body_detected"
         meta["multi_person_edit_mode"] = str(
             self.cfg.get("multi_person_edit_mode", "crop_stitch")
         )
+        meta["crop_stitch_clamp_head_scale"] = bool(
+            self.cfg.get("crop_stitch_clamp_head_scale", False)
+        )
         print(
-            "[krea2 body_route] resolved_mode=crop_stitch_scale_clamped "
+            "[krea2 body_route] resolved_mode=crop_stitch "
+            f"(clamp_head_scale={meta['crop_stitch_clamp_head_scale']}) "
             "reason=single_person_full_body_detected",
             flush=True,
         )

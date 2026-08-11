@@ -101,9 +101,13 @@ def test_enabled_by_body_route_clamps_oversized_stitched_head(monkeypatch):
     assert not np.array_equal(np.asarray(result), np.asarray(out))
 
 
-def test_resolve_body_route_flag_actually_activates_the_clamp(monkeypatch):
-    """End-to-end: _resolve_body_route flags a single-person full-body photo,
-    and _maybe_clamp_crop_stitch_head_scale honors that flag."""
+def test_resolve_body_route_does_not_force_head_scale_clamp(monkeypatch):
+    """Body route must NOT flip crop_stitch_clamp_head_scale on.
+
+    Forcing the clamp on every full-body single-person run (e42caad+) caused
+    rectangular head-box seams + floating scalp ghosts on desert/sky plates.
+    Clamp stays whatever the caller configured (production default: false).
+    """
     import headswap.pipelines.krea2 as krea2_mod
     from headswap.preprocess import FaceBox as FB
 
@@ -114,9 +118,23 @@ def test_resolve_body_route_flag_actually_activates_the_clamp(monkeypatch):
         krea2_mod, "select_face_box", lambda rgb, cache_dir, index=0, policy="largest": (face, [face])
     )
     body = Image.new("RGB", (w, h))
-    pipe._resolve_body_route(body)
+    meta = pipe._resolve_body_route(body)
 
-    assert pipe.cfg.get("crop_stitch_clamp_head_scale") is True
+    assert meta["route"] == "crop_stitch"
+    assert "crop_stitch_clamp_head_scale" not in pipe.cfg
+    assert meta.get("crop_stitch_clamp_head_scale") is False
+
+    pipe2 = _pipe(
+        {
+            "enable_body_route": True,
+            "body_route_use_segmentation": False,
+            "max_body_dim": 2000,
+            "crop_stitch_clamp_head_scale": True,
+        }
+    )
+    meta2 = pipe2._resolve_body_route(body)
+    assert pipe2.cfg.get("crop_stitch_clamp_head_scale") is True
+    assert meta2.get("crop_stitch_clamp_head_scale") is True
 
 
 def test_resolve_body_route_does_not_touch_max_body_dim(monkeypatch):

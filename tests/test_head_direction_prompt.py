@@ -1,13 +1,9 @@
-"""Regression guard for the head-yaw/gaze-direction prompt clause.
+"""Regression guard for head-yaw/gaze prompt policy.
 
-Diffusion identity edits sometimes turn the generated head/eyes away from
-the original photo's direction (no post-hoc geometric pose correction runs
-in the production crop_stitch/full_frame paths -- see
-Krea2IdentityEditPipeline._apply_expression_policy). The main lever against
-that is prompt strength, so this locks in the explicit head-yaw/gaze clause
-in the production config and confirms it survives preserve_expression=False
-(it's a physical-geometry instruction, not an expression-lock clause, so it
-must not be stripped by _apply_expression_policy).
+Yaml still contains an explicit head-yaw/gaze lock clause (useful when
+``preserve_expression`` is true). When preserve_expression is false
+(production default), ``_apply_expression_policy`` must strip that lock and
+prefer natural donor gaze so sideways body look is not forced onto the donor.
 """
 from __future__ import annotations
 
@@ -29,9 +25,10 @@ def test_production_prompt_locks_head_direction():
     prompt = cfg["prompt"]
     assert "keep the head facing the exact same direction as the first image" in prompt
     assert "eyes must look in the exact same direction as the first image" in prompt
+    assert cfg.get("preserve_expression") is False
 
 
-def test_head_direction_clause_survives_preserve_expression_false():
+def test_head_direction_clause_stripped_when_preserve_expression_false():
     pipe = Krea2IdentityEditPipeline.__new__(Krea2IdentityEditPipeline)
     cfg = yaml.safe_load(CFG_PATH.read_text())
     pipe.cfg = {
@@ -40,8 +37,20 @@ def test_head_direction_clause_survives_preserve_expression_false():
         "single_person_parity": True,
     }
     out = pipe._prompt_for_edit(use_tight=False, multi_person=False)
-    # Expression-lock language is stripped...
     assert "copy the facial expression from the first image exactly" not in out.lower()
-    # ...but the head-direction/geometry clause is a physical-pose instruction,
-    # not an expression-lock clause, and must remain regardless.
+    assert "keep the head facing the exact same direction as the first image" not in out
+    assert "eyes must look in the exact same direction as the first image" not in out
+    assert "Allow the facial expression from the second image" in out
+    assert "natural donor gaze" in out.lower() or "toward the camera" in out.lower()
+
+
+def test_head_direction_clause_kept_when_preserve_expression_true():
+    pipe = Krea2IdentityEditPipeline.__new__(Krea2IdentityEditPipeline)
+    cfg = yaml.safe_load(CFG_PATH.read_text())
+    pipe.cfg = {
+        "prompt": cfg["prompt"],
+        "preserve_expression": True,
+        "single_person_parity": True,
+    }
+    out = pipe._prompt_for_edit(use_tight=False, multi_person=False)
     assert "keep the head facing the exact same direction as the first image" in out
