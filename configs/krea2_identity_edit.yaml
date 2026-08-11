@@ -139,18 +139,18 @@ post_color_match_edge_only_px: 24
 # two-pass neck_stub ring. Does NOT widen mask_bot_extend or turn on
 # post-stitch crop_stitch_clamp_head_scale.
 neck_stub_tone_match: true
-neck_stub_tone_match_ring_px: 70
+neck_stub_tone_match_ring_px: 90
 neck_stub_tone_match_interior_erode_px: 20
-neck_stub_tone_match_strength: 0.65
-neck_stub_tone_match_l_strength: 0.90
+neck_stub_tone_match_strength: 0.75
+neck_stub_tone_match_l_strength: 0.95
 neck_stub_tone_match_ab_strength: 1.0
 neck_stub_tone_match_passes: 2
-neck_stub_tone_match_ab_gate_scale: 22.0
-neck_stub_tone_match_blur_frac: 0.12
+neck_stub_tone_match_ab_gate_scale: 26.0
+neck_stub_tone_match_blur_frac: 0.14
 collapse_soft_chin_ghost: true
-collapse_soft_chin_ghost_mid_lo: 0.12
-collapse_soft_chin_ghost_mid_hi: 0.88
-collapse_soft_chin_ghost_chin_frac: 0.42
+collapse_soft_chin_ghost_mid_lo: 0.08
+collapse_soft_chin_ghost_mid_hi: 0.92
+collapse_soft_chin_ghost_chin_frac: 0.35
 # Single-person: dilate opaque stitch core a few px (covers old jaw sliver).
 stitch_mask_dilate_px: 10
 
@@ -307,9 +307,9 @@ head_matte_hair_margin_frac: 0.20
 head_matte_tight_edge: true
 head_matte_expand_px: 3
 head_matte_blur_px: 3
-# Tight matte edge. Feather=8 softens jaw/neck without the e42caad sky-rim
-# from feather=12 + post-stitch local-box clamp. Neck tone is neck_stub_*.
-head_matte_stitch_feather_px: 8
+# Tight matte edge. Feather=12 softens jaw/neck for open-collar coverage.
+# Post-stitch local-box clamp stays OFF (sky-rect risk).
+head_matte_stitch_feather_px: 12
 seam_refine: false
 seam_refine_erode_px: 8
 seam_refine_dilate_px: 16
