@@ -40,6 +40,7 @@ from headswap.preprocess import (
     classify_lighting,
     clamp_crop_away_neighbors,
     clamp_edited_head_scale,
+    clamp_edited_head_scale_full_frame,
     crop_face_reference,
     crop_with_mask,
     detect_best_face,
@@ -2698,6 +2699,103 @@ class Krea2IdentityEditPipeline(BasePipeline):
         out_final.paste(blended_img, (x0, y0))
         return out_final, clamp_info
 
+    def _maybe_clamp_crop_stitch_head_scale_full_frame(
+        self,
+        body_full: Image.Image,
+        out: Image.Image,
+        *,
+        out_dir: Path | None = None,
+        save_debug: bool = False,
+    ) -> tuple[Image.Image, dict[str, Any] | None]:
+        """Full-frame similarity head-scale clamp (replacement for local-box).
+
+        Gated by ``crop_stitch_full_frame_head_clamp`` (OFF by default). When
+        the generated head drifts outside the configured height-ratio band,
+        warps the **entire** stitched frame with a similarity transform that
+        maps the generated face onto the original target face, then builds a
+        soft head+hair compositing mask *after* the warp and alpha-blends:
+
+            final = mask * transformed + (1 - mask) * original
+
+        Avoids the three local-box failure modes (rectangular paste seam,
+        clipped/doubled hair at the box edge, floating ghost scalp when the
+        box hits y=0). When ``save_debug`` is set the feathered composite
+        mask is written next to other debug stages so seam issues can be
+        diagnosed from the mask directly.
+        """
+        do_clamp = bool(
+            self.cfg.get("crop_stitch_full_frame_head_clamp", False)
+        ) and bool(self.cfg.get("clamp_edited_head_scale", True))
+        if not do_clamp:
+            return out, None
+        body = body_full
+        if body.size != out.size:
+            body = body.resize(out.size, Image.Resampling.LANCZOS)
+        feather = int(self.cfg.get("full_frame_head_clamp_mask_feather_px", 48))
+        clamped, clamp_info, mask = clamp_edited_head_scale_full_frame(
+            body,
+            out,
+            self.cache_dir,
+            max_height_ratio=float(self.cfg.get("max_edited_head_height_ratio", 1.08)),
+            target_ratio=float(self.cfg.get("target_edited_head_height_ratio", 0.98)),
+            min_height_ratio=float(self.cfg.get("min_edited_head_height_ratio", 0.92)),
+            max_grow=float(self.cfg.get("max_edited_head_grow", 1.45)),
+            mask_top_extend=float(
+                self.cfg.get(
+                    "full_frame_head_clamp_mask_top_extend",
+                    self.cfg.get("mask_top_extend", 1.55),
+                )
+            ),
+            mask_side_extend=float(
+                self.cfg.get(
+                    "full_frame_head_clamp_mask_side_extend",
+                    self.cfg.get("mask_side_extend", 0.60),
+                )
+            ),
+            mask_bot_extend=float(
+                self.cfg.get(
+                    "full_frame_head_clamp_mask_bot_extend",
+                    self.cfg.get("mask_bot_extend", 0.40),
+                )
+            ),
+            mask_expand_px=int(
+                self.cfg.get(
+                    "full_frame_head_clamp_mask_expand_px",
+                    self.cfg.get("head_matte_expand_px", 6),
+                )
+            ),
+            mask_feather_px=feather,
+        )
+        if not clamp_info.get("clamped"):
+            return out, clamp_info
+        print(
+            f"[krea2] crop_stitch full-frame head clamp "
+            f"ratio {clamp_info['ratio_before']:.2f}→"
+            f"{clamp_info['ratio_after']:.2f} shrink={clamp_info['shrink']:.3f} "
+            f"t=[{clamp_info.get('tx', 0):.1f}, {clamp_info.get('ty', 0):.1f}] "
+            f"feather_px={feather}",
+            flush=True,
+        )
+        if save_debug and mask is not None:
+            try:
+                import time as _time
+
+                dump_dir = Path(out_dir) if out_dir is not None else Path("/tmp/headswap_debug")
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                ts = int(_time.time())
+                mask_path = dump_dir / f"full_frame_head_clamp_mask_{ts}.png"
+                mask.save(mask_path)
+                print(
+                    f"[krea2 debug] full_frame_head_clamp_mask saved → {mask_path}  "
+                    f"white=transformed_head(kept), black=original_frame(restored)  "
+                    f"size={mask.size}",
+                    flush=True,
+                )
+                clamp_info["debug_mask_path"] = str(mask_path)
+            except Exception as exc:  # noqa: BLE001 — never block the run
+                print(f"[krea2 debug] full_frame_head_clamp_mask dump failed: {exc}", flush=True)
+        return clamped, clamp_info
+
     def _maybe_procrustes_edited_crop(
         self,
         edited: Image.Image,
@@ -4462,15 +4560,33 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     if bool(self.cfg.get("restore_background_enabled", True)):
                         out, rb_info = restore_background(out, body_full)
                         face_prep_diag["restore_background"] = rb_info
-                    # Body-route safety net (see _resolve_body_route /
-                    # _maybe_clamp_crop_stitch_head_scale docstrings): only
-                    # active when a single-person full body was detected --
-                    # ordinary portrait crop_stitch runs are unaffected.
-                    out, cs_clamp_info = self._maybe_clamp_crop_stitch_head_scale(
-                        body_full, out
-                    )
-                    if cs_clamp_info is not None:
-                        face_prep_diag["crop_stitch_body_route_clamp"] = cs_clamp_info
+                    # Head-scale safety net. Prefer the full-frame similarity
+                    # transform (crop_stitch_full_frame_head_clamp) over the
+                    # legacy local-box paste (crop_stitch_clamp_head_scale) —
+                    # the local-box path produced rectangular seams, clipped
+                    # hair, and double-head ghosts. Both flags are OFF by
+                    # default; enable only one at a time for A/B.
+                    if bool(self.cfg.get("crop_stitch_full_frame_head_clamp", False)):
+                        out, cs_clamp_info = (
+                            self._maybe_clamp_crop_stitch_head_scale_full_frame(
+                                body_full,
+                                out,
+                                out_dir=Path(out_dir) if out_dir else None,
+                                save_debug=save_debug,
+                            )
+                        )
+                        if cs_clamp_info is not None:
+                            face_prep_diag["crop_stitch_full_frame_head_clamp"] = (
+                                cs_clamp_info
+                            )
+                    else:
+                        out, cs_clamp_info = self._maybe_clamp_crop_stitch_head_scale(
+                            body_full, out
+                        )
+                        if cs_clamp_info is not None:
+                            face_prep_diag["crop_stitch_body_route_clamp"] = (
+                                cs_clamp_info
+                            )
                     # Optional post-stitch neighbor restore. OFF by default —
                     # production locality is crop-window exclusion + mask carve.
                     if (

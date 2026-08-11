@@ -34,4 +34,5 @@ def test_production_yaml_disables_crop_stitch_head_clamp():
     assert float(cfg.get("target_edited_head_height_ratio", 0.98)) == 0.94
     assert cfg.get("preserve_expression") is False
     assert cfg.get("crop_stitch_clamp_head_scale") is False
+    assert cfg.get("crop_stitch_full_frame_head_clamp", False) is False
     assert cfg.get("crop_stitch_pre_stitch_clamp") is True

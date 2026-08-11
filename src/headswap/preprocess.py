@@ -304,6 +304,149 @@ def clamp_edited_head_scale(
     return out, info
 
 
+def clamp_edited_head_scale_full_frame(
+    original_scene: Image.Image,
+    edited: Image.Image,
+    cache_dir,
+    *,
+    max_height_ratio: float = 1.08,
+    target_ratio: float = 0.98,
+    min_height_ratio: float = 0.92,
+    max_grow: float = 1.45,
+    mask_top_extend: float = 1.55,
+    mask_side_extend: float = 0.60,
+    mask_bot_extend: float = 0.40,
+    mask_expand_px: int = 6,
+    mask_feather_px: int = 48,
+) -> tuple[Image.Image, dict[str, float], Image.Image | None]:
+    """Full-frame similarity head-scale clamp with post-transform soft composite.
+
+    Unlike the local-box clamp (which cropped a head sub-region, warped it, and
+    paste-blended it back — producing rectangular seams, clipped hair, and
+    double-head ghosts), this:
+
+      1. Computes a similarity transform (uniform scale + x/y translation)
+         mapping the generated face onto the original target face.
+      2. Applies that transform to the **entire** generated frame — nothing
+         can be clipped by a pre-sized box.
+      3. Builds the compositing mask **after** the warp, from where the
+         transformed head actually lands.
+      4. Soft-composites over the full frame:
+         ``final = mask * transformed + (1-mask) * original``
+         with a generously Gaussian-feathered mask boundary.
+
+    Returns ``(result, info, composite_mask_or_None)``. The mask is returned
+    so callers can dump it for seam/ghost diagnosis (``None`` when the clamp
+    did not fire).
+    """
+    info: dict[str, float] = {
+        "clamped": 0.0,
+        "ratio_before": 1.0,
+        "ratio_after": 1.0,
+        "shrink": 1.0,
+        "tx": 0.0,
+        "ty": 0.0,
+        "mask_feather_px": float(mask_feather_px),
+    }
+    if original_scene.size != edited.size:
+        edited = edited.resize(original_scene.size, Image.Resampling.LANCZOS)
+    fo = detect_best_face(pil_to_rgb_np(original_scene), cache_dir)
+    fe = detect_best_face(pil_to_rgb_np(edited), cache_dir)
+    if fo is None or fe is None or fo.height < 8 or fe.height < 8:
+        return edited, info, None
+    ratio = float(fe.height) / float(fo.height)
+    info["ratio_before"] = ratio
+    if float(min_height_ratio) <= ratio <= float(max_height_ratio):
+        info["ratio_after"] = ratio
+        return edited, info, None
+
+    shrink = (float(fo.height) * float(target_ratio)) / float(fe.height)
+    shrink = float(min(float(max_grow), max(0.55, shrink)))
+    info["shrink"] = shrink
+    info["clamped"] = 1.0
+
+    arr = pil_to_rgb_np(edited)
+    h, w = arr.shape[:2]
+    ecx = 0.5 * (fe.x0 + fe.x1)
+    ecy = 0.5 * (fe.y0 + fe.y1)
+    ocx = 0.5 * (fo.x0 + fo.x1)
+    ocy = 0.5 * (fo.y0 + fo.y1)
+    # Similarity: scale about edited face center, then translate to original.
+    m = cv2.getRotationMatrix2D((ecx, ecy), 0.0, shrink)
+    m[0, 2] += ocx - ecx
+    m[1, 2] += ocy - ecy
+    info["tx"] = float(m[0, 2])
+    info["ty"] = float(m[1, 2])
+
+    warped = cv2.warpAffine(
+        arr,
+        m,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+
+    # Where the transformed head lands: map the generated face box through m.
+    # Analytic (not re-detect) so the mask is deterministic even if InsightFace
+    # briefly misses the warped face.
+    corners = np.array(
+        [
+            [fe.x0, fe.y0],
+            [fe.x1, fe.y0],
+            [fe.x1, fe.y1],
+            [fe.x0, fe.y1],
+        ],
+        dtype=np.float32,
+    )
+    ones = np.ones((4, 1), dtype=np.float32)
+    mapped = (m @ np.hstack([corners, ones]).T).T
+    mx0 = int(np.floor(mapped[:, 0].min()))
+    my0 = int(np.floor(mapped[:, 1].min()))
+    mx1 = int(np.ceil(mapped[:, 0].max()))
+    my1 = int(np.ceil(mapped[:, 1].max()))
+    mx0, my0 = max(0, mx0), max(0, my0)
+    mx1, my1 = min(w, mx1), min(h, my1)
+    if mx1 - mx0 < 8 or my1 - my0 < 8:
+        # Degenerate warp — fall back to original unscaled edit.
+        return edited, info, None
+    landed = FaceBox(mx0, my0, mx1, my1, float(fe.conf))
+
+    # Mask AFTER transform, from where the head landed.
+    warped_pil = np_to_pil(warped)
+    composite_mask = head_hair_mask_from_face(
+        warped_pil,
+        cache_dir,
+        expand_px=int(mask_expand_px),
+        blur_px=0,  # feather separately with a generous Gaussian below
+        top_extend=float(mask_top_extend),
+        side_extend=float(mask_side_extend),
+        bot_extend=float(mask_bot_extend),
+        face_box=landed,
+    )
+    mask_arr = np.asarray(composite_mask.convert("L"), dtype=np.float32)
+    feather = max(0, int(mask_feather_px))
+    if feather > 0:
+        k = feather * 2 + 1
+        mask_arr = cv2.GaussianBlur(mask_arr, (k, k), 0)
+    alpha = (mask_arr / 255.0)[..., None]
+    orig_arr = pil_to_rgb_np(original_scene).astype(np.float32)
+    if orig_arr.shape[:2] != (h, w):
+        orig_arr = pil_to_rgb_np(
+            original_scene.resize((w, h), Image.Resampling.LANCZOS)
+        ).astype(np.float32)
+    blended = warped.astype(np.float32) * alpha + orig_arr * (1.0 - alpha)
+    out = np_to_pil(np.clip(blended, 0, 255).astype(np.uint8))
+    mask_out = Image.fromarray(np.clip(mask_arr, 0, 255).astype(np.uint8))
+
+    fe2 = detect_best_face(pil_to_rgb_np(out), cache_dir)
+    if fe2 is not None and fo.height > 0:
+        info["ratio_after"] = float(fe2.height) / float(fo.height)
+    else:
+        info["ratio_after"] = ratio * shrink
+    return out, info, mask_out
+
+
 def dilate_mask(mask: Image.Image, px: int) -> Image.Image:
     """Expand an L/RGBA mask so the opaque region covers more of the old head."""
     if px <= 0:
