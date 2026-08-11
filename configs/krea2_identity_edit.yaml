@@ -49,7 +49,15 @@ torch_compile_mode: reduce-overhead
 save_debug: false
 verbose: false
 
-ref_boost: 3.5
+# Raised from 3.5: GPU A/B (2026-08-11) confirmed ref_boost=7.0 gives
+# noticeably better donor identity fidelity than 3.5, including hair --
+# consistent with the hair-color measurement showing generated hair sitting
+# much closer to the TARGET's own hair than the donor's at ref_boost=3.5
+# across 3 seeds (distances ~55-71 to donor vs ~9-20 to target). Stronger
+# image-reference conditioning is the correct lever here, not more prompt
+# text -- cfg=1.0 (required by this distilled checkpoint) already caps how
+# much the text prompt alone can steer generation.
+ref_boost: 7.0
 ref_boost_a: 1.6
 grounding_px: 768
 fit_mode: fit
@@ -164,7 +172,14 @@ harmonization_enabled: true
 harmonization_dilate_px: 24
 harmonization_bot_extend: 0.15
 harmonization_skin_thresh: 0.45
-harmonization_strength: 0.55
+# Raised from 0.55: math is directionally correct (shifts the neck/body ring
+# toward the donor tone sampled from deep inside the generated head, not the
+# reverse), but 0.55 only gets partway there, leaving a muddy in-between tone
+# that reads as "wrong" rather than a clean match to either person
+# (2026-08-11 user report). 0.85 pulls it most of the way to the donor's
+# actual tone while keeping the feathered falloff so it doesn't read as a
+# hard-edged recolor.
+harmonization_strength: 0.85
 harmonization_feather_px: 16
 harmonization_include_arms: true
 
@@ -512,7 +527,21 @@ crop_stitch_clamp_head_scale: false
 # no content is clipped by a pre-sized box. Debug dumps the feathered mask
 # as full_frame_head_clamp_mask_*.png when save_debug=true.
 crop_stitch_full_frame_head_clamp: false
-full_frame_head_clamp_mask_feather_px: 48
+# Cut 48 -> 16: the composite is `mask*warped + (1-mask)*original_scene`, i.e.
+# the SAME two-different-scale-images-blended-through-a-soft-edge failure the
+# local-box clamp had. A 48px feather reached far enough past the new (post-
+# shrink) head's actual boundary to overlap where the ORIGINAL head really
+# was in the untouched original_scene -- showing a translucent trace of it
+# (GPU-observed 2026-08-11: visible ghost hovering above the real head, same
+# defect as the local-box path before its own border_fill fix). A tighter
+# feather keeps the blend zone close to the new head's true edge, well short
+# of the old position for realistic shrink factors (~0.73-0.78 observed).
+# Cut further 16 -> 10 alongside the alpha-tail snap added to
+# clamp_edited_head_scale_full_frame (preprocess.py) -- 16 alone still showed
+# a visible ghost on GPU (2026-08-11). No more test cycles available before
+# this fix ships; both mitigations applied together, unverified pending next
+# GPU run.
+full_frame_head_clamp_mask_feather_px: 10
 # Head+hair-only mask for the clamp composite (NOT the stitch mask extents).
 # bot_extend=0.08 stops at the chin — using stitch's 0.40 pulled donor collar
 # clothing into the result. top_extend=1.80 covers voluminous hair above the

@@ -454,6 +454,16 @@ def clamp_edited_head_scale_full_frame(
         mask_arr = cv2.GaussianBlur(mask_arr, (k, k), 0)
     # Re-apply coverage after feather so soft edges cannot reintroduce black.
     mask_arr = mask_arr * cov
+    # Alpha-tail snap (same fix as restore_background's ghost, 2026-08-10):
+    # this composite is `mask*warped + (1-mask)*original_scene` -- two DIFFERENT
+    # scales of the same photo. Anywhere original_scene's real (pre-shrink) head
+    # position falls inside the feather's low-alpha tail, that faint alpha
+    # partially preserves a translucent trace of it instead of cleanly showing
+    # the transformed frame -- the ghost. Floor/ceil snap shrinks the spatial
+    # extent of that tail (values below floor go fully to `warped`, i.e. away
+    # from original_scene) without hardening the real transition band.
+    mask_img = clean_alpha_tails(Image.fromarray(np.clip(mask_arr, 0, 255).astype(np.uint8)), floor=40, ceil=245)
+    mask_arr = np.asarray(mask_img, dtype=np.float32)
     alpha = (mask_arr / 255.0)[..., None]
     orig_arr = pil_to_rgb_np(original_scene).astype(np.float32)
     if orig_arr.shape[:2] != (h, w):

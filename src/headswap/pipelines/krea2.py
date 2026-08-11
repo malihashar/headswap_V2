@@ -4560,6 +4560,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     # the warp's exact coverage mask, not a soft neural matte,
                     # so it doesn't have this failure mode and can safely run
                     # last.
+                    # NOTE: this must run BEFORE either head-scale clamp below,
+                    # not after. GPU-observed 2026-08-11: the full-frame clamp
+                    # reintroduced the exact same scale-mismatch ghost the
+                    # comment above this line describes for the local-box
+                    # clamp -- restore_background's matte-union blend still
+                    # assumes ``out``/``body_full`` are the same scale, and the
+                    # full-frame similarity warp breaks that assumption just
+                    # as much as the old local-box shrink did. Whichever clamp
+                    # runs, restore_background has to run first.
                     if bool(self.cfg.get("restore_background_enabled", True)):
                         out, rb_info = restore_background(out, body_full)
                         face_prep_diag["restore_background"] = rb_info
