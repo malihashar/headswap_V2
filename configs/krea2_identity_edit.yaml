@@ -135,10 +135,24 @@ post_color_match_edge_only_px: 24
 # donor-toned face sits directly next to an un-recolored original-tone neck
 # stub and reads as a tone seam even though the paste/feather geometry is
 # otherwise correct (2026-08-10).
+# Soft mid-alpha under-chin ghost collapse (prefer edited); cloth-safe
+# two-pass neck_stub ring. Does NOT widen mask_bot_extend or turn on
+# post-stitch crop_stitch_clamp_head_scale.
 neck_stub_tone_match: true
-neck_stub_tone_match_ring_px: 40
+neck_stub_tone_match_ring_px: 70
 neck_stub_tone_match_interior_erode_px: 20
 neck_stub_tone_match_strength: 0.65
+neck_stub_tone_match_l_strength: 0.90
+neck_stub_tone_match_ab_strength: 1.0
+neck_stub_tone_match_passes: 2
+neck_stub_tone_match_ab_gate_scale: 22.0
+neck_stub_tone_match_blur_frac: 0.12
+collapse_soft_chin_ghost: true
+collapse_soft_chin_ghost_mid_lo: 0.12
+collapse_soft_chin_ghost_mid_hi: 0.88
+collapse_soft_chin_ghost_chin_frac: 0.42
+# Single-person: dilate opaque stitch core a few px (covers old jaw sliver).
+stitch_mask_dilate_px: 8
 
 # Multi-person production (decision-gate YES_ARCHITECTURE):
 #   detect faces → select one → SAME single-person crop recipe → Krea2 → stitch.
@@ -293,12 +307,9 @@ head_matte_hair_margin_frac: 0.20
 head_matte_tight_edge: true
 head_matte_expand_px: 3
 head_matte_blur_px: 3
-# Tight matte edge (matches pre-e42caad production). Widening to 12 (e42caad)
-# was meant to soft-hide a neck tone seam, but on full-body desert/sky shots it
-# also widens the blend into background; combined with the always-on head-scale
-# clamp that commit added, users saw a rectangular crop window + floating scalp.
-# Neck tone is handled by neck_stub_tone_match (thin ring), not a fat feather.
-head_matte_stitch_feather_px: 3
+# Tight matte edge. Feather=8 softens jaw/neck without the e42caad sky-rim
+# from feather=12 + post-stitch local-box clamp. Neck tone is neck_stub_*.
+head_matte_stitch_feather_px: 8
 seam_refine: false
 seam_refine_erode_px: 8
 seam_refine_dilate_px: 16
@@ -460,6 +471,9 @@ multi_post_color_match_strength: 0.55
 identity_scale_match: true
 identity_scale_factor: 0.95
 identity_hair_height_boost: 1.30
+# Extra shrink on donor person-ref after face-frac normalize (full-body head size).
+donor_scale_normalize: true
+donor_scale_factor: 0.88
 clamp_edited_head_scale: true
 max_edited_head_height_ratio: 1.08
 target_edited_head_height_ratio: 0.98
@@ -478,6 +492,9 @@ max_edited_head_grow: 1.45
 # head-swap composite unchanged; optional soft neck blend is neck_stub_* only.
 # Re-enable only after local A/B proves no rect/ghost on full-body sky plates.
 crop_stitch_clamp_head_scale: false
+# Pre-stitch clamp on the edited crop for single-person (soft-composited through
+# the head mask). Does NOT call the post-stitch local-box paste above.
+crop_stitch_pre_stitch_clamp: true
 # Geometry RCA: dump S0–S4 face/head boxes (no recipe changes). Also on when save_debug.
 head_scale_trace: false
 multi_head_scale_prompt: true

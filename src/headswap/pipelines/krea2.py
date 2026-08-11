@@ -53,6 +53,8 @@ from headswap.preprocess import (
     identity_face_boost_mask,
     lab_histogram_match_face,
     match_neck_stub_to_head_tone,
+    clean_alpha_tails,
+    collapse_soft_chin_ghost,
     narrow_band_seam_refine,
     pad_to_square,
     pil_to_rgb_np,
@@ -957,12 +959,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 if donor_face_frac > 1e-6:
                     # Height of the donor IMAGE (not just its face) on the
                     # canvas such that its FACE lands at target_face_frac.
+                    # donor_scale_factor (<1) further shrinks the person ref so
+                    # the model renders a slightly smaller head (full-body
+                    # oversized-head A/B). Noop check uses the unfactored
+                    # match so the known-good portrait path stays untouched.
                     img_frac = target_face_frac / donor_face_frac
-                    img_frac = min(1.0, max(0.15, img_frac))
+                    matched = min(1.0, max(0.15, img_frac))
                     # Already matched (the portrait case, ~0.99-1.0): fall
                     # through to plain resize_contain so the known-good path
                     # stays bit-identical rather than off-by-a-resample.
-                    if img_frac >= float(
+                    if matched >= float(
                         self.cfg.get("donor_scale_noop_threshold", 0.97)
                     ):
                         donor_norm_info = {
@@ -970,9 +976,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             "reason": "already_matched",
                             "target_face_frac": round(target_face_frac, 4),
                             "donor_face_frac": round(donor_face_frac, 4),
-                            "donor_img_frac": round(img_frac, 4),
+                            "donor_img_frac": round(matched, 4),
                         }
                         img_frac = None
+                    else:
+                        img_frac = matched * float(
+                            self.cfg.get("donor_scale_factor", 0.88)
+                        )
+                        img_frac = min(1.0, max(0.15, img_frac))
                 if donor_face_frac > 1e-6 and img_frac is not None:
                     person = place_face_at_height_frac(
                         face_crop.convert("RGB"),
@@ -2789,17 +2800,24 @@ class Krea2IdentityEditPipeline(BasePipeline):
             edited_crop = edited_crop.crop((ox, oy, ox + cw, oy + ch))
         # Clamp / multi stitch boosts only when NOT on SPP-CC parity path.
         stitch_multi = bool(multi_person) and not self._single_person_parity()
+        # Pre-stitch clamp on the edited crop (NOT post-stitch local-box paste).
+        # Multi always uses this; single-person opts in via
+        # crop_stitch_pre_stitch_clamp. Soft-composites through the head mask
+        # below — never call _maybe_clamp_crop_stitch_head_scale here.
+        pre_stitch_clamp = stitch_multi or bool(
+            self.cfg.get("crop_stitch_pre_stitch_clamp", False)
+        )
         # Clamp oversized heads before composite (group-shot failure mode).
         # Suppressed when Procrustes already resized the head — two independent
         # scale+translate warps stacked produce a doubled / displaced head.
-        if stitch_multi and skip_head_clamp:
+        if pre_stitch_clamp and skip_head_clamp:
             import sys
 
             print(
                 "[krea2] head-scale clamp skipped (procrustes already applied)",
                 flush=True,
             )
-        if stitch_multi and not skip_head_clamp and bool(
+        if pre_stitch_clamp and not skip_head_clamp and bool(
             self.cfg.get("clamp_edited_head_scale", True)
         ):
             ref_scene = original_scene
@@ -2811,6 +2829,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 ref_scene = ref_scene.resize(
                     edited_crop.size, Image.Resampling.LANCZOS
                 )
+            pre_clamp_crop = edited_crop
             edited_crop, clamp_info = clamp_edited_head_scale(
                 ref_scene,
                 edited_crop,
@@ -2829,6 +2848,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     f"shrink={clamp_info['shrink']:.3f}",
                     flush=True,
                 )
+                # Single-person pre-stitch: soft-composite clamped head through
+                # the head mask so crop sky/padding is not hard-warped (avoids
+                # the sky-rect artifact of post-stitch local-box clamp).
+                if not stitch_multi:
+                    cw, ch = edited_crop.size
+                    edited_crop = feathered_soft_composite(
+                        pre_clamp_crop,
+                        edited_crop,
+                        mask,
+                        (0, 0, cw, ch),
+                        extra_blur_px=max(
+                            2, int(self.cfg.get("head_matte_stitch_feather_px", 3))
+                        ),
+                    )
         stitch_mask = mask
         # Dilate before feather so the opaque core fully covers the old head
         # (stops original face/ear ghosting next to neighbors). A small dilate
@@ -2877,6 +2910,45 @@ class Krea2IdentityEditPipeline(BasePipeline):
             box,
             extra_blur_px=feather,
         )
+        # Soft mid-alpha under-chin ghost collapse (prefer edited, no dress paint).
+        sm = stitch_mask.convert("L")
+        if sm.size == canvas.size:
+            full_m = sm
+        else:
+            full_m = Image.new("L", canvas.size, 0)
+            x0, y0, x1, y1 = box
+            bw, bh = max(1, x1 - x0), max(1, y1 - y0)
+            sm_r = sm.resize((bw, bh), Image.Resampling.BILINEAR)
+            full_m.paste(sm_r, (x0, y0))
+        soft_m = full_m
+        if feather > 0:
+            import cv2
+            import numpy as np
+
+            k = max(3, int(feather) * 2 + 1)
+            soft_m = Image.fromarray(cv2.GaussianBlur(np.asarray(full_m), (k, k), 0))
+        soft_m = clean_alpha_tails(soft_m, floor=10, ceil=245)
+        if bool(self.cfg.get("collapse_soft_chin_ghost", True)):
+            x0, y0, x1, y1 = box
+            bw, bh = max(1, x1 - x0), max(1, y1 - y0)
+            edited_full = canvas.copy()
+            edited_full.paste(
+                edited_crop.convert("RGB").resize((bw, bh), Image.Resampling.LANCZOS),
+                (x0, y0),
+            )
+            stitched = collapse_soft_chin_ghost(
+                stitched,
+                canvas,
+                edited_full,
+                soft_m,
+                mid_lo=float(self.cfg.get("collapse_soft_chin_ghost_mid_lo", 0.12)),
+                mid_hi=float(self.cfg.get("collapse_soft_chin_ghost_mid_hi", 0.88)),
+                chin_start_frac=float(
+                    self.cfg.get("collapse_soft_chin_ghost_chin_frac", 0.42)
+                ),
+            )
+            if debug_stages is not None:
+                debug_stages["composite_after_chin_ghost"] = stitched.copy()
         if debug_stages is not None:
             debug_stages["stitch_mask"] = stitch_mask.convert("L").copy()
             debug_stages["composite_before_lab"] = stitched.copy()
@@ -2893,11 +2965,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
             stitched = match_neck_stub_to_head_tone(
                 stitched,
                 stitch_mask,
-                ring_px=int(self.cfg.get("neck_stub_tone_match_ring_px", 40)),
+                ring_px=int(self.cfg.get("neck_stub_tone_match_ring_px", 70)),
                 interior_erode_px=int(
                     self.cfg.get("neck_stub_tone_match_interior_erode_px", 20)
                 ),
                 strength=float(self.cfg.get("neck_stub_tone_match_strength", 0.65)),
+                l_strength=float(self.cfg.get("neck_stub_tone_match_l_strength", 0.90)),
+                ab_strength=float(self.cfg.get("neck_stub_tone_match_ab_strength", 1.0)),
+                passes=int(self.cfg.get("neck_stub_tone_match_passes", 2)),
+                ab_gate_scale=float(
+                    self.cfg.get("neck_stub_tone_match_ab_gate_scale", 22.0)
+                ),
+                blur_frac=float(self.cfg.get("neck_stub_tone_match_blur_frac", 0.12)),
             )
             if debug_stages is not None:
                 debug_stages["composite_after_neck_tone"] = stitched.copy()

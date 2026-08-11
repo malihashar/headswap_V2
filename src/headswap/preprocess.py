@@ -1937,6 +1937,124 @@ def clean_alpha_tails(mask: Image.Image, *, floor: int = 10, ceil: int = 245) ->
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
+def _skin_likelihood_strict(rgb_u8: np.ndarray) -> np.ndarray:
+    """Strict [0,1] skin score; rejects cream cloth and dyed fabric.
+
+    Dark donor faces (L≈25–40) still need non-zero scores so cheek sampling
+    and under-chin gates work — only cream/dye reject stays hard.
+    """
+    bgr = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR)
+    ycrcb = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+    y, cr, cb = ycrcb[:, :, 0], ycrcb[:, :, 1], ycrcb[:, :, 2]
+    cr_score = np.clip(1.0 - np.abs(cr - 148.0) / 36.0, 0.0, 1.0)
+    cb_score = np.clip(1.0 - np.abs(cb - 115.0) / 34.0, 0.0, 1.0)
+    # Allow darker skin (Y down to ~20) without collapsing the score to 0.
+    y_score = np.clip((y - 18.0) / 28.0, 0.0, 1.0) * np.clip(
+        (245.0 - y) / 35.0, 0.0, 1.0
+    )
+    hsv = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2HSV).astype(np.float32)
+    hue = hsv[:, :, 0]
+    sat = hsv[:, :, 1] / 255.0
+    # Dark skin often has low HSV sat in 8-bit; keep a floor so cheeks score.
+    sat_score = np.clip((sat - 0.05) / 0.14, 0.0, 1.0) * np.clip(
+        (0.70 - sat) / 0.20, 0.0, 1.0
+    )
+    hue_ok = ((hue <= 30.0) | (hue >= 155.0)).astype(np.float32)
+    rgb_f = rgb_u8.astype(np.float32)
+    r, g, b = rgb_f[:, :, 0], rgb_f[:, :, 1], rgb_f[:, :, 2]
+    fabric_red = (
+        (r > 1.85 * np.maximum(g, 1.0))
+        & (r > 1.85 * np.maximum(b, 1.0))
+        & (sat > 0.55)
+        & (y < 100)
+    ).astype(np.float32)
+    non_skin_hue = ((hue > 32.0) & (hue < 150.0)).astype(np.float32)
+    return (
+        cr_score * cb_score * y_score * sat_score * hue_ok
+        * (1.0 - fabric_red)
+        * (1.0 - non_skin_hue * np.clip(sat / 0.25, 0.0, 1.0))
+    ).astype(np.float32)
+
+
+def collapse_soft_chin_ghost(
+    result: Image.Image,
+    plate: Image.Image,
+    edited: Image.Image,
+    soft_alpha: Image.Image,
+    *,
+    mid_lo: float = 0.12,
+    mid_hi: float = 0.88,
+    chin_start_frac: float = 0.42,
+) -> Image.Image:
+    """Prefer edited pixels in soft mid-alpha under-chin skin (kills double neck).
+
+    Soft stitch mid-band mixes the original pale neck stub under the new jaw,
+    reading as a translucent duplicate / pale V. Where alpha is mid-range and
+    the edited pixel is skin-like, take edited content instead of the blend.
+    Cloth, sky, and the opaque face interior stay untouched.
+    """
+    if result.size != plate.size:
+        plate = plate.resize(result.size, Image.Resampling.LANCZOS)
+    if edited.size != result.size:
+        edited = edited.resize(result.size, Image.Resampling.LANCZOS)
+    a_img = soft_alpha.convert("L")
+    if a_img.size != result.size:
+        a_img = a_img.resize(result.size, Image.Resampling.BILINEAR)
+    a = np.asarray(a_img, dtype=np.float32) / 255.0
+    mid = (a > float(mid_lo)) & (a < float(mid_hi))
+    if int(mid.sum()) < 20:
+        return result
+
+    core = a > 0.50
+    ys, xs = np.where(core)
+    if ys.size < 30:
+        ys, xs = np.where(a > float(mid_lo))
+    if ys.size < 30:
+        return result
+    y0, y1 = int(ys.min()), int(ys.max())
+    x0, x1 = int(xs.min()), int(xs.max())
+    below = np.zeros_like(a, dtype=bool)
+    below[y0 + int(float(chin_start_frac) * max(1, y1 - y0)) :, x0:x1] = True
+
+    ed_u8 = pil_to_rgb_np(edited)
+    pl_u8 = pil_to_rgb_np(plate)
+    skin_ed = _skin_likelihood_strict(ed_u8)
+    skin_pl = _skin_likelihood_strict(pl_u8)
+    ed_lab = cv2.cvtColor(ed_u8.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
+    pl_lab = cv2.cvtColor(pl_u8.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
+    ed_chroma = np.sqrt(ed_lab[:, :, 1] ** 2 + ed_lab[:, :, 2] ** 2)
+    pl_chroma = np.sqrt(pl_lab[:, :, 1] ** 2 + pl_lab[:, :, 2] ** 2)
+    ed_hsv = cv2.cvtColor(ed_u8, cv2.COLOR_RGB2HSV).astype(np.float32)
+    pl_hsv = cv2.cvtColor(pl_u8, cv2.COLOR_RGB2HSV).astype(np.float32)
+    ed_sat = ed_hsv[:, :, 1] / 255.0
+    pl_sat = pl_hsv[:, :, 1] / 255.0
+    cloth = (
+        ((ed_lab[:, :, 0] > 78.0) & (ed_chroma < 14.0))
+        | ((ed_lab[:, :, 0] > 72.0) & (ed_sat < 0.16))
+        | ((pl_lab[:, :, 0] > 78.0) & (pl_chroma < 14.0))
+        | ((pl_lab[:, :, 0] > 72.0) & (pl_sat < 0.16))
+        | ((ed_hsv[:, :, 0] > 32.0) & (ed_hsv[:, :, 0] < 150.0) & (ed_sat > 0.22))
+        | ((pl_hsv[:, :, 0] > 32.0) & (pl_hsv[:, :, 0] < 150.0) & (pl_sat > 0.22))
+    )
+    # Ghost signature: mid-alpha under chin where plate is pale skin OR much
+    # lighter than edited (dark donor necks fail strict skin_ed alone).
+    pale_plate = (skin_pl >= 0.22) | (
+        (pl_lab[:, :, 0] - ed_lab[:, :, 0] > 10.0) & (pl_chroma > 6.0) & (pl_sat > 0.08)
+    )
+    pick = mid & below & pale_plate & (~cloth) & (
+        (skin_ed >= 0.12) | (ed_lab[:, :, 0] < pl_lab[:, :, 0] - 6.0)
+    )
+    if int(pick.sum()) < 15:
+        return result
+    res = pil_to_rgb_np(result).astype(np.float32)
+    ed = ed_u8.astype(np.float32)
+    # Soft ramp: more opaque mid-alpha → more edited; never paint outside pick.
+    w = np.clip((a - float(mid_lo)) / max(float(mid_hi) - float(mid_lo), 1e-3), 0.0, 1.0)
+    w = np.clip(0.55 + 0.45 * w, 0.0, 1.0) * pick.astype(np.float32)
+    out = res * (1.0 - w[..., None]) + ed * w[..., None]
+    return np_to_pil(np.clip(out, 0, 255))
+
+
 def feathered_soft_composite(
     base: Image.Image,
     edit: Image.Image,
@@ -3027,9 +3145,14 @@ def match_neck_stub_to_head_tone(
     result: Image.Image,
     mask: Image.Image,
     *,
-    ring_px: int = 40,
+    ring_px: int = 70,
     interior_erode_px: int = 20,
     strength: float = 0.65,
+    l_strength: float | None = 0.90,
+    ab_strength: float | None = 1.0,
+    passes: int = 2,
+    ab_gate_scale: float = 22.0,
+    blur_frac: float = 0.12,
 ) -> Image.Image:
     """Tint the exposed original neck just outside the paste mask toward the
     donor's own skin tone -- color only, no new content is pasted.
@@ -3046,10 +3169,27 @@ def match_neck_stub_to_head_tone(
     is pure donor face, not itself edge-blended) -- the opposite direction
     from ``lab_histogram_match_face``, which pulls edited pixels toward the
     original. No pixels inside the mask are touched.
+
+    ``l_strength``/``ab_strength`` override ``strength`` per-channel when
+    given (L = lightness, a/b = hue/chroma). A single weak pass left a pale
+    collar-V under dark donor faces (2026-08-10): donor-relative ab-distance
+    gating alone half-rejected pale skin, blur leaked into the face, and one
+    mean-shift couldn't close a ~50 L gap. Fixes: absolute skin likelihood *
+    softer ab gate, cream/cloth reject, re-zero weight inside the mask after
+    blur, mean from gated ring pixels only, and optional second pass.
+
+    The ring is clipped to the BOTTOM half of the mask's bounding box
+    (chin/neck/chest side only). Un-clipped, ``dilate(mask) - mask`` forms a
+    band around the mask's ENTIRE perimeter, including above the hair --
+    which pulled sky toward donor skin (dark halo above head).
     """
-    if strength <= 0 or ring_px <= 0:
+    if ring_px <= 0:
         return result
-    res = pil_to_rgb_np(result).astype(np.float32)
+    if strength <= 0 and (l_strength or 0) <= 0 and (ab_strength or 0) <= 0:
+        return result
+    n_passes = max(1, int(passes))
+    res_u8 = pil_to_rgb_np(result)
+    res = res_u8.astype(np.float32)
     m = np.asarray(mask.convert("L")).astype(np.float32) / 255.0
     if m.shape[:2] != res.shape[:2]:
         m = cv2.resize(m, (res.shape[1], res.shape[0]), interpolation=cv2.INTER_LINEAR)
@@ -3065,20 +3205,68 @@ def match_neck_stub_to_head_tone(
         core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_ring, k_ring))
     )
     ring = dilated.astype(bool) & (~core.astype(bool))
+    ys, _xs = np.where(core.astype(bool))
+    if ys.size > 0:
+        y0, y1 = int(ys.min()), int(ys.max())
+        below_chin = np.zeros_like(core, dtype=bool)
+        below_chin[y0 + int(0.5 * (y1 - y0)) :, :] = True
+        ring = ring & below_chin
     if int(ring.sum()) < 50:
         return result
     res_lab = cv2.cvtColor(res / 255.0, cv2.COLOR_RGB2LAB)
-    ring_weight = np.zeros(res.shape[:2], dtype=np.float32)
-    ring_weight[ring] = 1.0
-    ring_weight = cv2.GaussianBlur(
-        ring_weight, (0, 0), sigmaX=max(1.0, ring_px * 0.25)
-    )
-    for c in range(3):
-        donor_mean = float(res_lab[:, :, c][deep_core.astype(bool)].mean())
-        ring_vals = res_lab[:, :, c][ring]
-        if ring_vals.size == 0:
-            continue
-        shift = (donor_mean - float(ring_vals.mean())) * strength
-        res_lab[:, :, c] = res_lab[:, :, c] + shift * ring_weight
+    per_channel_strength = [
+        l_strength if l_strength is not None else strength,
+        ab_strength if ab_strength is not None else strength,
+        ab_strength if ab_strength is not None else strength,
+    ]
+    deep_bool = deep_core.astype(bool)
+    for _ in range(n_passes):
+        # Skin gate: absolute skin likelihood (pale necks pass) * softer
+        # donor-ab proximity (rejects white trim / saturated fabric). Hard
+        # cream/cloth reject keeps floral dresses and jerseys untouched.
+        donor_a = float(res_lab[:, :, 1][deep_bool].mean())
+        donor_b = float(res_lab[:, :, 2][deep_bool].mean())
+        ab_dist = np.sqrt(
+            (res_lab[:, :, 1] - donor_a) ** 2 + (res_lab[:, :, 2] - donor_b) ** 2
+        )
+        ab_gate = np.clip(1.0 - ab_dist / max(float(ab_gate_scale), 1e-3), 0.0, 1.0)
+        cur_rgb = np.clip(
+            cv2.cvtColor(res_lab.astype(np.float32), cv2.COLOR_LAB2RGB) * 255.0,
+            0,
+            255,
+        ).astype(np.uint8)
+        skin_like = _skin_likelihood_strict(cur_rgb)
+        chroma = np.sqrt(res_lab[:, :, 1] ** 2 + res_lab[:, :, 2] ** 2)
+        hsv = cv2.cvtColor(cur_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+        sat = hsv[:, :, 1] / 255.0
+        cloth_reject = (
+            ((res_lab[:, :, 0] > 78.0) & (chroma < 14.0))
+            | ((res_lab[:, :, 0] > 72.0) & (sat < 0.16))
+            | ((res_lab[:, :, 0] > 68.0) & (np.abs(res_lab[:, :, 1]) < 4.0) & (chroma < 18.0))
+        )
+        skin_gate = np.clip(0.25 + 0.75 * skin_like, 0.0, 1.0) * ab_gate
+        skin_gate = skin_gate * (~cloth_reject).astype(np.float32)
+
+        ring_weight = np.zeros(res.shape[:2], dtype=np.float32)
+        ring_weight[ring] = 1.0
+        ring_weight = cv2.GaussianBlur(
+            ring_weight, (0, 0), sigmaX=max(1.0, ring_px * float(blur_frac))
+        )
+        # Blur would otherwise leak into the face interior — lock mask pixels.
+        ring_weight = ring_weight * (1.0 - m) * skin_gate
+
+        gated = ring & (skin_gate > 0.20)
+        if int(gated.sum()) < 50:
+            break
+        for c in range(3):
+            ch_strength = per_channel_strength[c]
+            if ch_strength <= 0:
+                continue
+            donor_mean = float(res_lab[:, :, c][deep_bool].mean())
+            ring_vals = res_lab[:, :, c][gated]
+            if ring_vals.size == 0:
+                continue
+            shift = (donor_mean - float(ring_vals.mean())) * ch_strength
+            res_lab[:, :, c] = res_lab[:, :, c] + shift * ring_weight
     out = cv2.cvtColor(res_lab.astype(np.float32), cv2.COLOR_LAB2RGB)
     return np_to_pil(np.clip(out * 255.0, 0, 255))

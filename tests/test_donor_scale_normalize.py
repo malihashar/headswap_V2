@@ -60,13 +60,15 @@ _DONOR = Image.new("RGB", (400, 600))
 _DONOR_FB = FaceBox(100, 150, 300, 480, 0.95)  # 330/600 = 55%
 
 
-def _build(face_h_frac: float):
+def _build(face_h_frac: float, *, donor_scale_factor: float | None = None):
     H, W = 1024, 768
     fh = H * face_h_frac
     fw = fh * 0.75
     fb = FaceBox(W / 2 - fw / 2, H * 0.30 - fh / 2, W / 2 + fw / 2, H * 0.30 + fh / 2, 0.95)
     body = Image.new("RGB", (W, H))
     pipe = _pipe()
+    if donor_scale_factor is not None:
+        pipe.cfg["donor_scale_factor"] = donor_scale_factor
     flags = pipe._tight_crop_flags(body, fb, [fb])
     with mock.patch.object(krea2_mod, "detect_best_face", lambda *a, **k: _DONOR_FB):
         built = pipe._build_scene_person(
@@ -91,8 +93,9 @@ def test_portrait_donor_prep_is_untouched_resize_contain():
 
 def test_small_face_donor_is_rescaled_to_match_target_fraction():
     """Full-body: donor head is ~1.7x the target's relative size. After
-    normalization the donor's face must land at the target's fraction."""
-    diag, target_frac = _build(0.12)
+    normalization the donor's face must land at the target's fraction
+    (with donor_scale_factor=1.0 so the match is exact)."""
+    diag, target_frac = _build(0.12, donor_scale_factor=1.0)
     info = diag["donor_scale_normalize"]
     assert diag["person_prep"] == "donor_scale_normalized"
     assert info["applied"] is True
@@ -101,6 +104,16 @@ def test_small_face_donor_is_rescaled_to_match_target_fraction():
     assert abs(effective_donor_face_frac - target_frac) < 0.01
     # And it genuinely shrank the donor (this is the corrective action).
     assert info["donor_img_frac"] < 0.7
+
+
+def test_donor_scale_factor_further_shrinks_small_face():
+    """donor_scale_factor < 1 multiplies the matched img_frac for small faces."""
+    diag_1, _ = _build(0.12, donor_scale_factor=1.0)
+    diag_88, _ = _build(0.12, donor_scale_factor=0.88)
+    f1 = diag_1["donor_scale_normalize"]["donor_img_frac"]
+    f88 = diag_88["donor_scale_normalize"]["donor_img_frac"]
+    assert abs(f88 - f1 * 0.88) < 0.01
+    assert f88 < f1
 
 
 def test_normalization_falls_back_safely_when_donor_face_undetectable():
