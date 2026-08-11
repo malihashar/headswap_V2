@@ -307,9 +307,9 @@ head_matte_hair_margin_frac: 0.20
 head_matte_tight_edge: true
 head_matte_expand_px: 3
 head_matte_blur_px: 3
-# Tight matte edge. Feather=12 softens jaw/neck for open-collar coverage.
-# Post-stitch local-box clamp stays OFF (sky-rect risk).
-head_matte_stitch_feather_px: 12
+# Tight matte edge. Feather=8 after iter-3 feather=12 showed soft/sky rim at collar.
+# Post-stitch local-box clamp stays OFF.
+head_matte_stitch_feather_px: 8
 seam_refine: false
 seam_refine_erode_px: 8
 seam_refine_dilate_px: 16

@@ -23,7 +23,7 @@ def test_production_yaml_disables_crop_stitch_head_clamp():
     cfg = yaml.safe_load(CFG.read_text())
     assert cfg.get("crop_stitch_clamp_head_scale") is False
     assert cfg.get("crop_stitch_pre_stitch_clamp") is True
-    assert cfg.get("head_matte_stitch_feather_px", 3) == 12
+    assert cfg.get("head_matte_stitch_feather_px", 3) == 8
     assert cfg.get("stitch_mask_dilate_px", 4) == 10
     assert float(cfg.get("mask_bot_extend", 0.40)) <= 0.40
     assert cfg.get("exposed_skin_tone_match", False) is False
