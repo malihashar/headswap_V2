@@ -152,7 +152,7 @@ collapse_soft_chin_ghost_mid_lo: 0.08
 collapse_soft_chin_ghost_mid_hi: 0.92
 collapse_soft_chin_ghost_chin_frac: 0.35
 # Single-person: dilate opaque stitch core a few px (covers old jaw sliver).
-stitch_mask_dilate_px: 10
+stitch_mask_dilate_px: 12
 
 # Multi-person production (decision-gate YES_ARCHITECTURE):
 #   detect faces → select one → SAME single-person crop recipe → Krea2 → stitch.
@@ -305,7 +305,7 @@ head_matte_hair_margin_frac: 0.20
 # head; on a real silhouette it straddles the true edge and regenerates a rim
 # of background -- the thin halo hugging the subject.
 head_matte_tight_edge: true
-head_matte_expand_px: 3
+head_matte_expand_px: 6
 head_matte_blur_px: 3
 # Tight matte edge. Feather=8 after iter-3 feather=12 showed soft/sky rim at collar.
 # Post-stitch local-box clamp stays OFF.
@@ -473,10 +473,10 @@ identity_scale_factor: 0.95
 identity_hair_height_boost: 1.30
 # Extra shrink on donor person-ref after face-frac normalize (full-body head size).
 donor_scale_normalize: true
-donor_scale_factor: 0.82
+donor_scale_factor: 0.78
 clamp_edited_head_scale: true
 max_edited_head_height_ratio: 1.08
-target_edited_head_height_ratio: 0.96
+target_edited_head_height_ratio: 0.94
 # Clamp now corrects BOTH directions. Below this ratio the generated head is
 # too SMALL and gets grown (previously impossible -- scale was hard-capped at
 # 1.0, so an undersized head kept its wrong proportions silently).
