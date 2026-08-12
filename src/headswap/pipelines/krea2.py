@@ -2185,6 +2185,152 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "diag": diag,
         }
 
+    def _expand_box_for_donor_head(
+        self,
+        body_full: Image.Image,
+        face_crop: Image.Image,
+        box: tuple[int, int, int, int],
+        mask: Image.Image,
+        *,
+        div_by: int = 16,
+        margin_frac: float = 0.10,
+    ) -> tuple[tuple[int, int, int, int], Image.Image, Image.Image]:
+        """Expand crop box to the union of target-head and donor-head bboxes.
+
+        Computes the donor's head+hair height as a fraction of its image
+        height (via face detection), then ensures the target crop box is tall
+        enough to hold that height. If the donor is taller, the box is grown
+        upward (and slightly sideways) by the difference + margin_frac, then
+        snapped to div_by. Returns the updated (box, scene_crop, mask_crop).
+        """
+        bx0, by0, bx1, by1 = box
+        target_crop_h = by1 - by0
+        target_crop_w = bx1 - bx0
+
+        # Measure donor head height: detect face in face_crop, use face-to-image
+        # ratio to estimate full head+hair extent.
+        donor_fb = detect_best_face(pil_to_rgb_np(face_crop), self.cache_dir)
+        if donor_fb is None:
+            return box, body_full.crop(box), mask
+        donor_face_h = donor_fb.height
+        donor_img_h = face_crop.size[1]
+        # face_crop is already padded ~1.55x top (crop_face_reference). The raw
+        # face occupies donor_face_h/donor_img_h of it; full head+hair is
+        # approximately donor_img_h (the whole padded crop). So the donor
+        # "head+hair height" in native pixels is donor_img_h itself.
+        # Scale that to body_full coords: target face height ÷ donor face height.
+        if donor_face_h <= 0:
+            return box, body_full.crop(box), mask
+        # Anchor: target face height (from body_full) / donor face height →
+        # gives px-per-px scale, then donor_img_h (full padded head+hair crop)
+        # at that scale tells us how many body pixels the donor's whole head
+        # takes up.
+        target_face_h = by1 - by0  # approximate: crop height ≈ head+hair height
+        scale = float(target_face_h) / float(donor_img_h)
+        donor_head_h_in_body = int(donor_img_h * scale * (1.0 + margin_frac))
+
+        if donor_head_h_in_body <= target_crop_h:
+            # Donor fits already — nothing to expand.
+            return box, body_full.crop(box), mask
+
+        extra_h = donor_head_h_in_body - target_crop_h
+        # Grow upward (hair is on top) and symmetrically sideways by half extra.
+        extra_side = extra_h // 4
+        bx0_new = max(0, bx0 - extra_side)
+        by0_new = max(0, by0 - extra_h)
+        bx1_new = min(body_full.width, bx1 + extra_side)
+        by1_new = by1  # bottom stays (neck/shoulders already covered)
+
+        # Snap to div_by.
+        w_new = bx1_new - bx0_new
+        h_new = by1_new - by0_new
+        w_snap = max(div_by, (w_new // div_by) * div_by)
+        h_snap = max(div_by, (h_new // div_by) * div_by)
+        bx1_new = min(body_full.width, bx0_new + w_snap)
+        by0_new = max(0, by1_new - h_snap)
+
+        new_box = (bx0_new, by0_new, bx1_new, by1_new)
+        new_scene = body_full.crop(new_box)
+        # Pad mask to the new box — expand mask canvas, keeping old mask in place.
+        new_mask = Image.new("L", body_full.size, 0)
+        new_mask.paste(mask, (0, 0))
+        new_mask = new_mask.crop(new_box)
+        print(
+            f"[krea2 union_bbox] expanded box {list(box)} → {list(new_box)} "
+            f"donor_head_h={donor_head_h_in_body}px target_crop_h={target_crop_h}px",
+            flush=True,
+        )
+        return new_box, new_scene, new_mask
+
+    def _two_pass_refine(
+        self,
+        rt: NodeRuntime,
+        bundle: dict,
+        pass_a_output: Image.Image,
+        person: Image.Image,
+        timings: dict[str, float],
+        *,
+        prompt: str,
+        edit_cache_info: dict,
+        seed: int | None = None,
+        pass_a_out_dir=None,
+        save_debug: bool = False,
+    ) -> Image.Image:
+        """Pass B of two-pass generation: img2img refinement at low denoise.
+
+        Pass A (the main _sample_edit call) locks identity/structure at high
+        ref_boost. This pass takes Pass A's output as the scene and re-runs
+        Krea2 at low denoise (~0.15–0.25) with a lower ref_boost, so only
+        skin texture and naturalism are refined — structure is already locked
+        and barely moves at this denoise level.
+        """
+        from headswap.comfy.krea2_edit_fast import clear_krea2_edit_static_cache
+
+        # Save Pass A output for comparison before refining.
+        if save_debug and pass_a_out_dir is not None:
+            from pathlib import Path
+            p = Path(pass_a_out_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            pass_a_output.save(p / "debug_pass_a.png")
+            print(f"[krea2 two_pass] pass_a saved → {p / 'debug_pass_a.png'}", flush=True)
+
+        pass_b_denoise = float(self.cfg.get("two_pass_b_denoise", 0.2))
+        pass_b_ref_boost = float(self.cfg.get("two_pass_b_ref_boost", 4.0))
+        pass_b_steps = int(self.cfg.get("two_pass_b_steps", 4))
+
+        old_denoise = self.cfg.get("denoise")
+        old_ref_boost = self.cfg.get("ref_boost")
+        old_steps = self.cfg.get("steps")
+        self.cfg["denoise"] = pass_b_denoise
+        self.cfg["ref_boost"] = pass_b_ref_boost
+        self.cfg["steps"] = pass_b_steps
+        try:
+            clear_krea2_edit_static_cache()
+            meta_b = self._sample_edit(
+                rt,
+                bundle,
+                pass_a_output,
+                person,
+                timings,
+                prompt=prompt,
+                edit_cache_info=edit_cache_info,
+                seed=seed,
+                ref_boost_mask=None,
+            )
+        finally:
+            for key, val in [("denoise", old_denoise), ("ref_boost", old_ref_boost), ("steps", old_steps)]:
+                if val is None:
+                    self.cfg.pop(key, None)
+                else:
+                    self.cfg[key] = val
+
+        print(
+            f"[krea2 two_pass] pass_b done denoise={pass_b_denoise} "
+            f"ref_boost={pass_b_ref_boost} steps={pass_b_steps}",
+            flush=True,
+        )
+        return meta_b["edited"]
+
     def _sample_edit(
         self,
         rt: NodeRuntime,
@@ -4274,6 +4420,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     crop_content_box = built["crop_content_box"]
                     face_prep_diag = built.get("diag") or {}
                     face_prep_diag["edit_mode"] = "crop_stitch"
+
+                    # --- union-bbox crop sizing ---
+                    # Expand the target crop box so it can hold the donor's
+                    # actual head+hair height, preventing hair clipping when the
+                    # donor's hair is taller than the default padding allows.
+                    if bool(self.cfg.get("crop_stitch_union_bbox", False)):
+                        box, scene, mask = self._expand_box_for_donor_head(
+                            body_full, face_crop, box, mask, div_by=div_by
+                        )
                     self._log_face_diag(face_prep_diag, label="crop_stitch")
                     timings["_multi_person"] = 1.0 if multi_person else 0.0
                     timings["_tight_crop"] = 1.0 if use_tight else 0.0
@@ -4498,6 +4653,24 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 and bool(self.cfg.get("sampling_containment", False))
             ):
                 edit_mask_scene = mask.convert("L").crop(box)
+            # --- region-masked ref_boost for crop_stitch ---
+            # When crop_stitch_ref_boost_mask=true, build a landmark mask over
+            # the SCENE crop (eyes/nose/mouth/jaw only) and pass it into the
+            # node so identity-critical regions get full ref_boost while hair
+            # and periphery stay at the baseline ref_boost_a value.
+            cs_rbm = None
+            if (
+                edit_mode == "crop_stitch"
+                and bool(self.cfg.get("crop_stitch_ref_boost_mask", False))
+                and scene is not None
+            ):
+                cs_rbm = identity_face_boost_mask(scene, self.cache_dir)
+                if cs_rbm is not None:
+                    print(
+                        f"[krea2] crop_stitch ref_boost_mask built size={cs_rbm.size}",
+                        flush=True,
+                    )
+
             sample_meta = self._sample_edit(
                 rt,
                 bundle,
@@ -4507,10 +4680,36 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 prompt=prompt,
                 edit_cache_info=edit_cache_info,
                 seed=base_seed,
-                ref_boost_mask=ref_boost_mask_img if edit_mode == "full_frame" else None,
+                ref_boost_mask=(
+                    cs_rbm
+                    if (edit_mode == "crop_stitch" and cs_rbm is not None)
+                    else (ref_boost_mask_img if edit_mode == "full_frame" else None)
+                ),
                 edit_mask=edit_mask_scene,
             )
             edited = sample_meta["edited"]
+
+            # --- two-pass generation for crop_stitch ---
+            # Pass A (above) nails identity at high ref_boost. Pass B runs
+            # img2img at low denoise so only texture/skin detail is refined
+            # without disturbing the locked identity/structure from Pass A.
+            if (
+                edit_mode == "crop_stitch"
+                and bool(self.cfg.get("crop_stitch_two_pass", False))
+            ):
+                edited = self._two_pass_refine(
+                    rt,
+                    bundle,
+                    edited,
+                    person,
+                    timings,
+                    prompt=prompt,
+                    edit_cache_info=edit_cache_info,
+                    seed=base_seed,
+                    pass_a_out_dir=out_dir,
+                    save_debug=save_debug,
+                )
+                sample_meta["edited"] = edited
             procrustes_applied = False
             if (
                 do_stitch
