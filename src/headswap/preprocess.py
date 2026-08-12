@@ -537,7 +537,10 @@ def composite_isolated_head_layer(
         ec = ec.resize((bw, bh), Image.Resampling.LANCZOS)
     layer_rgb = np.zeros((H, W, 3), dtype=np.uint8)
     layer_rgb[y0:y1, x0:x1] = np.asarray(ec.convert("RGB"))
-    layer_alpha = np.asarray(mask.convert("L"), dtype=np.uint8)
+    mask_pil = mask.convert("L")
+    if mask_pil.size != (W, H):
+        mask_pil = mask_pil.resize((W, H), Image.Resampling.BILINEAR)
+    layer_alpha = np.asarray(mask_pil, dtype=np.uint8)
     # Clip alpha to the box: layer_rgb is black outside the crop window, so any
     # mask leakage outside box would composite solid-black pixels → vertical
     # edge artifacts along the crop boundary.
