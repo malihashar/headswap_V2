@@ -587,7 +587,7 @@ head_direction_prompt_hint: true
 #   silhouette so no occluded background has to be reconstructed).
 # preserve_headwear=false -> remove it and reconstruct what it covered (harder).
 headwear_prompt_policy: true
-preserve_headwear: true
+preserve_headwear: false
 head_direction_roll_deg_thresh: 3.0
 head_direction_yaw_thresh: 0.12
 head_direction_yaw_strong_thresh: 0.30
