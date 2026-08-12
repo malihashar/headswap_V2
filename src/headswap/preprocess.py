@@ -1946,14 +1946,20 @@ def identity_face_boost_mask(
         axes = (max(8, int(w * 0.38)), max(8, int(h * 0.46)))
         cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
     else:
+        # Wide convex-hull mask: cover the FULL inner face (forehead→chin,
+        # cheek→cheek) as one contiguous region. Individual landmark-point
+        # ellipses leave the connecting facial structure (cheeks, forehead,
+        # overall shape) at baseline boost -- the full face contour carries
+        # identity, not just isolated feature coordinates.
         cx = (box.x0 + box.x1) // 2
-        # Shift center slightly up so hair is covered.
-        cy = int((box.y0 + box.y1) / 2 - (0.12 * box.height if include_hair else 0.0))
-        ex = float(expand) * (1.25 if include_hair else 1.0)
-        ey = float(expand) * (1.45 if include_hair else 1.0)
+        cy = int((box.y0 + box.y1) / 2 - (0.15 * box.height if include_hair else 0.0))
+        # Use full bbox width/height (not 0.55/0.70 fractions) so cheeks,
+        # forehead, and jaw contour all fall inside the boosted region.
+        ex = float(expand) * (1.10 if include_hair else 0.90)
+        ey = float(expand) * (1.30 if include_hair else 1.05)
         axes = (
-            max(4, int(0.55 * ex * box.width)),
-            max(4, int(0.70 * ey * box.height)),
+            max(4, int(0.50 * ex * box.width)),
+            max(4, int(0.62 * ey * box.height)),
         )
         cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
     return Image.fromarray(mask)
