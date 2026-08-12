@@ -114,7 +114,6 @@ def test_layer_background_is_transparent(monkeypatch):
 
     out, info, final_mask, layer = composite_isolated_head_layer(
         body_full, edited_crop, mask, box, None, ROOT / "results" / "_cache",
-        neck_ring_px=20,
     )
 
     m = np.asarray(final_mask)

@@ -4553,13 +4553,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         box,
                         crop_content_box,
                         self.cache_dir,
-                        neck_ring_px=int(self.cfg.get("isolated_layer_neck_ring_px", 60)),
-                        neck_ring_interior_erode_px=int(
-                            self.cfg.get("isolated_layer_neck_ring_erode_px", 25)
-                        ),
-                        neck_ring_strength=float(
-                            self.cfg.get("isolated_layer_neck_ring_strength", 0.9)
-                        ),
                         max_height_ratio=float(
                             self.cfg.get("max_edited_head_height_ratio", 1.08)
                         ),
@@ -4571,7 +4564,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         ),
                         max_grow=float(self.cfg.get("max_edited_head_grow", 1.45)),
                         feather_px=int(
-                            self.cfg.get("isolated_layer_feather_px", 10)
+                            self.cfg.get("isolated_layer_feather_px", 24)
                         ),
                     )
                     face_prep_diag["isolated_layer"] = iso_info

@@ -490,14 +490,11 @@ def composite_isolated_head_layer(
     crop_content_box: tuple[int, int, int, int] | None,
     cache_dir,
     *,
-    neck_ring_px: int = 60,
-    neck_ring_interior_erode_px: int = 25,
-    neck_ring_strength: float = 0.9,
     max_height_ratio: float = 1.08,
     target_ratio: float = 0.98,
     min_height_ratio: float = 0.92,
     max_grow: float = 1.45,
-    feather_px: int = 10,
+    feather_px: int = 24,
 ) -> tuple[Image.Image, dict[str, float], Image.Image, Image.Image]:
     """Prepare ONE isolated donor-head layer (color + scale corrected), then
     composite it onto the pristine original exactly once.
@@ -542,36 +539,9 @@ def composite_isolated_head_layer(
     layer_rgb[y0:y1, x0:x1] = np.asarray(ec.convert("RGB"))
     layer_alpha = np.asarray(mask.convert("L"), dtype=np.uint8)
 
-    # 2. Donor-toned neck-stub ring, extending PAST the mask at fading alpha.
-    # Without this, the composite's own alpha blend averages donor and
-    # original skin tone in the transition band -- the "muddy in-between
-    # color" bug. Filling the ring with the donor's OWN sampled tone means
-    # the blend only ever fades DONOR color to zero, never mixes two
-    # different people's skin tones.
-    core = (layer_alpha > 200).astype(np.uint8)
-    k_deep = neck_ring_interior_erode_px * 2 + 1
-    deep_core = cv2.erode(
-        core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_deep, k_deep))
-    )
-    if int(deep_core.sum()) > 50 and neck_ring_px > 0:
-        donor_rgb = layer_rgb[deep_core.astype(bool)].astype(np.float32).mean(axis=0)
-        dist_out = cv2.distanceTransform(
-            (~core.astype(bool)).astype(np.uint8), cv2.DIST_L2, 5
-        ).astype(np.float32)
-        k_ring = neck_ring_px * 2 + 1
-        dilated = cv2.dilate(
-            core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_ring, k_ring))
-        )
-        ring = dilated.astype(bool) & (~core.astype(bool))
-        ring_alpha = (
-            np.clip(1.0 - dist_out / float(neck_ring_px), 0.0, 1.0)
-            * float(neck_ring_strength)
-            * 255.0
-        )
-        layer_rgb[ring] = donor_rgb.astype(np.uint8)
-        layer_alpha = np.maximum(
-            layer_alpha, (ring_alpha * ring.astype(np.float32)).astype(np.uint8)
-        )
+    # 2. (neck ring removed — flat average-color fill created a visible halo
+    # around the entire head silhouette; feathering the real mask edge is
+    # sufficient and uses actual photo content at the boundary)
 
     # 3. Head-scale correction: warp the isolated (rgb, alpha) pair TOGETHER.
     # Only donor content moves -- there is no "rest of the frame" to drag
