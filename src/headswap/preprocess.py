@@ -482,6 +482,161 @@ def clamp_edited_head_scale_full_frame(
     return out, info, mask_out, warped_pil
 
 
+def composite_isolated_head_layer(
+    body_full: Image.Image,
+    edited_crop: Image.Image,
+    mask: Image.Image,
+    box: tuple[int, int, int, int],
+    crop_content_box: tuple[int, int, int, int] | None,
+    cache_dir,
+    *,
+    neck_ring_px: int = 60,
+    neck_ring_interior_erode_px: int = 25,
+    neck_ring_strength: float = 0.9,
+    max_height_ratio: float = 1.08,
+    target_ratio: float = 0.98,
+    min_height_ratio: float = 0.92,
+    max_grow: float = 1.45,
+    feather_px: int = 10,
+) -> tuple[Image.Image, dict[str, float], Image.Image, Image.Image]:
+    """Prepare ONE isolated donor-head layer (color + scale corrected), then
+    composite it onto the pristine original exactly once.
+
+    Every ghost/seam/dark-rectangle bug this project chased came from the
+    same shape: modify the full stitched frame, restore part of it, warp all
+    of it, re-extract, re-blend -- each handoff between "the whole photo"
+    and "just the head" left a small geometric or color mismatch at the
+    boundary (restore_background comparing mismatched scales; the full-frame
+    clamp blending a warped frame against an unwarped original; the local-box
+    clamp's border-fill leaking the wrong identity). None of those failure
+    modes are reachable here structurally: the background is never touched,
+    warped, or restored -- only ONE isolated RGBA layer (donor content only,
+    transparent everywhere else) is color-corrected and scale-corrected on
+    its own padded canvas, then composited onto the untouched original a
+    single time at the end.
+
+    Returns ``(result, info, final_mask, isolated_layer)`` -- mask and layer
+    are returned (post-transform, pre-composite) so callers can dump them for
+    verification: mask should show a solid opaque core with only a thin
+    feathered edge band, and the layer should show donor content with fully
+    transparent background elsewhere.
+    """
+    W, H = body_full.size
+    info: dict[str, float] = {
+        "clamped": 0.0,
+        "ratio_before": 1.0,
+        "ratio_after": 1.0,
+        "shrink": 1.0,
+    }
+
+    # 1. Isolated RGBA layer at canvas resolution: donor content only.
+    ec = edited_crop
+    if crop_content_box is not None:
+        ox, oy, cw, ch = crop_content_box
+        ec = ec.crop((ox, oy, ox + cw, oy + ch))
+    x0, y0, x1, y1 = box
+    bw, bh = max(1, x1 - x0), max(1, y1 - y0)
+    if ec.size != (bw, bh):
+        ec = ec.resize((bw, bh), Image.Resampling.LANCZOS)
+    layer_rgb = np.zeros((H, W, 3), dtype=np.uint8)
+    layer_rgb[y0:y1, x0:x1] = np.asarray(ec.convert("RGB"))
+    layer_alpha = np.asarray(mask.convert("L"), dtype=np.uint8)
+
+    # 2. Donor-toned neck-stub ring, extending PAST the mask at fading alpha.
+    # Without this, the composite's own alpha blend averages donor and
+    # original skin tone in the transition band -- the "muddy in-between
+    # color" bug. Filling the ring with the donor's OWN sampled tone means
+    # the blend only ever fades DONOR color to zero, never mixes two
+    # different people's skin tones.
+    core = (layer_alpha > 200).astype(np.uint8)
+    k_deep = neck_ring_interior_erode_px * 2 + 1
+    deep_core = cv2.erode(
+        core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_deep, k_deep))
+    )
+    if int(deep_core.sum()) > 50 and neck_ring_px > 0:
+        donor_rgb = layer_rgb[deep_core.astype(bool)].astype(np.float32).mean(axis=0)
+        dist_out = cv2.distanceTransform(
+            (~core.astype(bool)).astype(np.uint8), cv2.DIST_L2, 5
+        ).astype(np.float32)
+        k_ring = neck_ring_px * 2 + 1
+        dilated = cv2.dilate(
+            core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_ring, k_ring))
+        )
+        ring = dilated.astype(bool) & (~core.astype(bool))
+        ring_alpha = (
+            np.clip(1.0 - dist_out / float(neck_ring_px), 0.0, 1.0)
+            * float(neck_ring_strength)
+            * 255.0
+        )
+        layer_rgb[ring] = donor_rgb.astype(np.uint8)
+        layer_alpha = np.maximum(
+            layer_alpha, (ring_alpha * ring.astype(np.float32)).astype(np.uint8)
+        )
+
+    # 3. Head-scale correction: warp the isolated (rgb, alpha) pair TOGETHER.
+    # Only donor content moves -- there is no "rest of the frame" to drag
+    # along, so this can never produce the full-frame clamp's ghost.
+    fo = detect_best_face(pil_to_rgb_np(body_full), cache_dir)
+    fe = detect_best_face(layer_rgb, cache_dir)
+    if fo is not None and fe is not None and fo.height >= 8 and fe.height >= 8:
+        ratio = float(fe.height) / float(fo.height)
+        info["ratio_before"] = ratio
+        if not (float(min_height_ratio) <= ratio <= float(max_height_ratio)):
+            shrink = (float(fo.height) * float(target_ratio)) / float(fe.height)
+            shrink = float(min(float(max_grow), max(0.55, shrink)))
+            info["shrink"] = shrink
+            info["clamped"] = 1.0
+            ecx, ecy = 0.5 * (fe.x0 + fe.x1), 0.5 * (fe.y0 + fe.y1)
+            ocx, ocy = 0.5 * (fo.x0 + fo.x1), 0.5 * (fo.y0 + fo.y1)
+            m = cv2.getRotationMatrix2D((ecx, ecy), 0.0, shrink)
+            m[0, 2] += ocx - ecx
+            m[1, 2] += ocy - ecy
+            layer_rgb = cv2.warpAffine(
+                layer_rgb, m, (W, H), flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+            )
+            layer_alpha = cv2.warpAffine(
+                layer_alpha, m, (W, H), flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+            )
+            fe2 = detect_best_face(layer_rgb, cache_dir)
+            if fe2 is not None and fo.height > 0:
+                info["ratio_after"] = float(fe2.height) / float(fo.height)
+        else:
+            info["ratio_after"] = ratio
+
+    # 4. Final mask: opaque core (guaranteed 255, eroded inward by feather_px)
+    # + a thin feathered band only at the true edge -- not a uniform blur
+    # over the whole mask (the "translucent ghost" bug from partial-opacity
+    # interior).
+    binary = (layer_alpha > 10).astype(np.uint8) * 255
+    k = max(1, feather_px) * 2 + 1
+    feathered = cv2.GaussianBlur(binary, (k, k), 0)
+    interior = cv2.erode(
+        binary, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    )
+    final_mask = np.maximum(feathered, interior)
+    final_mask_img = clean_alpha_tails(
+        Image.fromarray(final_mask), floor=30, ceil=245
+    )
+    final_mask = np.asarray(final_mask_img, dtype=np.float32)
+
+    # 5. Composite ONCE against the untouched original -- nothing else in
+    # this pipeline ever modifies body_full, so there is no restore step.
+    a = (final_mask / 255.0)[..., None]
+    out = (
+        layer_rgb.astype(np.float32) * a
+        + pil_to_rgb_np(body_full).astype(np.float32) * (1.0 - a)
+    )
+    out_img = np_to_pil(np.clip(out, 0, 255))
+    return (
+        out_img,
+        info,
+        Image.fromarray(final_mask.astype(np.uint8)),
+        np_to_pil(layer_rgb),
+    )
+
+
 def dilate_mask(mask: Image.Image, px: int) -> Image.Image:
     """Expand an L/RGBA mask so the opaque region covers more of the old head."""
     if px <= 0:

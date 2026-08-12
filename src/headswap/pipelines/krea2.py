@@ -41,6 +41,7 @@ from headswap.preprocess import (
     clamp_crop_away_neighbors,
     clamp_edited_head_scale,
     clamp_edited_head_scale_full_frame,
+    composite_isolated_head_layer,
     crop_face_reference,
     crop_with_mask,
     detect_best_face,
@@ -4532,6 +4533,68 @@ class Krea2IdentityEditPipeline(BasePipeline):
             with _stage(timings, "postprocessing"):
                 out = edited
                 if (
+                    do_stitch
+                    and body_full is not None
+                    and mask is not None
+                    and box is not None
+                    and bool(self.cfg.get("crop_stitch_isolated_layer", False))
+                ):
+                    # Isolated-layer path: prepare ONE donor-content RGBA
+                    # layer (color + scale corrected on its own canvas), then
+                    # composite onto the untouched original exactly once.
+                    # Replaces stitch + harmonization + restore_background +
+                    # clamp -- see composite_isolated_head_layer's docstring
+                    # for why this structurally can't reproduce the ghost/
+                    # dark-rectangle/collar-leak bugs those steps had.
+                    out, iso_info, iso_mask, iso_layer = composite_isolated_head_layer(
+                        body_full,
+                        edited,
+                        mask,
+                        box,
+                        crop_content_box,
+                        self.cache_dir,
+                        neck_ring_px=int(self.cfg.get("isolated_layer_neck_ring_px", 60)),
+                        neck_ring_interior_erode_px=int(
+                            self.cfg.get("isolated_layer_neck_ring_erode_px", 25)
+                        ),
+                        neck_ring_strength=float(
+                            self.cfg.get("isolated_layer_neck_ring_strength", 0.9)
+                        ),
+                        max_height_ratio=float(
+                            self.cfg.get("max_edited_head_height_ratio", 1.08)
+                        ),
+                        target_ratio=float(
+                            self.cfg.get("target_edited_head_height_ratio", 0.98)
+                        ),
+                        min_height_ratio=float(
+                            self.cfg.get("min_edited_head_height_ratio", 0.92)
+                        ),
+                        max_grow=float(self.cfg.get("max_edited_head_grow", 1.45)),
+                        feather_px=int(
+                            self.cfg.get("isolated_layer_feather_px", 10)
+                        ),
+                    )
+                    face_prep_diag["isolated_layer"] = iso_info
+                    print(
+                        f"[krea2] isolated-layer composite ratio "
+                        f"{iso_info.get('ratio_before', 1.0):.2f}→"
+                        f"{iso_info.get('ratio_after', 1.0):.2f} "
+                        f"clamped={bool(iso_info.get('clamped'))}",
+                        flush=True,
+                    )
+                    if save_debug and out_dir is not None:
+                        try:
+                            dump_dir = Path(out_dir)
+                            dump_dir.mkdir(parents=True, exist_ok=True)
+                            iso_mask.save(dump_dir / "isolated_layer_mask.png")
+                            iso_layer.save(dump_dir / "isolated_layer_rgb.png")
+                            print(
+                                f"[krea2 debug] isolated_layer_mask/rgb saved → {dump_dir}",
+                                flush=True,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"[krea2 debug] isolated layer dump failed: {exc}", flush=True)
+                elif (
                     do_stitch
                     and body_full is not None
                     and mask is not None
