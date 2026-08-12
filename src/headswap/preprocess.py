@@ -538,6 +538,12 @@ def composite_isolated_head_layer(
     layer_rgb = np.zeros((H, W, 3), dtype=np.uint8)
     layer_rgb[y0:y1, x0:x1] = np.asarray(ec.convert("RGB"))
     layer_alpha = np.asarray(mask.convert("L"), dtype=np.uint8)
+    # Clip alpha to the box: layer_rgb is black outside the crop window, so any
+    # mask leakage outside box would composite solid-black pixels → vertical
+    # edge artifacts along the crop boundary.
+    _clip = np.zeros((H, W), dtype=np.uint8)
+    _clip[y0:y1, x0:x1] = 255
+    layer_alpha = np.minimum(layer_alpha, _clip)
 
     # 2. (neck ring removed — flat average-color fill created a visible halo
     # around the entire head silhouette; feathering the real mask edge is
@@ -574,6 +580,16 @@ def composite_isolated_head_layer(
                 info["ratio_after"] = float(fe2.height) / float(fo.height)
         else:
             info["ratio_after"] = ratio
+
+    # Dump raw Krea2 layer (pre-feather, pre-composite) for debugging.
+    try:
+        import os as _os
+        _dbg = str(cache_dir)
+        _os.makedirs(_dbg, exist_ok=True)
+        Image.fromarray(layer_alpha).save(_os.path.join(_dbg, "debug_isolated_raw_alpha.png"))
+        np_to_pil(layer_rgb).save(_os.path.join(_dbg, "debug_isolated_raw_layer.png"))
+    except Exception:
+        pass
 
     # 4. Final mask: opaque core (guaranteed 255, eroded inward by feather_px)
     # + a thin feathered band only at the true edge -- not a uniform blur

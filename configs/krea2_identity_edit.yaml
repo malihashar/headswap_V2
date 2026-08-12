@@ -57,8 +57,8 @@ verbose: false
 # image-reference conditioning is the correct lever here, not more prompt
 # text -- cfg=1.0 (required by this distilled checkpoint) already caps how
 # much the text prompt alone can steer generation.
-ref_boost: 7.0
-ref_boost_a: 1.6
+ref_boost: 6.0
+ref_boost_a: 4.0
 grounding_px: 768
 fit_mode: fit
 max_dim: 768
@@ -692,7 +692,7 @@ two_pass_b_steps: 4
 # Builds a landmark mask (eyes/nose/mouth/jaw) over the scene crop and applies
 # strong ref_boost only inside that mask, baseline outside. Lets identity be
 # pushed hard on recognition-critical features without over-processing hair.
-crop_stitch_ref_boost_mask: false
+crop_stitch_ref_boost_mask: true
 
 # --- Union-bbox crop sizing ---
 # Expands the crop box to hold the donor's actual head+hair height (measured
