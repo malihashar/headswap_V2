@@ -544,6 +544,12 @@ def composite_isolated_head_layer(
     _clip = np.zeros((H, W), dtype=np.uint8)
     _clip[y0:y1, x0:x1] = 255
     layer_alpha = np.minimum(layer_alpha, _clip)
+    # Suppress alpha where the generation left pixels black (no content).
+    # Natural dark hair is always ≥20 in at least one channel; generation-black
+    # is reliably 0–18 across all channels.  Without this, the person mask
+    # would composite black layer pixels against the body and create a "hat".
+    _content = (layer_rgb.max(axis=2) > 18).astype(np.uint8) * 255
+    layer_alpha = np.minimum(layer_alpha, _content)
 
     # 2. (neck ring removed — flat average-color fill created a visible halo
     # around the entire head silhouette; feathering the real mask edge is
