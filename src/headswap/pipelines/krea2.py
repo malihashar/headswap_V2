@@ -4654,17 +4654,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
             ):
                 edit_mask_scene = mask.convert("L").crop(box)
             # --- region-masked ref_boost for crop_stitch ---
-            # When crop_stitch_ref_boost_mask=true, build a landmark mask over
-            # the SCENE crop (eyes/nose/mouth/jaw only) and pass it into the
-            # node so identity-critical regions get full ref_boost while hair
-            # and periphery stay at the baseline ref_boost_a value.
+            # Build from the PERSON (donor face reference), NOT the scene.
+            # The mask tells the node which regions of the person reference to
+            # boost -- passing the scene (target body crop) would detect the
+            # TARGET's landmarks and boost the wrong face, producing a flat
+            # overcooked dome if detection fails or returns a white mask.
             cs_rbm = None
             if (
                 edit_mode == "crop_stitch"
                 and bool(self.cfg.get("crop_stitch_ref_boost_mask", False))
-                and scene is not None
+                and person is not None
             ):
-                cs_rbm = identity_face_boost_mask(scene, self.cache_dir)
+                cs_rbm = identity_face_boost_mask(person, self.cache_dir)
                 if cs_rbm is not None:
                     print(
                         f"[krea2] crop_stitch ref_boost_mask built size={cs_rbm.size}",
