@@ -588,6 +588,14 @@ head_direction_prompt_hint: true
 # preserve_headwear=false -> remove it and reconstruct what it covered (harder).
 headwear_prompt_policy: true
 preserve_headwear: false
+
+# Body-skin harmonization: shift arm/shoulder skin tone to match donor head.
+# Runs post-composite, zero generative calls, head pixels structurally untouched.
+extend_skin_harmonization: true
+skin_harmony_body_visible_thresh: 0.09   # min fraction of person px below head
+skin_harmony_feather_px: 20              # mask blur radius at sleeve/collar edges
+skin_harmony_transfer_strength: 0.80    # blend weight (0=off, 1=full transfer)
+
 head_direction_roll_deg_thresh: 3.0
 head_direction_yaw_thresh: 0.12
 head_direction_yaw_strong_thresh: 0.30

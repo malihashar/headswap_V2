@@ -4787,6 +4787,45 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             )
                         except Exception as exc:  # noqa: BLE001
                             print(f"[krea2 debug] isolated layer dump failed: {exc}", flush=True)
+                    # Extended skin harmonization: shift body-skin pixels to
+                    # match the donor head tone.  Runs after all compositing,
+                    # zero generative model calls, head region untouched.
+                    if (
+                        bool(self.cfg.get("extend_skin_harmonization", True))
+                        and body_full is not None
+                        and selected_face is not None
+                    ):
+                        try:
+                            from headswap.skin_harmonize import (  # noqa: PLC0415
+                                extend_skin_harmonization,
+                            )
+                            out, sh_info = extend_skin_harmonization(
+                                out,
+                                body_full,
+                                int(selected_face.x0),
+                                int(selected_face.y0),
+                                int(selected_face.x1),
+                                int(selected_face.y1),
+                                body_visible_thresh=float(
+                                    self.cfg.get(
+                                        "skin_harmony_body_visible_thresh", 0.09
+                                    )
+                                ),
+                                feather_px=int(
+                                    self.cfg.get("skin_harmony_feather_px", 20)
+                                ),
+                                transfer_strength=float(
+                                    self.cfg.get(
+                                        "skin_harmony_transfer_strength", 0.80
+                                    )
+                                ),
+                            )
+                            face_prep_diag["skin_harmonization"] = sh_info
+                        except Exception as exc:  # noqa: BLE001
+                            print(
+                                f"[skin_harm] failed (non-fatal): {exc}",
+                                flush=True,
+                            )
                 elif (
                     do_stitch
                     and body_full is not None
