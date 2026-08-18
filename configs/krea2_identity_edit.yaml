@@ -398,7 +398,7 @@ full_frame_use_crop_prompt: true
 # via detect_best_face's blind pick -- that risk is specifically a
 # multi-person (>1 face) concern and doesn't apply to the single-person
 # case this is now scoped to.
-full_frame_clamp_head_scale: true
+full_frame_clamp_head_scale: false
 # Landmark Procrustes (rotation+uniform scale+translation) after full_frame
 # sample, before freeze. OFF by default — enable for A/B when head_to_body
 # scale ratio is still meaningfully off 1.0 after promoting full_frame.
