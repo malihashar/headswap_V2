@@ -123,6 +123,21 @@ confirmed · ❌ tested and rejected (kept for reference, do not silently retry)
 ---
 
 ## Open items (not yet checkpointed)
+- `grounding_px=768` re-verification: reverted from 1024 back to the shared 768 default
+  (CHECKPOINT-02, 2026-08-18) since the 1024 test wasn't validated. The removed config
+  comment claimed 1024 was "the primary driver of full_frame's face-quality gap" — that
+  claim is plausible but plausibly measured under pre-`preserve_headwear`-fix conditions,
+  same confound as the `ref_boost` question below. Re-verify with a clean A/B once the
+  `ref_boost`/LoRA round (below) is settled — one A/B round at a time.
+- `ref_boost` (7.0 vs 4.0) and `full_frame_identity_lora_name` (r64 vs non-r64) for the
+  full_frame dark route: config comments cite a 2026-08-11 GPU A/B favoring 7.0/r64, which
+  conflicts with CHECKPOINT-06's "7.0 rejected as overcooked." A clean re-run under current
+  code (`preserve_headwear=false` fixed) is in progress — see
+  `results/_ab_ref_boost_lora_checkpoint02/`. Not yet resolved.
+- Full_frame head-scale clamp default: `full_frame_clamp_head_scale=true` is currently an
+  undescribed whole-frame-warp+border-patch variant, not the checkpoint-08 mask-after-
+  transform design (`crop_stitch_full_frame_head_clamp`, currently disabled). Needs a
+  head-to-head Colab comparison before flipping the default — not yet run.
 - Neck-as-generated-content (extend generation mask/crop through neck, straight-head
   prompt) — prompt sent, result not yet reported/checkpointed.
 - Crop-tightness vs. identity test on athlete/well-known-face case — interrupted, test
