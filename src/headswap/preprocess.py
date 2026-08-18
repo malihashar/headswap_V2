@@ -626,6 +626,13 @@ def composite_isolated_head_layer(
     interior = cv2.erode(
         binary, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_erode, k_erode))
     )
+    print(
+        f"[isolated_layer diag] content_min_dim={content_min_dim} k={k} k_erode={k_erode} "
+        f"binary_nonzero={int((binary > 0).sum())} interior_nonzero={int((interior > 0).sum())} "
+        f"interior_max={int(interior.max())} feathered_max={int(feathered.max())} "
+        f"feathered_mean_over_content={float(feathered[binary > 0].mean()) if (binary > 0).any() else -1:.1f}",
+        flush=True,
+    )
     final_mask = np.maximum(feathered, interior)
     # Hard cutout: a Gaussian blur's tail never mathematically reaches exact
     # zero within its kernel window, so even with the capped kernel above a
