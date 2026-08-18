@@ -226,6 +226,51 @@ def _head_matte_mask(
         )
         alpha = cv2.dilate(alpha, k)
 
+    # Tall headwear safety net: `top_extend` bounds the ellipse to a fixed
+    # multiple of face height, but a tall hat/headpiece can extend well
+    # above that -- the person matte (`alpha`) correctly marks it as
+    # foreground, but `min(ell, alpha)` below chops it off at the ellipse's
+    # short top edge anyway. The excluded hat then sits inside this mask's
+    # own blur band as real, un-regenerated content, and the composite
+    # blends it toward transparent -- a translucent "ghost" of the ORIGINAL
+    # headwear, not a compositing glitch (confirmed via a real pixel diff:
+    # the composited output exactly matches layer*mask + original*(1-mask)
+    # using this exact mask). If the matte shows a contiguous foreground
+    # column directly above the ellipse's current top, within the face's
+    # own width, grow the ellipse upward to include it -- capped so a noisy
+    # matte can't balloon this past a sane multiple of face height.
+    ell_ys, ell_xs = np.where(ell > 16)
+    if ell_ys.size:
+        ell_top = int(ell_ys.min())
+        fx0 = max(0, int(face_box.x0))
+        fx1 = min(alpha.shape[1], int(face_box.x1))
+        if fx1 > fx0 and ell_top > 0:
+            col_fg = (alpha[:ell_top, fx0:fx1] > 16).mean(axis=1) > 0.5
+            matte_top = ell_top
+            for row in range(ell_top - 1, -1, -1):
+                if col_fg[row]:
+                    matte_top = row
+                else:
+                    break
+            if matte_top < ell_top:
+                max_top_extend = float(top_extend) * 3.0
+                needed_top_extend = float(top_extend) + (
+                    (ell_top - matte_top) / fh
+                )
+                grown_top_extend = min(needed_top_extend, max_top_extend)
+                if grown_top_extend > float(top_extend):
+                    ellipse, _ = _ellipse_mask(
+                        body_pil,
+                        cache_dir,
+                        face_box=face_box,
+                        expand_px=expand_px,
+                        blur_px=0,
+                        top_extend=grown_top_extend,
+                        side_extend=side_extend,
+                        bot_extend=bot_extend,
+                    )
+                    ell = np.asarray(ellipse.convert("L"))
+
     mask = np.minimum(ell, alpha)
 
     # The face core must always be editable even if the matte is imperfect
