@@ -403,14 +403,11 @@ full_frame_clamp_head_scale: true
 # sample, before freeze. OFF by default — enable for A/B when head_to_body
 # scale ratio is still meaningfully off 1.0 after promoting full_frame.
 full_frame_procrustes_align: false
-# Grounding (VLM) encode resolution for full_frame only. full_frame's scene is
-# the whole photo, not a head crop, so the shared default grounding_px=768
-# squeezes a much smaller face into the VLM's conditioning than crop_stitch's
-# tight crop does — this is a primary driver of full_frame's face-quality gap.
-# Raising it gives the grounding encode more absolute face pixels to work
-# from. crop_stitch is unaffected (only applied when multi_person_edit_mode
-# resolves to full_frame).
-full_frame_grounding_px: 1024
+# Grounding (VLM) encode resolution for full_frame only. Reverted to the shared
+# default 768 (2026-08-18) — the 1024 test results were inconclusive, not a
+# validated improvement (see docs/PIPELINE_STATE.md CHECKPOINT-02). crop_stitch
+# is unaffected (only applied when multi_person_edit_mode resolves to full_frame).
+full_frame_grounding_px: 768
 # Second-pass face refine on top of full_frame: re-detects the (already
 # proportion-correct) head in the full_frame output, crops+masks it exactly
 # like the normal single-person crop_stitch path, re-samples just that
