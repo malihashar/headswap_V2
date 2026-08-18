@@ -635,11 +635,29 @@ def composite_isolated_head_layer(
     # 5. Composite ONCE against the untouched original -- nothing else in
     # this pipeline ever modifies body_full, so there is no restore step.
     a = (final_mask / 255.0)[..., None]
+    body_full_arr = pil_to_rgb_np(body_full).astype(np.float32)
     out = (
         layer_rgb.astype(np.float32) * a
-        + pil_to_rgb_np(body_full).astype(np.float32) * (1.0 - a)
+        + body_full_arr * (1.0 - a)
     )
     out_img = np_to_pil(np.clip(out, 0, 255))
+
+    # TEMP diagnostic (plan: there-is-clearly-a-valiant-hellman) -- dump the
+    # exact raw arrays used in the composite math above, so a downstream
+    # comparison against the actual final image is a real pixel diff, not a
+    # PNG-round-tripped visual comparison (which produced an unresolved
+    # contradiction in the prior investigation round).
+    try:
+        import os as _os
+        _dbg = str(cache_dir)
+        _os.makedirs(_dbg, exist_ok=True)
+        np.save(_os.path.join(_dbg, "debug_isolated_layer_rgb.npy"), layer_rgb)
+        np.save(_os.path.join(_dbg, "debug_isolated_final_mask.npy"), final_mask)
+        np.save(_os.path.join(_dbg, "debug_isolated_body_full.npy"), body_full_arr)
+        np.save(_os.path.join(_dbg, "debug_isolated_out.npy"), np.clip(out, 0, 255))
+    except Exception:
+        pass
+
     return (
         out_img,
         info,
