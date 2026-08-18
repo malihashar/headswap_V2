@@ -252,6 +252,12 @@ def _head_matte_mask(
                     matte_top = row
                 else:
                     break
+            print(
+                f"[head_matte diag] ell_top={ell_top} matte_top={matte_top} "
+                f"fx0={fx0} fx1={fx1} fh={fh:.1f} top_extend_in={top_extend} "
+                f"alpha_max_in_col_band={int(alpha[:ell_top, fx0:fx1].max()) if ell_top > 0 else -1}",
+                flush=True,
+            )
             if matte_top < ell_top:
                 max_top_extend = float(top_extend) * 3.0
                 needed_top_extend = float(top_extend) + (
