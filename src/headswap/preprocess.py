@@ -605,17 +605,23 @@ def composite_isolated_head_layer(
     # over the whole mask (the "translucent ghost" bug from partial-opacity
     # interior).
     binary = (layer_alpha > 10).astype(np.uint8) * 255
-    k = max(1, feather_px) * 2 + 1
-    feathered = cv2.GaussianBlur(binary, (k, k), 0)
-    # Erosion kernel must leave a real interior. When the head-scale warp
-    # above shrinks the donor content down near or below feather_px*2+1
-    # (e.g. a misdetected face driving an aggressive shrink), eroding with
-    # the full feather kernel wipes the content out entirely -- final_mask
-    # then collapses to pure Gaussian blur everywhere, i.e. a translucent
-    # "ghost" with no opaque core at all. Cap the erosion kernel to a
-    # fraction of the content's own extent so a solid core always survives.
+    # Both the blur radius and the erosion depth must scale down with the
+    # content's own extent. When the head-scale warp above shrinks the donor
+    # content well below feather_px*2+1 (e.g. a misdetected face driving an
+    # aggressive shrink), a fixed-size Gaussian blur spreads non-zero alpha
+    # far outside the actual content into pure-black canvas -- there,
+    # out = layer_rgb*a + body_full*(1-a) blends toward body_full (since
+    # layer_rgb is black), which translucently reveals the ORIGINAL photo's
+    # content underneath. That reads as a floating "ghost" of the original
+    # head/headwear, not a compositing glitch in the new content. A fixed
+    # erosion kernel on top of that also wipes any opaque core out entirely.
+    # Cap both to the content's own bounding-box extent so alpha can never
+    # spread past a bounded margin around the real donor pixels.
     ys, xs = np.where(binary > 0)
     content_min_dim = min(ys.max() - ys.min() + 1, xs.max() - xs.min() + 1) if ys.size else 0
+    k = max(1, feather_px) * 2 + 1
+    k = min(k, max(3, (content_min_dim // 2) | 1))
+    feathered = cv2.GaussianBlur(binary, (k, k), 0)
     k_erode = min(k, max(3, (content_min_dim // 3) | 1))
     interior = cv2.erode(
         binary, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_erode, k_erode))
