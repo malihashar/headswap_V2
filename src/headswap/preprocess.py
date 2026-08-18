@@ -627,6 +627,23 @@ def composite_isolated_head_layer(
         binary, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_erode, k_erode))
     )
     final_mask = np.maximum(feathered, interior)
+    # Hard cutout: a Gaussian blur's tail never mathematically reaches exact
+    # zero within its kernel window, so even with the capped kernel above a
+    # thin, low-but-nonzero alpha sliver can still extend a few pixels past
+    # the real content -- visible as a faint residual translucent wisp where
+    # that sliver sits over non-generated original content (e.g. tall
+    # headwear just above a small generated patch). Dilating the binary
+    # content by a small FIXED margin and clamping the mask to that region
+    # guarantees alpha is exactly zero beyond a bounded, small distance from
+    # real content, regardless of the blur kernel's mathematical tail.
+    hard_margin_px = max(2, min(6, k // 6))
+    hard_limit = cv2.dilate(
+        binary,
+        cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (hard_margin_px * 2 + 1, hard_margin_px * 2 + 1)
+        ),
+    )
+    final_mask = np.minimum(final_mask, hard_limit)
     final_mask_img = clean_alpha_tails(
         Image.fromarray(final_mask), floor=30, ceil=245
     )
