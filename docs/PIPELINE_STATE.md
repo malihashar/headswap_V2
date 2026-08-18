@@ -61,7 +61,29 @@ confirmed · ❌ tested and rejected (kept for reference, do not silently retry)
 ---
 
 ## CHECKPOINT-07 — Dual-mask compositing architecture
-**Status:** ✅ — core architectural rule, do not violate
+**Status:** 🟡 GHOST ROOT-CAUSED AND FIXED (2026-08-18), residual re-verification pending.
+The `pair2` floating-headwear ghost (and `pair1`'s border seam, same class of bug, not yet
+separately re-tested post-fix) traced to two real, stacked bugs, both fixed and confirmed via
+real Colab runs with runtime-verified evidence (mask dumps, a raw pixel diff, and a diagnostic
+log), not code-inspection alone:
+1. `composite_isolated_head_layer`'s (preprocess.py) blur/erosion kernels were fixed-size
+   regardless of donor-content size, letting alpha bleed into black canvas (commits `1ab8ede`,
+   `8f06345`). Verified: this function's own mask/layer dumps became clean and tight.
+2. The real bug: `_head_matte_mask` (segmentation.py) intersects a geometric ellipse with a
+   person-segmentation matte, but the matte returns **zero** foreground for rigid headwear
+   (confirmed via a diagnostic log: `alpha_max_in_crown=0` before the fix) — segmentation
+   backends are trained on human bodies, not accessories. The intersection chopped the hat out
+   of the mask entirely regardless of ellipse size, leaving it as real, un-regenerated content
+   inside the mask's feather band — composited toward transparent, reading as a ghost of the
+   original headwear. Fixed (commit `15226c1`) by bypassing the matte requirement for the crown
+   band directly above the face when that band has real object texture (Laplacian variance —
+   worn headwear vs. smooth sky), not a blanket ellipse-only fallback (which would revive the
+   older short-hair-ghost-oval bug this intersection exists to prevent).
+   Confirmed on Colab: the actual generation crop grew (`crop_native` [80,112]→[80,144]),
+   the mask now covers the hat, and the final composite shows a solid, properly regenerated
+   hat instead of the floating disconnected fragment. A small soft edge remains right at the
+   crown tip (normal feathering) — much smaller than the original artifact, not yet confirmed
+   as fully eliminated across multiple seeds/cases.
 - **Generation mask**: tight, head+hair only. Controls what Krea2 regenerates. Never widen
   this to fix a color/blend problem.
 - **Harmonization mask**: separate, wider, skin-adaptive (mediapipe limb detection + HSV
