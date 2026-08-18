@@ -621,19 +621,26 @@ def composite_isolated_head_layer(
     content_min_dim = min(ys.max() - ys.min() + 1, xs.max() - xs.min() + 1) if ys.size else 0
     k = max(1, feather_px) * 2 + 1
     k = min(k, max(3, (content_min_dim // 2) | 1))
+    # Erosion-based "opaque core" is fragile: for a shape that's irregular or
+    # thin anywhere along its boundary (a face/hair silhouette almost always
+    # is), an erosion kernel sized for the shape's bounding-box extent can
+    # still strip nearly all of the interior away (measured: 25 surviving
+    # pixels out of 2382 real content pixels on this exact case). Skip
+    # erosion entirely -- the real content region (`binary`) IS the opaque
+    # core, unconditionally, full stop. Only the band OUTSIDE that core gets
+    # a soft feather down to zero, so opacity is never softened at pixels
+    # that already have real generated content -- eliminating the
+    # "translucent even directly over content" symptom (measured: mean
+    # alpha was only 203/255 ~=80% over real content with the old blur-then-
+    # max approach).
     feathered = cv2.GaussianBlur(binary, (k, k), 0)
-    k_erode = min(k, max(3, (content_min_dim // 3) | 1))
-    interior = cv2.erode(
-        binary, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_erode, k_erode))
-    )
+    final_mask = np.where(binary > 0, 255, feathered).astype(np.uint8)
     print(
-        f"[isolated_layer diag] content_min_dim={content_min_dim} k={k} k_erode={k_erode} "
-        f"binary_nonzero={int((binary > 0).sum())} interior_nonzero={int((interior > 0).sum())} "
-        f"interior_max={int(interior.max())} feathered_max={int(feathered.max())} "
-        f"feathered_mean_over_content={float(feathered[binary > 0].mean()) if (binary > 0).any() else -1:.1f}",
+        f"[isolated_layer diag] content_min_dim={content_min_dim} k={k} "
+        f"binary_nonzero={int((binary > 0).sum())} "
+        f"final_mask_mean_over_content={float(final_mask[binary > 0].mean()) if (binary > 0).any() else -1:.1f}",
         flush=True,
     )
-    final_mask = np.maximum(feathered, interior)
     # Hard cutout: a Gaussian blur's tail never mathematically reaches exact
     # zero within its kernel window, so even with the capped kernel above a
     # thin, low-but-nonzero alpha sliver can still extend a few pixels past
