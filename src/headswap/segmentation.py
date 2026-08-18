@@ -226,51 +226,58 @@ def _head_matte_mask(
         )
         alpha = cv2.dilate(alpha, k)
 
-    mask = np.minimum(ell, alpha)
-
-    # Rigid headwear safety net: person-segmentation backends are trained on
-    # human bodies, not accessories -- a stiff hat/headpiece is frequently
-    # NOT marked as foreground at all (measured on this exact case: matte
-    # alpha is uniformly 0 in the entire crown band above the ellipse's
-    # face-anchored top edge). `min(ell, alpha)` then chops the headwear out
-    # regardless of how generous `top_extend` is, since growing the ellipse
-    # only ever intersects more zeros. The excluded headwear sits inside
-    # this mask's own blur band as real, un-regenerated content, and the
-    # composite blends it toward transparent -- a translucent "ghost" of
-    # the ORIGINAL headwear, not a compositing glitch (confirmed via a real
-    # pixel diff: the composited output exactly matches
-    # layer*mask + original*(1-mask) using this exact mask).
-    #
-    # A blanket "trust the ellipse over the matte" bypass would revive the
-    # older, opposite bug this intersection exists to prevent (short hair +
-    # bare ellipse regenerating a ghost oval of sky). So only bypass the
-    # matte within the crown band directly above the face -- and only where
-    # that band looks like a worn object rather than sky: real headwear has
-    # local texture (brim edges, fabric folds, embroidery); open sky is
-    # smooth. Laplacian variance is a standard cheap texture proxy for this.
-    fx0 = max(0, int(face_box.x0))
-    fx1 = min(alpha.shape[1], int(face_box.x1))
-    crown_bottom = max(0, int(face_box.y0))
-    ell_ys, _ = np.where(ell > 16)
-    crown_top = int(ell_ys.min()) if ell_ys.size else crown_bottom
-    if fx1 > fx0 and crown_top < crown_bottom:
-        crown_gray = cv2.cvtColor(
-            np.asarray(body_pil.convert("RGB"))[crown_top:crown_bottom, fx0:fx1],
-            cv2.COLOR_RGB2GRAY,
-        )
-        texture = float(cv2.Laplacian(crown_gray, cv2.CV_64F).var()) if crown_gray.size else 0.0
-        is_object_like = texture > 40.0
-        print(
-            f"[head_matte diag] crown=[{crown_top}:{crown_bottom},{fx0}:{fx1}] "
-            f"texture_var={texture:.1f} is_object_like={is_object_like} "
-            f"alpha_max_in_crown={int(alpha[crown_top:crown_bottom, fx0:fx1].max())}",
-            flush=True,
-        )
-        if is_object_like:
-            mask[crown_top:crown_bottom, fx0:fx1] = np.maximum(
-                mask[crown_top:crown_bottom, fx0:fx1],
-                ell[crown_top:crown_bottom, fx0:fx1],
+    # Tall headwear safety net: `top_extend` bounds the ellipse to a fixed
+    # multiple of face height, but a tall hat/headpiece can extend well
+    # above that -- the person matte (`alpha`) correctly marks it as
+    # foreground, but `min(ell, alpha)` below chops it off at the ellipse's
+    # short top edge anyway. The excluded hat then sits inside this mask's
+    # own blur band as real, un-regenerated content, and the composite
+    # blends it toward transparent -- a translucent "ghost" of the ORIGINAL
+    # headwear, not a compositing glitch (confirmed via a real pixel diff:
+    # the composited output exactly matches layer*mask + original*(1-mask)
+    # using this exact mask). If the matte shows a contiguous foreground
+    # column directly above the ellipse's current top, within the face's
+    # own width, grow the ellipse upward to include it -- capped so a noisy
+    # matte can't balloon this past a sane multiple of face height.
+    ell_ys, ell_xs = np.where(ell > 16)
+    if ell_ys.size:
+        ell_top = int(ell_ys.min())
+        fx0 = max(0, int(face_box.x0))
+        fx1 = min(alpha.shape[1], int(face_box.x1))
+        if fx1 > fx0 and ell_top > 0:
+            col_fg = (alpha[:ell_top, fx0:fx1] > 16).mean(axis=1) > 0.5
+            matte_top = ell_top
+            for row in range(ell_top - 1, -1, -1):
+                if col_fg[row]:
+                    matte_top = row
+                else:
+                    break
+            print(
+                f"[head_matte diag] ell_top={ell_top} matte_top={matte_top} "
+                f"fx0={fx0} fx1={fx1} fh={fh:.1f} top_extend_in={top_extend} "
+                f"alpha_max_in_col_band={int(alpha[:ell_top, fx0:fx1].max()) if ell_top > 0 else -1}",
+                flush=True,
             )
+            if matte_top < ell_top:
+                max_top_extend = float(top_extend) * 3.0
+                needed_top_extend = float(top_extend) + (
+                    (ell_top - matte_top) / fh
+                )
+                grown_top_extend = min(needed_top_extend, max_top_extend)
+                if grown_top_extend > float(top_extend):
+                    ellipse, _ = _ellipse_mask(
+                        body_pil,
+                        cache_dir,
+                        face_box=face_box,
+                        expand_px=expand_px,
+                        blur_px=0,
+                        top_extend=grown_top_extend,
+                        side_extend=side_extend,
+                        bot_extend=bot_extend,
+                    )
+                    ell = np.asarray(ellipse.convert("L"))
+
+    mask = np.minimum(ell, alpha)
 
     # The face core must always be editable even if the matte is imperfect
     # (sunglasses, motion blur, low contrast against the background).
