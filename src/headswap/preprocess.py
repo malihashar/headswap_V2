@@ -547,12 +547,18 @@ def composite_isolated_head_layer(
     _clip = np.zeros((H, W), dtype=np.uint8)
     _clip[y0:y1, x0:x1] = 255
     layer_alpha = np.minimum(layer_alpha, _clip)
-    # Suppress alpha where the generation left pixels black (no content).
-    # Natural dark hair is always ≥20 in at least one channel; generation-black
-    # is reliably 0–18 across all channels.  Without this, the person mask
-    # would composite black layer pixels against the body and create a "hat".
-    _content = (layer_rgb.max(axis=2) > 18).astype(np.uint8) * 255
-    layer_alpha = np.minimum(layer_alpha, _content)
+    # NOTE: a brightness-based "no content" suppression used to live here
+    # (`layer_rgb.max(axis=2) > 18`), meant to catch stray black canvas
+    # leaking past the crop box. It's now redundant with `_clip` above (which
+    # already hard-restricts alpha to exactly the pasted box) and was
+    # actively wrong for real generated content that's itself legitimately
+    # dark -- e.g. a black hat -- whose pixels also fall under that
+    # threshold. That falsely zeroed alpha over real donor hat pixels,
+    # letting the original (slightly offset, post-scale-warp) hat show
+    # through instead and producing a patchy, misaligned-looking transition
+    # right where the donor content was darkest (observed on `pair2`, a
+    # tall black hat). `_clip` alone already prevents the out-of-box leak
+    # this was originally added for, with no dark-content false positive.
 
     # 2. (neck ring removed — flat average-color fill created a visible halo
     # around the entire head silhouette; feathering the real mask edge is
