@@ -3810,31 +3810,26 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
             return meta
 
-        # Single-person full-body: stay on crop_stitch (see docstring).
+        # Single-person full-body -> simple_full_body (run_simple_full_body).
         #
-        # Do NOT force crop_stitch_clamp_head_scale here. e42caad+ turned that
-        # clamp on for every full-body single-person run; real desert/sky
-        # plates still showed a rectangular head-box paste + floating scalp at
-        # the top of frame + pale double-neck V (local-box shrink + elliptical
-        # reblend). Production default is clamp OFF -- old soft-stitch look.
-        # Opt in via config when validating a safer clamp.
-        #
-        # REVERTED earlier: raising max_body_dim / scaling mask+feather for
-        # this route caused oversized/duplicated hair and a rectangular ghost
-        # at the crop-box edge (feather wider than crop_pad). Full-body
-        # crop_stitch uses the same crop/mask geometry as a portrait.
+        # crop_stitch on this case spent many rounds chasing artifacts that
+        # all came from correcting a tight head crop after the fact: a
+        # floating translucent ghost of the original headwear, rectangular
+        # crop-box seams, head-scale clamp regressions, and a pale
+        # double-neck V. Each fix for one reopened another. simple_full_body
+        # instead hands the whole photo to Krea2 with one plain instruction
+        # so proportions/placement come from the model, then does exactly two
+        # bounded post-steps (face-local refine for identity resolution,
+        # skin harmonization for donor tone) -- no whole-frame warps, no
+        # clamps, no restore_background.
         meta["applied"] = True
-        meta["route"] = "crop_stitch"
+        meta["route"] = "simple_full_body"
         meta["reason"] = "single_person_full_body_detected"
         meta["multi_person_edit_mode"] = str(
             self.cfg.get("multi_person_edit_mode", "crop_stitch")
         )
-        meta["crop_stitch_clamp_head_scale"] = bool(
-            self.cfg.get("crop_stitch_clamp_head_scale", False)
-        )
         print(
-            "[krea2 body_route] resolved_mode=crop_stitch "
-            f"(clamp_head_scale={meta['crop_stitch_clamp_head_scale']}) "
+            "[krea2 body_route] resolved_mode=simple_full_body "
             "reason=single_person_full_body_detected",
             flush=True,
         )
@@ -4050,8 +4045,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
         instruction, Krea2's own output straight out.
 
         No crop_stitch/isolated-layer compositing, no head-scale clamps, no
-        Procrustes/relock, no skin harmonization, no per-call seed/ref_boost
-        tuning. All of that machinery chases edge cases (tall headwear,
+        Procrustes/relock, no per-call seed/ref_boost tuning. Two bounded
+        post-steps only: a face-local refine (identity resolution) and skin
+        harmonization (donor tone on exposed skin), both of which touch a
+        masked region and never warp the whole frame.
+
+        All of the omitted machinery chases edge cases (tall headwear,
         scale mismatches, neck seams) by adding more special-case code on
         top of a tight face crop -- and each fix for one case has kept
         reopening another (see this branch's parent, tmp-test-images, for
@@ -4203,6 +4202,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
         total_s = time.perf_counter() - t0
         meta = {
             "mode": "simple_full_body",
+            # Callers (Colab cells, scripts, REPORT.md) read `edit_mode` to
+            # label which route produced a result -- keep it populated.
+            "edit_mode": "simple_full_body",
             "body_size": list(body_full.size),
             "loras_loaded": sample_meta.get("loras_loaded"),
             "ref_boost": sample_meta.get("ref_boost"),
@@ -4249,6 +4251,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # detected, and otherwise leaves whatever the lighting route (or
             # the default) already decided untouched.
             body_route_meta = self._resolve_body_route(body)
+
+            # Single-person full-body resolves to the simple full-body path.
+            # It loads its own runtime/bundle, so dispatch before the
+            # crop_stitch/full_frame model-load below.
+            if body_route_meta.get("route") == "simple_full_body":
+                result = self.run_simple_full_body(body, face, out_dir)
+                result.meta["body_route"] = body_route_meta
+                result.meta["lighting_route"] = lighting_route_meta
+                if magic_hour_meta:
+                    result.meta["magic_hour_face_detection"] = magic_hour_meta
+                return result
 
             rt = self._ensure_runtime(timings)
             from headswap.comfy.krea2_edit_fast import (
