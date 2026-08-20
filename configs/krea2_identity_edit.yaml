@@ -128,7 +128,19 @@ mask_blur_px: 12
 # to 0.40. The neck seam needs a THIN-BAND fix (feather + alpha-tail cleanup +
 # mild local LAB), not a bigger mask -- a bigger mask composites more of the
 # edited crop's own (wrong) clothing, not more skin.
-mask_top_extend: 1.55
+# Reduced from 1.55 (2026-08-18): on tall/stylized headwear (pair2, a black
+# hat extending well above the face), Krea2 reliably paints the region near
+# the face correctly but fails to continue the hat's own color/shape in the
+# outer ~1/3 of the extended region -- confirmed via a raw pre-composite
+# dump (isolated_layer_rgb.png) showing a cream/beige patch baked directly
+# into the model's own output, not a compositing/masking bug (both the mask
+# and the compositing math were independently verified correct on the same
+# run). Building around that limitation rather than continuing to chase it
+# as a bug: asking for less area lets the untouched original headwear show
+# at the very top instead of a wrong-colored patch. 1.55 was tuned to keep
+# a target's own hair fully inside the mask on OTHER cases -- watch for
+# short-hair/no-headwear cases regressing if this needs to go lower still.
+mask_top_extend: 1.30
 mask_side_extend: 0.60
 mask_bot_extend: 0.40
 stitch_feather_px: 10
