@@ -4043,6 +4043,86 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 except OSError:
                     pass
 
+    def run_simple_full_body(
+        self, body: Image.Image, face: Image.Image, out_dir: Path | None = None
+    ) -> PipelineResult:
+        """Minimal path: full-body crop in, one plain "replace the head"
+        instruction, Krea2's own output straight out.
+
+        No crop_stitch/isolated-layer compositing, no head-scale clamps, no
+        Procrustes/relock, no skin harmonization, no per-call seed/ref_boost
+        tuning. All of that machinery chases edge cases (tall headwear,
+        scale mismatches, neck seams) by adding more special-case code on
+        top of a tight face crop -- and each fix for one case has kept
+        reopening another (see this branch's parent, tmp-test-images, for
+        the history). This path instead gives the model the whole photo and
+        a single plain instruction, and accepts whatever it produces
+        directly, rather than trying to correct it after the fact.
+        """
+        t0 = time.perf_counter()
+        timings: dict[str, float] = {}
+        rt = self._ensure_runtime(timings)
+        from headswap.comfy.krea2_edit_fast import (
+            clear_krea2_edit_static_cache,
+            install_krea2_edit_static_cache,
+        )
+
+        edit_cache_info = install_krea2_edit_static_cache()
+        clear_krea2_edit_static_cache()
+        bundle = self._load_models(rt, timings)
+
+        div_by = int(self.cfg.get("div_by", 16))
+        max_dim = int(self.cfg.get("max_dim", 768))
+        body_full = resize_max_keep_ar(
+            body.convert("RGB"), int(self.cfg.get("max_body_dim", max_dim)), div_by=div_by
+        )
+        face_crop = crop_face_reference(
+            face,
+            self.cache_dir,
+            top=float(self.cfg.get("face_top_pad", 0.55)),
+            bot=float(self.cfg.get("face_bot_pad", 0.02)),
+            side=float(self.cfg.get("face_side_pad", 0.28)),
+            include_shoulders=bool(self.cfg.get("include_shoulders", False)),
+            tight_identity_crop=bool(self.cfg.get("tight_identity_crop", True)),
+        )
+
+        prompt = (
+            "Replace the person's head, face, and hair in the first image "
+            "with the person from the second image. Keep everything else in "
+            "the first image exactly the same: pose, body, clothing, "
+            "background, and lighting unchanged."
+        )
+
+        with _stage(timings, "sampling"):
+            sample_meta = self._sample_edit(
+                rt,
+                bundle,
+                body_full,
+                face_crop,
+                timings,
+                prompt=prompt,
+                edit_cache_info=edit_cache_info,
+            )
+        out = sample_meta["edited"]
+        if out.size != body_full.size:
+            out = out.resize(body_full.size, Image.Resampling.LANCZOS)
+
+        total_s = time.perf_counter() - t0
+        meta = {
+            "mode": "simple_full_body",
+            "body_size": list(body_full.size),
+            "loras_loaded": sample_meta.get("loras_loaded"),
+            "ref_boost": sample_meta.get("ref_boost"),
+        }
+        dbg: dict[str, str] = {}
+        if out_dir is not None:
+            out_dir = Path(out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            debug_path = out_dir / "final_output.png"
+            out.save(debug_path)
+            dbg["final_output"] = str(debug_path)
+        return PipelineResult(image=out, latency_s=total_s, meta=meta, debug_paths=dbg)
+
     def run(
         self, body: Image.Image, face: Image.Image, out_dir: Path | None = None
     ) -> PipelineResult:
