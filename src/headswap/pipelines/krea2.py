@@ -4107,12 +4107,107 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if out.size != body_full.size:
             out = out.resize(body_full.size, Image.Resampling.LANCZOS)
 
+        refine_diag: dict[str, Any] = {"applied": False}
+        selected_face: FaceBox | None = None
+        if bool(self.cfg.get("simple_full_body_face_refine", True)):
+            try:
+                selected_face, _all = select_face_box(
+                    pil_to_rgb_np(out),
+                    self.cache_dir,
+                    index=0,
+                    policy="largest",
+                )
+            except Exception as exc:  # noqa: BLE001
+                selected_face = None
+                refine_diag["reason"] = f"face_detect_failed: {exc}"
+            if selected_face is not None:
+                fx0, fy0, fx1, fy1 = (
+                    selected_face.x0, selected_face.y0, selected_face.x1, selected_face.y1,
+                )
+                fw, fh = max(1, fx1 - fx0), max(1, fy1 - fy0)
+                top_ext = float(self.cfg.get("mask_top_extend", 1.30))
+                side_ext = float(self.cfg.get("mask_side_extend", 0.60))
+                bot_ext = float(self.cfg.get("mask_bot_extend", 0.40))
+                W, H = body_full.size
+                bx0 = max(0, int(fx0 - side_ext * fw))
+                by0 = max(0, int(fy0 - top_ext * fh))
+                bx1 = min(W, int(fx1 + side_ext * fw))
+                by1 = min(H, int(fy1 + bot_ext * fh))
+                refine_box = (bx0, by0, bx1, by1)
+                # Refine crop's "scene" comes from the PRISTINE body_full, not
+                # from `out` -- cropping already-generated content just
+                # re-edits its own softness at higher pixel dims instead of
+                # ever seeing real detail (same reasoning as the old
+                # _refine_full_frame_face path this is modeled on).
+                refine_scene = body_full.crop(refine_box)
+                with _stage(timings, "face_refine_sampling"):
+                    refine_sample = self._sample_edit(
+                        rt,
+                        bundle,
+                        refine_scene,
+                        face_crop,
+                        timings,
+                        prompt=prompt,
+                        edit_cache_info=edit_cache_info,
+                    )
+                refined_crop = refine_sample["edited"]
+                face_mask, mask_info = build_head_hair_mask(
+                    out,
+                    self.cache_dir,
+                    backend="ellipse",
+                    face_box=selected_face,
+                    expand_px=int(self.cfg.get("mask_expand_px", 18)),
+                    blur_px=int(self.cfg.get("mask_blur_px", 12)),
+                    top_extend=top_ext,
+                    side_extend=side_ext,
+                    bot_extend=bot_ext,
+                )
+                out = feathered_soft_composite(
+                    out,
+                    refined_crop,
+                    face_mask,
+                    refine_box,
+                    extra_blur_px=int(self.cfg.get("stitch_feather_px", 10)),
+                )
+                refine_diag = {
+                    "applied": True,
+                    "box": list(refine_box),
+                    "mask_backend": mask_info.get("requested_backend"),
+                }
+        else:
+            refine_diag["reason"] = "disabled"
+
+        skin_diag: dict[str, Any] = {"applied": False}
+        if bool(self.cfg.get("simple_full_body_skin_harmonize", True)) and selected_face is not None:
+            try:
+                from headswap.skin_harmonize import extend_skin_harmonization
+
+                out, skin_diag = extend_skin_harmonization(
+                    out,
+                    body_full,
+                    int(selected_face.x0),
+                    int(selected_face.y0),
+                    int(selected_face.x1),
+                    int(selected_face.y1),
+                    body_visible_thresh=float(
+                        self.cfg.get("skin_harmony_body_visible_thresh", 0.09)
+                    ),
+                    feather_px=int(self.cfg.get("skin_harmony_feather_px", 20)),
+                    transfer_strength=float(
+                        self.cfg.get("skin_harmony_transfer_strength", 0.80)
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                skin_diag = {"applied": False, "reason": f"failed: {exc}"}
+
         total_s = time.perf_counter() - t0
         meta = {
             "mode": "simple_full_body",
             "body_size": list(body_full.size),
             "loras_loaded": sample_meta.get("loras_loaded"),
             "ref_boost": sample_meta.get("ref_boost"),
+            "face_refine": refine_diag,
+            "skin_harmonize": skin_diag,
         }
         dbg: dict[str, str] = {}
         if out_dir is not None:
