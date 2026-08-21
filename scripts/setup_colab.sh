@@ -195,6 +195,17 @@ import rembg  # noqa: F401
 print('   rembg OK after simple-lama pin repair')
 " 2>/dev/null || echo "   WARN: rembg broken after simple-lama install; head_matte will fall back to ellipse"
 
+# mediapipe (skin_harmonize.py's limb mask for arms/legs). Without it,
+# extend_skin_harmonization silently falls back to a coarse "everything
+# below the head" geometric mask -- which can tint clothing, not just skin.
+# Not previously installed anywhere in this script; confirmed missing on a
+# real Colab run (`[skin_harm] limb_backend=geometric`).
+echo "-> Installing mediapipe (skin_harmonize.py limb mask backend)..."
+pip install -q mediapipe 2>&1 | tail -2 || echo "   WARN: mediapipe install failed; skin harmonization will fall back to the coarse geometric limb mask"
+python -c "import mediapipe" 2>/dev/null \
+  && echo "   mediapipe OK" \
+  || echo "   WARN: mediapipe not importable; skin harmonization will fall back to the coarse geometric limb mask"
+
 echo "Setup complete."
 echo "COMFYUI_PATH=$COMFYUI_PATH"
 echo "HEADSWAP_MODEL_STORE=$HEADSWAP_MODEL_STORE"

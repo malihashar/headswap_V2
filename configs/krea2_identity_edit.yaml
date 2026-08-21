@@ -140,6 +140,13 @@ mask_blur_px: 12
 # at the very top instead of a wrong-colored patch. 1.55 was tuned to keep
 # a target's own hair fully inside the mask on OTHER cases -- watch for
 # short-hair/no-headwear cases regressing if this needs to go lower still.
+# run_simple_full_body's face-local refine pass sends a LARGER context crop
+# to the model than the blend mask uses (see refine_context_*_extend below)
+# -- more neck/shoulder/torso context + higher effective face resolution,
+# while the mask that pastes the refined result back stays this tight to
+# avoid repainting the target's own collar/clothing.
+refine_context_side_extend: 0.85
+refine_context_bot_extend: 0.95
 mask_top_extend: 1.30
 mask_side_extend: 0.60
 mask_bot_extend: 0.40
@@ -604,6 +611,13 @@ extend_skin_harmonization: true
 skin_harmony_body_visible_thresh: 0.09   # min fraction of person px below head
 skin_harmony_feather_px: 20              # mask blur radius at sleeve/collar edges
 skin_harmony_transfer_strength: 0.80    # blend weight (0=off, 1=full transfer)
+# How much of the target's own L (luminance/lighting/shadow/texture) to keep
+# unchanged, 0-1. 1.0=fully preserved (only color shifts), 0.0=full Reinhard
+# transfer on L too, which flattens local lighting toward the donor patch's
+# brightness -- shadows/highlights/texture on the target's own skin get
+# smoothed away. Keep this high; color (a/b channels) always gets the full
+# transfer regardless of this value.
+skin_harmony_luminance_preserve: 0.85
 
 head_direction_roll_deg_thresh: 3.0
 head_direction_yaw_thresh: 0.12

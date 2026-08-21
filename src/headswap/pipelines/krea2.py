@@ -4127,11 +4127,24 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 top_ext = float(self.cfg.get("mask_top_extend", 1.30))
                 side_ext = float(self.cfg.get("mask_side_extend", 0.60))
                 bot_ext = float(self.cfg.get("mask_bot_extend", 0.40))
+                # The CONTEXT crop sent to the model is deliberately larger
+                # than the blend MASK: more surrounding neck/shoulder/upper-
+                # torso pixels give the model real context (hairline, collar,
+                # posture) and, since the same output resolution now covers a
+                # smaller fraction of the photo, more effective pixels on the
+                # face itself. The blend mask stays at the tighter defaults
+                # above -- widening the MASK (not just the crop) is what
+                # previously pasted the refined crop's own regenerated
+                # clothing over the target's collar (double-necklace/collar
+                # bug, see mask_bot_extend history above).
+                ctx_top_ext = float(self.cfg.get("refine_context_top_extend", top_ext))
+                ctx_side_ext = float(self.cfg.get("refine_context_side_extend", 0.85))
+                ctx_bot_ext = float(self.cfg.get("refine_context_bot_extend", 0.95))
                 W, H = body_full.size
-                bx0 = max(0, int(fx0 - side_ext * fw))
-                by0 = max(0, int(fy0 - top_ext * fh))
-                bx1 = min(W, int(fx1 + side_ext * fw))
-                by1 = min(H, int(fy1 + bot_ext * fh))
+                bx0 = max(0, int(fx0 - ctx_side_ext * fw))
+                by0 = max(0, int(fy0 - ctx_top_ext * fh))
+                bx1 = min(W, int(fx1 + ctx_side_ext * fw))
+                by1 = min(H, int(fy1 + ctx_bot_ext * fh))
                 refine_box = (bx0, by0, bx1, by1)
                 # Refine crop's "scene" comes from the PRISTINE body_full, not
                 # from `out` -- cropping already-generated content just
@@ -4194,6 +4207,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     feather_px=int(self.cfg.get("skin_harmony_feather_px", 20)),
                     transfer_strength=float(
                         self.cfg.get("skin_harmony_transfer_strength", 0.80)
+                    ),
+                    luminance_preserve=float(
+                        self.cfg.get("skin_harmony_luminance_preserve", 0.85)
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -5005,6 +5021,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 transfer_strength=float(
                                     self.cfg.get(
                                         "skin_harmony_transfer_strength", 0.80
+                                    )
+                                ),
+                                luminance_preserve=float(
+                                    self.cfg.get(
+                                        "skin_harmony_luminance_preserve", 0.85
                                     )
                                 ),
                             )

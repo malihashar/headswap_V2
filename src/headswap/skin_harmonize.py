@@ -111,11 +111,22 @@ def _hsv_skin_mask(rgb_np: np.ndarray) -> np.ndarray:
 # LAB cheek sampling + Reinhard transfer
 # ---------------------------------------------------------------------------
 
+def _robust_lab_stats(flat_lab: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(median_lab, robust_std_lab) via median + MAD, trimming the top/bottom
+    10% per channel (highlights/shadows/outliers) before computing stats --
+    a plain mean/std over a skin patch is easily dragged by a handful of
+    specular-highlight or deep-shadow pixels."""
+    med = np.median(flat_lab, axis=0)
+    mad = np.median(np.abs(flat_lab - med), axis=0)
+    robust_std = mad * 1.4826 + 1e-6  # MAD -> std-equivalent for a normal dist
+    return med, robust_std
+
+
 def _cheek_lab_stats(
     result_np: np.ndarray,
     x0: int, y0: int, x1: int, y1: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """(mean_lab, std_lab) from the central cheek band of the donor head."""
+    """(median_lab, robust_std_lab) from the central cheek band of the donor head."""
     fw, fh = max(1, x1 - x0), max(1, y1 - y0)
     py0 = y0 + int(fh * 0.40)
     py1 = y0 + int(fh * 0.72)
@@ -125,8 +136,7 @@ def _cheek_lab_stats(
     if patch.size == 0:
         patch = result_np[y0:y1, x0:x1]
     lab = cv2.cvtColor(patch, cv2.COLOR_RGB2LAB).astype(np.float32)
-    flat = lab.reshape(-1, 3)
-    return flat.mean(axis=0), flat.std(axis=0) + 1e-6
+    return _robust_lab_stats(lab.reshape(-1, 3))
 
 
 def _reinhard_transfer(
@@ -135,14 +145,34 @@ def _reinhard_transfer(
     src_std: np.ndarray,
     tgt_mean: np.ndarray,
     tgt_std: np.ndarray,
+    *,
+    luminance_preserve: float = 0.85,
 ) -> np.ndarray:
-    """Per-channel LAB statistical transfer (Reinhard et al.)."""
+    """Per-channel LAB statistical transfer (Reinhard et al.), with L (channel
+    0, luminance) preservation.
+
+    Shifting L by the full Reinhard rescale flattens the target's own local
+    lighting/shadow/texture variation toward the donor patch's L
+    distribution -- exactly what the target's shadows, highlights, and skin
+    texture live in. Chroma (a/b, channels 1-2) gets the full transfer since
+    that's what actually carries perceived skin *color*; L gets only a
+    small fraction of its computed shift (``1 - luminance_preserve``),
+    keeping the target's own lighting/texture intact while still nudging
+    overall brightness a little toward the donor tone.
+    """
     lab = cv2.cvtColor(region_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     for ch in range(3):
-        lab[:, :, ch] = (
+        transferred = (
             (lab[:, :, ch] - src_mean[ch]) * (tgt_std[ch] / src_std[ch])
             + tgt_mean[ch]
         )
+        if ch == 0:
+            lab[:, :, ch] = (
+                lab[:, :, ch] * luminance_preserve
+                + transferred * (1.0 - luminance_preserve)
+            )
+        else:
+            lab[:, :, ch] = transferred
     return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
 
 
@@ -161,6 +191,7 @@ def extend_skin_harmonization(
     body_visible_thresh: float = 0.09,
     feather_px: int = 20,
     transfer_strength: float = 0.80,
+    luminance_preserve: float = 0.85,
 ) -> tuple[Image.Image, dict]:
     """
     Shift body-skin tone to match the donor head already composited into
@@ -174,6 +205,10 @@ def extend_skin_harmonization(
     body_visible_thresh : fraction of person pixels below head required to proceed
     feather_px      : Gaussian blur radius on the skin mask
     transfer_strength : blend weight (1.0 = full transfer)
+    luminance_preserve : how much of the target's own L (luminance) to keep
+        unchanged, 0-1. 1.0 = lighting/shadows/texture fully preserved, only
+        color (a/b) shifts. 0.0 = full Reinhard transfer on L too, which
+        flattens local lighting toward the donor patch's brightness.
 
     Returns
     -------
@@ -257,15 +292,17 @@ def extend_skin_harmonization(
     flat = region_lab.reshape(-1, 3)
     # Only compute stats over pixels actually in the skin mask
     region_mask_flat = skin_mask[by0:by1, bx0:bx1].ravel() > 0
-    src_mean = flat[region_mask_flat].mean(axis=0)
-    src_std = flat[region_mask_flat].std(axis=0) + 1e-6
+    src_mean, src_std = _robust_lab_stats(flat[region_mask_flat])
     info["src_lab_mean"] = [round(float(x), 2) for x in src_mean]
     info["tgt_lab_mean"] = [round(float(x), 2) for x in tgt_mean]
 
     # ------------------------------------------------------------------
-    # 4. Reinhard transfer + feathered blend
+    # 4. Reinhard transfer (chroma-led, luminance preserved) + feathered blend
     # ------------------------------------------------------------------
-    matched_rgb = _reinhard_transfer(region_rgb, src_mean, src_std, tgt_mean, tgt_std)
+    matched_rgb = _reinhard_transfer(
+        region_rgb, src_mean, src_std, tgt_mean, tgt_std,
+        luminance_preserve=luminance_preserve,
+    )
 
     k = feather_px * 2 + 1
     region_skin = skin_mask[by0:by1, bx0:bx1].astype(np.float32)
