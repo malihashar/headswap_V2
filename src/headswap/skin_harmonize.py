@@ -147,6 +147,57 @@ def _hsv_skin_mask(rgb_np: np.ndarray) -> np.ndarray:
 # LAB cheek sampling + Reinhard transfer
 # ---------------------------------------------------------------------------
 
+def _skin_likeness(
+    rgb_np: np.ndarray,
+    ref_mean: np.ndarray,
+    ref_std: np.ndarray,
+    *,
+    tolerance: float = 2.6,
+    knee: float = 0.22,
+) -> np.ndarray:
+    """Continuous 0..1 "how much does this pixel look like the reference skin".
+
+    Replaces the old binary limb-mask ∩ HSV ∩ matte intersection. A binary
+    mask ALWAYS has an edge, and a tone change that stops at that edge is
+    visible as a seam no matter how wide the feather -- that is the
+    "two layers / different mask beyond the chin" artifact. It also relied on
+    fixed global HSV thresholds, which silently missed most exposed skin
+    (measured coverage of the athlete's arms: mid=0.20, upper=0.00).
+
+    Instead, score every pixel by how close its CHROMA is to a reference
+    skin distribution measured from this specific photo. Chroma (LAB a/b)
+    identifies skin far more reliably than absolute HSV cutoffs, and
+    deliberately ignoring L means the same arm reads as skin in direct light
+    and in shadow -- so shading survives instead of being masked out.
+    """
+    lab = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+    # Floors on the reference spread. A cheek patch is uniform, so its own
+    # MAD is tiny (measured a=+-4.5, b=+-7.4 on the athlete) -- but skin
+    # chroma across a whole body varies far more than that, because strong
+    # light desaturates it. Using the raw cheek MAD scored his sunlit arm
+    # (12-20 LAB units away) as non-skin and left it untouched, which is the
+    # "arms are still the wrong colour" symptom. The floors widen the
+    # acceptance to a realistic whole-body spread while staying far tighter
+    # than the distance to clothing (his blue vest sits ~37 units out on b).
+    sa = max(float(ref_std[1]), 6.0)
+    sb = max(float(ref_std[2]), 9.0)
+    da = (lab[:, :, 1] - float(ref_mean[1])) / sa
+    db = (lab[:, :, 2] - float(ref_mean[2])) / sb
+    d2 = da * da + db * db
+    w = np.exp(-0.5 * d2 / (tolerance * tolerance))
+    # Near-black pixels (deep shadow, black clothing) carry no usable chroma
+    # -- their a/b sit near neutral and can score as "skin" by accident.
+    L = lab[:, :, 0]
+    w *= np.clip((L - 8.0) / 18.0, 0.0, 1.0)
+    # Soft knee: drive weak matches (clothing that merely isn't far away) to
+    # exactly zero, while keeping the ramp continuous above the knee so no
+    # hard edge is introduced. Without it, fabric sitting at w~0.2-0.3 picks
+    # up a faint tint over a large area, which reads as the whole garment
+    # having shifted colour.
+    w = (w - knee) / max(1e-6, 1.0 - knee)
+    return np.clip(w, 0.0, 1.0)
+
+
 def _robust_lab_stats(flat_lab: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """(median_lab, robust_std_lab) via median + MAD, trimming the top/bottom
     10% per channel (highlights/shadows/outliers) before computing stats --
@@ -289,36 +340,47 @@ def extend_skin_harmonization(
         return result_pil, info
 
     # ------------------------------------------------------------------
-    # 2. Limb-region mask  ∩  HSV skin heuristic  ∩  person matte
+    # 2. Continuous skin-likeness weight (no binary mask -> no mask edge)
     # ------------------------------------------------------------------
-    mp_mask = _limb_mask_mediapipe(result_np, H, W)
-    if mp_mask is not None:
-        limb_mask = mp_mask
-        info["limb_backend"] = "mediapipe"
-    else:
-        limb_mask = _limb_mask_geometric(person_matte, head_bottom, H, W)
-        info["limb_backend"] = "geometric"
-    print(f"[skin_harm] limb_backend={info['limb_backend']}", flush=True)
+    # Reference = the TARGET's own original face, which is definitionally
+    # their skin tone in this photo's lighting. Scoring arms/hands against
+    # that (rather than fixed HSV cutoffs) is what actually finds exposed
+    # skin: a tanned arm is close to its owner's face in chroma, while a
+    # black robe or a sand background is not.
+    orig_np = np.asarray(body_full_pil.convert("RGB"), dtype=np.uint8)
+    if orig_np.shape[:2] != (H, W):
+        orig_np = cv2.resize(orig_np, (W, H), interpolation=cv2.INTER_LINEAR)
+    ref_mean, ref_std = _cheek_lab_stats(
+        orig_np, head_x0, head_y0, head_x1, head_y1
+    )
+    info["ref_lab_mean"] = [round(float(x), 2) for x in ref_mean]
 
-    skin_hsv = _hsv_skin_mask(result_np)
-    skin_mask = np.minimum(limb_mask, skin_hsv)
-    skin_mask = np.minimum(skin_mask, person_matte)
+    weight = _skin_likeness(result_np, ref_mean, ref_std)
+    weight *= np.clip(person_matte.astype(np.float32) / 255.0, 0.0, 1.0)
+    weight[:head_excl] = 0.0
+    # Smooth the weight field itself. This is the only "feather" now, and it
+    # is applied to a continuous field rather than to a hard mask edge, so
+    # there is no boundary for it to reveal.
+    blur_k = max(3, (int(max(H, W) * 0.02) * 2 + 1))
+    weight = cv2.GaussianBlur(weight, (blur_k, blur_k), 0)
+    weight = np.clip(weight, 0.0, 1.0)
 
-    # Hard-exclude head region
-    skin_mask[:head_excl] = 0
-
-    skin_px = int((skin_mask > 0).sum())
+    skin_px = int((weight > 0.15).sum())
     info["skin_px"] = skin_px
-    # Coverage per image-third, so "the arms were not recolored" is
-    # observable instead of inferred: an arms-covered mask has real coverage
-    # in the middle/lower thirds, a neck-and-collar-only mask does not.
     _t = H // 3
-    for _name, _sl in (("upper", slice(0, _t)), ("mid", slice(_t, 2 * _t)), ("lower", slice(2 * _t, H))):
-        _band = skin_mask[_sl]
-        info[f"cover_{_name}"] = round(float((_band > 0).mean()), 4) if _band.size else 0.0
+    for _name, _sl in (
+        ("upper", slice(0, _t)),
+        ("mid", slice(_t, 2 * _t)),
+        ("lower", slice(2 * _t, H)),
+    ):
+        _band = weight[_sl]
+        info[f"cover_{_name}"] = (
+            round(float((_band > 0.15).mean()), 4) if _band.size else 0.0
+        )
     print(
-        f"[skin_harm] skin_px={skin_px} coverage upper={info['cover_upper']} "
-        f"mid={info['cover_mid']} lower={info['cover_lower']}",
+        f"[skin_harm] weighted skin_px={skin_px} coverage "
+        f"upper={info['cover_upper']} mid={info['cover_mid']} "
+        f"lower={info['cover_lower']}",
         flush=True,
     )
     if skin_px < 300:
@@ -327,47 +389,30 @@ def extend_skin_harmonization(
         return result_pil, info
 
     # ------------------------------------------------------------------
-    # 3. Sample cheek tone from donor head; compute body-skin stats
+    # 3. Donor tone (target of the shift) + this body's current skin stats
     # ------------------------------------------------------------------
     tgt_mean, tgt_std = _cheek_lab_stats(
         result_np, head_x0, head_y0, head_x1, head_y1
     )
-
-    ys, xs = np.where(skin_mask > 0)
-    by0, by1 = int(ys.min()), int(ys.max()) + 1
-    bx0, bx1 = int(xs.min()), int(xs.max()) + 1
-    region_rgb = result_np[by0:by1, bx0:bx1].copy()
-
-    region_lab = cv2.cvtColor(region_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
-    flat = region_lab.reshape(-1, 3)
-    # Only compute stats over pixels actually in the skin mask
-    region_mask_flat = skin_mask[by0:by1, bx0:bx1].ravel() > 0
-    src_mean, src_std = _robust_lab_stats(flat[region_mask_flat])
+    sel = weight > 0.35
+    if int(sel.sum()) < 300:
+        sel = weight > 0.15
+    lab_all = cv2.cvtColor(result_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+    src_mean, src_std = _robust_lab_stats(lab_all[sel])
     info["src_lab_mean"] = [round(float(x), 2) for x in src_mean]
     info["tgt_lab_mean"] = [round(float(x), 2) for x in tgt_mean]
 
     # ------------------------------------------------------------------
-    # 4. Reinhard transfer (chroma-led, luminance preserved) + feathered blend
+    # 4. Chroma-led transfer, modulated by the continuous weight
     # ------------------------------------------------------------------
     matched_rgb = _reinhard_transfer(
-        region_rgb, src_mean, src_std, tgt_mean, tgt_std
+        result_np, src_mean, src_std, tgt_mean, tgt_std,
+        luminance_preserve=luminance_preserve,
     )
-
-    # Feather scaled to the image, not a fixed 20px. A tone change spread over
-    # a whole torso/arm needs a wide ramp: at 1024px a 20px feather completes
-    # the entire transition in ~2% of the frame, which is a visible edge --
-    # the "two layers / different mask beyond the chin" seam. Human perception
-    # is far more tolerant of a large gradual tone gradient than of a small
-    # sharp one, so widen the ramp with resolution.
-    feather_eff = max(int(feather_px), int(max(H, W) * 0.05))
-    k = feather_eff * 2 + 1
-    info["feather_eff_px"] = feather_eff
-    region_skin = skin_mask[by0:by1, bx0:bx1].astype(np.float32)
-    soft = cv2.GaussianBlur(region_skin, (k, k), 0) / 255.0
-    soft = np.clip(soft * transfer_strength, 0.0, 1.0)[..., None]
-
-    result_np[by0:by1, bx0:bx1] = np.clip(
-        matched_rgb * soft + result_np[by0:by1, bx0:bx1] * (1.0 - soft),
+    w3 = (weight * float(transfer_strength))[..., None]
+    result_np = np.clip(
+        matched_rgb.astype(np.float32) * w3
+        + result_np.astype(np.float32) * (1.0 - w3),
         0, 255,
     ).astype(np.uint8)
 
