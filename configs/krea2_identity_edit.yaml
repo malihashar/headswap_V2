@@ -731,3 +731,18 @@ crop_stitch_ref_boost_mask: false
 # from face detection on the donor reference image) instead of a fixed
 # padding multiplier. Prevents hair clipping when donor hair is tall.
 crop_stitch_union_bbox: false
+
+# simple_full_body: restore the ORIGINAL body below the shoulder line after
+# the full-body generative pass. A head swap must not alter clothing,
+# shoulders or background, but the full-body pass repaints the whole frame
+# (observed: a high robe collar replaced by bare neck + shoulders showing
+# past the garment). Both images are pixel-aligned at the same resolution
+# here -- no warp/rescale -- so this cannot produce the geometric-mismatch
+# ghosting that the old crop_stitch compositing did.
+simple_full_body_restore_body: true
+# Keep the GENERATED neck this far below the chin (as a fraction of face
+# height) -- the neck must stay generated because it carries the donor's
+# skin tone into the collar.
+simple_full_body_neck_keep_frac: 0.35
+# ...then ramp to fully-original by this fraction below the chin.
+simple_full_body_shoulder_frac: 1.10

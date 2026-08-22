@@ -4309,6 +4309,61 @@ class Krea2IdentityEditPipeline(BasePipeline):
         else:
             refine_diag["reason"] = "disabled"
 
+        # Restore the ORIGINAL body below the shoulder line.
+        #
+        # This is a head swap: clothing, shoulders and background must not
+        # change. The full-body pass gets head size/placement right precisely
+        # because it sees the whole photo, but it also repaints everything
+        # else -- observed as the robed figure's high collar being replaced
+        # by bare neck and shoulders that "pop out" past the garment.
+        #
+        # Safe against the ghost class of bug that plagued crop_stitch: this
+        # composites two images that are already pixel-aligned at the same
+        # resolution (no warp, no rescale, no re-crop), so there is no
+        # geometric mismatch to reveal. The ramp runs from just under the
+        # chin (keep the generated neck -- it carries the donor's skin) down
+        # to roughly the shoulder line, then keeps the original verbatim.
+        body_restore_diag: dict[str, Any] = {"applied": False}
+        if selected_face is not None and bool(
+            self.cfg.get("simple_full_body_restore_body", True)
+        ):
+            import cv2  # noqa: PLC0415
+            import numpy as np  # noqa: PLC0415
+
+            fh = max(1, int(selected_face.y1) - int(selected_face.y0))
+            W2, H2 = out.size
+            ramp_hi = int(selected_face.y1) + int(
+                float(self.cfg.get("simple_full_body_neck_keep_frac", 0.35)) * fh
+            )
+            ramp_lo = int(selected_face.y1) + int(
+                float(self.cfg.get("simple_full_body_shoulder_frac", 1.10)) * fh
+            )
+            ramp_hi = max(0, min(H2 - 1, ramp_hi))
+            ramp_lo = max(ramp_hi + 2, min(H2, ramp_lo))
+            keep = np.zeros((H2, W2), dtype=np.float32)
+            keep[:ramp_hi] = 1.0
+            if ramp_lo > ramp_hi:
+                col = np.linspace(1.0, 0.0, ramp_lo - ramp_hi, dtype=np.float32)
+                keep[ramp_hi:ramp_lo] = col[:, None]
+            kk = max(3, int(W2 * 0.02) * 2 + 1)
+            keep = cv2.GaussianBlur(keep, (kk, kk), 0)[..., None]
+            gen_np = np.asarray(out.convert("RGB"), dtype=np.float32)
+            orig_np = np.asarray(body_full.convert("RGB"), dtype=np.float32)
+            out = Image.fromarray(
+                np.clip(gen_np * keep + orig_np * (1.0 - keep), 0, 255).astype(np.uint8)
+            )
+            body_restore_diag = {
+                "applied": True,
+                "ramp_hi": ramp_hi,
+                "ramp_lo": ramp_lo,
+            }
+            print(
+                f"[krea2 body_restore] original body kept below y={ramp_lo} "
+                f"(ramp from y={ramp_hi}); clothing/shoulders/background "
+                "cannot be altered by the head swap",
+                flush=True,
+            )
+
         skin_diag: dict[str, Any] = {"applied": False}
         if bool(self.cfg.get("simple_full_body_skin_harmonize", True)) and selected_face is not None:
             try:
@@ -4342,6 +4397,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "loras_loaded": sample_meta.get("loras_loaded"),
             "ref_boost": sample_meta.get("ref_boost"),
             "face_refine": refine_diag,
+            "body_restore": body_restore_diag,
             "skin_harmonize": skin_diag,
         }
         dbg: dict[str, str] = {}
