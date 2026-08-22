@@ -3033,6 +3033,39 @@ class Krea2IdentityEditPipeline(BasePipeline):
         face_prep_diag["procrustes_correction"] = info
         import sys
 
+        # Second gate, measured against the FACE, not the crop.
+        # max_residual_frac is a fraction of the crop dimension, so on a 768px
+        # crop it tolerates ~46px of landmark error -- meaningless as a
+        # face-alignment check. GPU-observed: a fit with residual_px=20.8 off
+        # only 5 inliers passed that gate and was applied as scale=1.31 +
+        # 165px translate, warping the edited crop out of alignment with its
+        # surroundings and making the stitch boundary plainly visible (the
+        # "two layers of heads" / visible mask rectangle). Judge the residual
+        # against face height instead: a fit that is off by a large fraction
+        # of the face is a failed fit no matter how big the crop is.
+        if info.get("procrustes") and selected_face is not None:
+            face_h = float(max(1, selected_face.height))
+            resid = float(info.get("residual_px") or 0.0)
+            resid_frac_face = resid / face_h
+            max_resid_frac_face = float(
+                self.cfg.get("procrustes_max_residual_frac_of_face", 0.06)
+            )
+            info["residual_frac_of_face"] = round(resid_frac_face, 4)
+            if resid_frac_face > max_resid_frac_face:
+                info["procrustes"] = False
+                info["procrustes_reason"] = (
+                    f"residual_{resid:.1f}px_is_{resid_frac_face:.1%}_of_face_h"
+                    f"_{face_h:.0f}px_max_{max_resid_frac_face:.0%}"
+                )
+                print(
+                    f"[krea2 procrustes] REJECTED bad fit: residual={resid:.1f}px "
+                    f"= {resid_frac_face:.1%} of face height ({face_h:.0f}px), "
+                    f"max {max_resid_frac_face:.0%}. Keeping unwarped crop -- "
+                    "applying a bad alignment is what makes the stitch seam visible.",
+                    flush=True,
+                )
+                return edited, False
+
         if info.get("procrustes"):
             tag = "procrustes_jaw" if alignment.lower() == "jaw" else "procrustes"
             print(
@@ -4132,11 +4165,19 @@ class Krea2IdentityEditPipeline(BasePipeline):
             tight_identity_crop=bool(self.cfg.get("tight_identity_crop", True)),
         )
 
+        # Spell out that the DONOR's hair/hairline replaces the target's,
+        # and that the target's headwear goes away. "Replace the head, face
+        # and hair" alone left the target's own hat/hair partly surviving as
+        # dark fragments around the new head.
         prompt = (
-            "Replace the person's head, face, and hair in the first image "
-            "with the person from the second image. Keep everything else in "
-            "the first image exactly the same: pose, body, clothing, "
-            "background, and lighting unchanged."
+            "Replace the person's entire head in the first image with the "
+            "head of the person from the second image. Use the second "
+            "person's face, facial features, hairstyle, hair colour, hair "
+            "length and hairline. Remove any hat, headwear or head covering "
+            "the first person is wearing, and do not keep any of the first "
+            "person's own hair. Keep everything else in the first image "
+            "exactly the same: pose, body, clothing, background and lighting "
+            "unchanged."
         )
 
         with _stage(timings, "sampling"):
@@ -4193,12 +4234,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 bx1 = min(W, int(fx1 + ctx_side_ext * fw))
                 by1 = min(H, int(fy1 + ctx_bot_ext * fh))
                 refine_box = (bx0, by0, bx1, by1)
-                # Refine crop's "scene" comes from the PRISTINE body_full, not
-                # from `out` -- cropping already-generated content just
-                # re-edits its own softness at higher pixel dims instead of
-                # ever seeing real detail (same reasoning as the old
-                # _refine_full_frame_face path this is modeled on).
-                refine_scene = body_full.crop(refine_box)
+                # Refine from the PASS-1 RESULT, not the pristine original.
+                # Cropping body_full means pass 2 redoes the whole swap from
+                # the original head -- including removing the target's hat
+                # again -- so it can disagree with pass 1 about where the new
+                # head sits and how much headwear survives. Those two
+                # disagreeing results then get alpha-blended, which is what
+                # reads as "two layers of heads" and makes the mask boundary
+                # visible. Starting from `out` means pass 2 only sharpens
+                # geometry pass 1 already settled, so the two passes cannot
+                # contradict each other. The resolution gain comes from the
+                # upscale-before-sample below, which applies either way.
+                refine_from_original = bool(
+                    self.cfg.get("refine_from_pristine_body", False)
+                )
+                refine_src = body_full if refine_from_original else out
+                refine_scene = refine_src.crop(refine_box)
                 # UPSCALE the crop before sampling. Without this the refine
                 # is pointless: a head/shoulder crop out of a 1024-tall photo
                 # is only a few hundred px, and sampling it at that native
