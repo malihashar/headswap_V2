@@ -54,13 +54,24 @@ def _limb_mask_mediapipe(rgb_np: np.ndarray, H: int, W: int) -> np.ndarray | Non
     and leaves the hands out of the skin-tone transfer entirely (visible as
     donor-toned arms with target-toned hands).
     """
+    # `import mediapipe as mp` then `mp.solutions.pose` fails on some builds
+    # with "module 'mediapipe' has no attribute 'solutions'" (observed on the
+    # Colab Python 3.13 image): the top-level lazy attribute isn't populated
+    # even though the real module is importable at its full path. Import the
+    # submodule directly, with the attribute style as a fallback.
+    mp_pose = None
+    errors = []
     try:
-        import mediapipe as mp  # noqa: PLC0415
+        from mediapipe.python.solutions import pose as mp_pose  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
-        # Was a silent `return None` -> caller logged only "limb_backend=
-        # geometric" with no reason, so a missing/broken mediapipe looked
-        # identical to a pose that simply wasn't detected.
-        print(f"[skin_harm] mediapipe import failed ({type(exc).__name__}: {exc})", flush=True)
+        errors.append(f"mediapipe.python.solutions.pose: {type(exc).__name__}: {exc}")
+        try:
+            import mediapipe as mp  # noqa: PLC0415
+            mp_pose = mp.solutions.pose
+        except Exception as exc2:  # noqa: BLE001
+            errors.append(f"mediapipe.solutions.pose: {type(exc2).__name__}: {exc2}")
+    if mp_pose is None:
+        print(f"[skin_harm] mediapipe unavailable -- {' | '.join(errors)}", flush=True)
         return None
     try:
         PAIRS = [
@@ -73,7 +84,7 @@ def _limb_mask_mediapipe(rgb_np: np.ndarray, H: int, W: int) -> np.ndarray | Non
         ]
         thickness = max(28, W // 8)
         mask = np.zeros((H, W), dtype=np.uint8)
-        with mp.solutions.pose.Pose(
+        with mp_pose.Pose(
             static_image_mode=True, min_detection_confidence=0.4
         ) as pose:
             res = pose.process(rgb_np)
@@ -298,7 +309,18 @@ def extend_skin_harmonization(
 
     skin_px = int((skin_mask > 0).sum())
     info["skin_px"] = skin_px
-    print(f"[skin_harm] skin_px={skin_px}", flush=True)
+    # Coverage per image-third, so "the arms were not recolored" is
+    # observable instead of inferred: an arms-covered mask has real coverage
+    # in the middle/lower thirds, a neck-and-collar-only mask does not.
+    _t = H // 3
+    for _name, _sl in (("upper", slice(0, _t)), ("mid", slice(_t, 2 * _t)), ("lower", slice(2 * _t, H))):
+        _band = skin_mask[_sl]
+        info[f"cover_{_name}"] = round(float((_band > 0).mean()), 4) if _band.size else 0.0
+    print(
+        f"[skin_harm] skin_px={skin_px} coverage upper={info['cover_upper']} "
+        f"mid={info['cover_mid']} lower={info['cover_lower']}",
+        flush=True,
+    )
     if skin_px < 300:
         info["skip_reason"] = "too_few_skin_px"
         print("[skin_harm] skipped — too few skin pixels", flush=True)
@@ -331,7 +353,15 @@ def extend_skin_harmonization(
         region_rgb, src_mean, src_std, tgt_mean, tgt_std
     )
 
-    k = feather_px * 2 + 1
+    # Feather scaled to the image, not a fixed 20px. A tone change spread over
+    # a whole torso/arm needs a wide ramp: at 1024px a 20px feather completes
+    # the entire transition in ~2% of the frame, which is a visible edge --
+    # the "two layers / different mask beyond the chin" seam. Human perception
+    # is far more tolerant of a large gradual tone gradient than of a small
+    # sharp one, so widen the ramp with resolution.
+    feather_eff = max(int(feather_px), int(max(H, W) * 0.05))
+    k = feather_eff * 2 + 1
+    info["feather_eff_px"] = feather_eff
     region_skin = skin_mask[by0:by1, bx0:bx1].astype(np.float32)
     soft = cv2.GaussianBlur(region_skin, (k, k), 0) / 255.0
     soft = np.clip(soft * transfer_strength, 0.0, 1.0)[..., None]
