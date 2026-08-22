@@ -28,7 +28,12 @@ requests==2.32.3
 huggingface_hub>=0.34.0
 # Identity scoring (ArcFace) used by the Colab quality gate
 insightface==0.7.3
-onnxruntime==1.19.2
+# 1.19.2 has no wheel for Python 3.13 (Colab's base image moved to 3.13 on
+# some allocations, unpredictably -- same "no >= range" tradeoff the comment
+# above describes: pinning gives run-to-run stability but not immunity to
+# Colab's own base image drifting under it). 1.20.0 is the oldest version
+# with a 3.13 wheel; bump again if a future Colab base image moves further.
+onnxruntime==1.20.0
 # Jupyter/Colab already has a running asyncio loop; Comfy bootstrap needs this
 nest_asyncio==1.6.0
 pytest==8.3.3
