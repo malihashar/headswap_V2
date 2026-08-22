@@ -4328,9 +4328,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     transfer_strength=float(
                         self.cfg.get("skin_harmony_transfer_strength", 0.80)
                     ),
-                    luminance_preserve=float(
-                        self.cfg.get("skin_harmony_luminance_preserve", 0.85)
-                    ),
                 )
             except Exception as exc:  # noqa: BLE001
                 skin_diag = {"applied": False, "reason": f"failed: {exc}"}
@@ -5137,11 +5134,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                                 transfer_strength=float(
                                     self.cfg.get(
                                         "skin_harmony_transfer_strength", 0.80
-                                    )
-                                ),
-                                luminance_preserve=float(
-                                    self.cfg.get(
-                                        "skin_harmony_luminance_preserve", 0.85
                                     )
                                 ),
                             )

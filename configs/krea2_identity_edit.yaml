@@ -619,13 +619,6 @@ extend_skin_harmonization: true
 skin_harmony_body_visible_thresh: 0.09   # min fraction of person px below head
 skin_harmony_feather_px: 20              # mask blur radius at sleeve/collar edges
 skin_harmony_transfer_strength: 0.80    # blend weight (0=off, 1=full transfer)
-# How much of the target's own L (luminance/lighting/shadow/texture) to keep
-# unchanged, 0-1. 1.0=fully preserved (only color shifts), 0.0=full Reinhard
-# transfer on L too, which flattens local lighting toward the donor patch's
-# brightness -- shadows/highlights/texture on the target's own skin get
-# smoothed away. Keep this high; color (a/b channels) always gets the full
-# transfer regardless of this value.
-skin_harmony_luminance_preserve: 0.85
 
 head_direction_roll_deg_thresh: 3.0
 head_direction_yaw_thresh: 0.12

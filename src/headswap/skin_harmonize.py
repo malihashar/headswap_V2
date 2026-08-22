@@ -47,9 +47,22 @@ def _get_person_matte(body_pil: Image.Image) -> np.ndarray | None:
 # ---------------------------------------------------------------------------
 
 def _limb_mask_mediapipe(rgb_np: np.ndarray, H: int, W: int) -> np.ndarray | None:
-    """Thickened shoulder→elbow→wrist and hip→knee→ankle lines via MediaPipe."""
+    """Thickened shoulder→elbow→wrist and hip→knee→ankle lines via MediaPipe.
+
+    Also draws a filled circle at each wrist so HANDS are covered: the
+    landmark chain stops AT the wrist, so a line-only mask ends at the wrist
+    and leaves the hands out of the skin-tone transfer entirely (visible as
+    donor-toned arms with target-toned hands).
+    """
     try:
         import mediapipe as mp  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        # Was a silent `return None` -> caller logged only "limb_backend=
+        # geometric" with no reason, so a missing/broken mediapipe looked
+        # identical to a pose that simply wasn't detected.
+        print(f"[skin_harm] mediapipe import failed ({type(exc).__name__}: {exc})", flush=True)
+        return None
+    try:
         PAIRS = [
             (11, 13), (13, 15),   # L shoulder→elbow→wrist
             (12, 14), (14, 16),   # R shoulder→elbow→wrist
@@ -65,14 +78,26 @@ def _limb_mask_mediapipe(rgb_np: np.ndarray, H: int, W: int) -> np.ndarray | Non
         ) as pose:
             res = pose.process(rgb_np)
         if not (res and res.pose_landmarks):
+            print("[skin_harm] mediapipe found no pose landmarks", flush=True)
             return None
         lm = res.pose_landmarks.landmark
         for i, j in PAIRS:
             x1, y1 = int(lm[i].x * W), int(lm[i].y * H)
             x2, y2 = int(lm[j].x * W), int(lm[j].y * H)
             cv2.line(mask, (x1, y1), (x2, y2), 255, thickness)
+        # Hands: the pose chain ends at the wrist (15/17), so without this the
+        # hands fall outside the mask. Landmarks 17-22 are finger/thumb points
+        # when present; fall back to a blob at the wrist itself.
+        for wrist_idx in (15, 16):
+            wx, wy = int(lm[wrist_idx].x * W), int(lm[wrist_idx].y * H)
+            cv2.circle(mask, (wx, wy), max(thickness, W // 7), 255, -1)
+        for hand_idx in (17, 18, 19, 20, 21, 22):
+            if hand_idx < len(lm):
+                hx, hy = int(lm[hand_idx].x * W), int(lm[hand_idx].y * H)
+                cv2.circle(mask, (hx, hy), max(thickness // 2, W // 12), 255, -1)
         return mask
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        print(f"[skin_harm] mediapipe pose failed ({type(exc).__name__}: {exc})", flush=True)
         return None
 
 
@@ -146,33 +171,34 @@ def _reinhard_transfer(
     tgt_mean: np.ndarray,
     tgt_std: np.ndarray,
     *,
-    luminance_preserve: float = 0.85,
+    contrast_clamp: tuple[float, float] = (0.75, 1.30),
 ) -> np.ndarray:
-    """Per-channel LAB statistical transfer (Reinhard et al.), with L (channel
-    0, luminance) preservation.
+    """Per-channel LAB statistical transfer (Reinhard et al.).
 
-    Shifting L by the full Reinhard rescale flattens the target's own local
-    lighting/shadow/texture variation toward the donor patch's L
-    distribution -- exactly what the target's shadows, highlights, and skin
-    texture live in. Chroma (a/b, channels 1-2) gets the full transfer since
-    that's what actually carries perceived skin *color*; L gets only a
-    small fraction of its computed shift (``1 - luminance_preserve``),
-    keeping the target's own lighting/texture intact while still nudging
-    overall brightness a little toward the donor tone.
+    Donor colour, target lighting -- via the MEAN/DEVIATION split, not by
+    holding L back.
+
+    An earlier version blended L toward the target's own value
+    (``luminance_preserve``) to protect shading. That was wrong for this
+    task: between light and dark skin the difference lives almost entirely
+    in **L**, while a/b barely move. Preserving 85% of the target's L
+    therefore preserved 85% of the tone that was supposed to change -- a
+    donor-toned face ended up on unchanged target-toned arms/hands, and the
+    tone step at the shoulder read as a seam.
+
+    The mean/deviation split gives both properties at once:
+      * the MEAN of each channel moves fully to the donor's -> tone changes
+      * each pixel's DEVIATION from that mean is preserved -> shadows,
+        highlights and skin texture survive, because that local variation is
+        exactly what deviation-from-mean encodes.
+    Only the std *ratio* is clamped, so a low-contrast donor patch cannot
+    flatten (or a high-contrast one exaggerate) the target's own modelling.
     """
+    lo, hi = contrast_clamp
     lab = cv2.cvtColor(region_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     for ch in range(3):
-        transferred = (
-            (lab[:, :, ch] - src_mean[ch]) * (tgt_std[ch] / src_std[ch])
-            + tgt_mean[ch]
-        )
-        if ch == 0:
-            lab[:, :, ch] = (
-                lab[:, :, ch] * luminance_preserve
-                + transferred * (1.0 - luminance_preserve)
-            )
-        else:
-            lab[:, :, ch] = transferred
+        ratio = float(np.clip(tgt_std[ch] / src_std[ch], lo, hi))
+        lab[:, :, ch] = (lab[:, :, ch] - src_mean[ch]) * ratio + tgt_mean[ch]
     return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
 
 
@@ -191,7 +217,6 @@ def extend_skin_harmonization(
     body_visible_thresh: float = 0.09,
     feather_px: int = 20,
     transfer_strength: float = 0.80,
-    luminance_preserve: float = 0.85,
 ) -> tuple[Image.Image, dict]:
     """
     Shift body-skin tone to match the donor head already composited into
@@ -205,10 +230,6 @@ def extend_skin_harmonization(
     body_visible_thresh : fraction of person pixels below head required to proceed
     feather_px      : Gaussian blur radius on the skin mask
     transfer_strength : blend weight (1.0 = full transfer)
-    luminance_preserve : how much of the target's own L (luminance) to keep
-        unchanged, 0-1. 1.0 = lighting/shadows/texture fully preserved, only
-        color (a/b) shifts. 0.0 = full Reinhard transfer on L too, which
-        flattens local lighting toward the donor patch's brightness.
 
     Returns
     -------
@@ -220,7 +241,14 @@ def extend_skin_harmonization(
     original_np = result_np.copy()
 
     head_bottom = max(0, head_y1)
-    head_excl = min(H, head_bottom + 10)   # safety margin below head
+    # Exclusion line for the head region. A fixed +10px margin left the whole
+    # neck/upper-shoulder band untreated, so the donor-toned face met
+    # target-toned shoulders across a short, hard step -- read as "the
+    # shoulders are popping up". Scale the margin to the head's own size so
+    # the transfer starts right below the jaw and the feather has room to
+    # ramp across the neck instead of terminating on top of the shoulder.
+    head_h = max(1, head_y1 - head_y0)
+    head_excl = min(H, head_bottom + max(2, int(head_h * 0.04)))
 
     # ------------------------------------------------------------------
     # 1. Body-visibility routing
@@ -300,8 +328,7 @@ def extend_skin_harmonization(
     # 4. Reinhard transfer (chroma-led, luminance preserved) + feathered blend
     # ------------------------------------------------------------------
     matched_rgb = _reinhard_transfer(
-        region_rgb, src_mean, src_std, tgt_mean, tgt_std,
-        luminance_preserve=luminance_preserve,
+        region_rgb, src_mean, src_std, tgt_mean, tgt_std
     )
 
     k = feather_px * 2 + 1
