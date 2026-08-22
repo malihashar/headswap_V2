@@ -115,6 +115,14 @@ procrustes_max_rotation_deg: 12.0
 procrustes_max_translate_frac: 0.25
 procrustes_max_residual_frac: 0.06
 max_body_dim: 1024
+# Upscale SMALL inputs to this long side before any cropping. Without it a
+# small source caps final quality regardless of pipeline changes: the head
+# crop is taken in the body image's own pixels, so a 350x197 photo gives a
+# ~128x112 crop -- the model samples that at crop_long_side and generates a
+# detailed head, but it is then scaled back to 128x112 to composite and the
+# output is 350x197, discarding all of it. Set to 0 to disable (old
+# downscale-only behaviour). Capped by max_body_dim above.
+body_min_long_side: 1024
 crop_long_side: 768
 square_crop: false
 mask_expand_px: 18

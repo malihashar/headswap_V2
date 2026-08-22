@@ -43,6 +43,33 @@ def resize_max_keep_ar(im: Image.Image, max_dim: int, div_by: int = 2) -> Image.
     return im.resize((nw, nh), Image.Resampling.LANCZOS)
 
 
+def fit_long_side_keep_ar(
+    im: Image.Image, long_side: int, div_by: int = 2
+) -> Image.Image:
+    """Scale to ``long_side`` in EITHER direction (unlike resize_max_keep_ar,
+    which only ever shrinks).
+
+    A small input silently caps the whole pipeline's output quality: the head
+    crop is taken in the body image's own pixels, so a 350x197 photo yields a
+    ~128x112 crop. That crop IS upscaled to crop_long_side for sampling, so
+    the model generates a detailed head -- but the result is then scaled back
+    down to the crop's native 128x112 to composite, throwing away every pixel
+    of the detail that was just generated, and the final image is only
+    350x197 regardless. Upscaling the body first keeps the generated head
+    detail instead of discarding it. Background/clothing stay as soft as the
+    source was (interpolation adds no real detail there), but the head --
+    the region actually being regenerated -- comes back at real resolution.
+    """
+    im = im.convert("RGB")
+    w, h = im.size
+    scale = float(long_side) / float(max(w, h))
+    nw = evenify(max(1, int(round(w * scale))), div_by)
+    nh = evenify(max(1, int(round(h * scale))), div_by)
+    if (nw, nh) == (w, h):
+        return im
+    return im.resize((nw, nh), Image.Resampling.LANCZOS)
+
+
 def resize_to_megapixels(
     im: Image.Image,
     *,

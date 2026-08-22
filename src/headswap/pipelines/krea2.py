@@ -69,6 +69,7 @@ from headswap.preprocess import (
     relock_pose_to_destination,
     resize_contain,
     resize_long_side,
+    fit_long_side_keep_ar,
     resize_max_keep_ar,
     resize_to_megapixels,
     select_face_box,
@@ -456,6 +457,37 @@ def _count_unet_forwards(model, enabled: bool = True):
 
 class Krea2IdentityEditPipeline(BasePipeline):
     name = "krea2_identity_edit"
+
+    def _fit_body_dim(
+        self, body: Image.Image, max_dim: int, div_by: int
+    ) -> Image.Image:
+        """Body image at the pipeline's working resolution.
+
+        Small inputs are UPSCALED to ``body_min_long_side`` (not just
+        downscaled to max_body_dim). The head crop is taken in the body
+        image's own pixels, so a 350x197 source yields a ~128x112 crop: the
+        model still samples that crop at crop_long_side and generates a
+        detailed head, but the result is scaled back down to 128x112 to
+        composite, discarding every generated pixel, and the final image is
+        350x197 regardless. GPU-confirmed on the athlete test image
+        (face box 59x76 px -> eyes ~8x5 px), where this, not any masking
+        bug, is what made the output soft and the eye region mushy.
+        """
+        target_max = int(self.cfg.get("max_body_dim", max_dim))
+        min_long = int(self.cfg.get("body_min_long_side", 0) or 0)
+        rgb = body.convert("RGB")
+        if min_long > 0 and max(rgb.size) < min_long:
+            fitted = fit_long_side_keep_ar(
+                rgb, min(min_long, target_max), div_by=div_by
+            )
+            print(
+                f"[krea2 body_dim] upscaled small input {rgb.size} -> {fitted.size} "
+                f"(body_min_long_side={min_long}); generated head detail is "
+                "preserved instead of being downscaled away",
+                flush=True,
+            )
+            return fitted
+        return resize_max_keep_ar(rgb, target_max, div_by=div_by)
 
     def _ensure_runtime(self, timings: dict[str, float]) -> NodeRuntime:
         if self.runtime is None:
@@ -4089,9 +4121,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
         div_by = int(self.cfg.get("div_by", 16))
         max_dim = int(self.cfg.get("max_dim", 768))
-        body_full = resize_max_keep_ar(
-            body.convert("RGB"), int(self.cfg.get("max_body_dim", max_dim)), div_by=div_by
-        )
+        body_full = self._fit_body_dim(body, max_dim, div_by)
         face_crop = crop_face_reference(
             face,
             self.cache_dir,
@@ -4424,11 +4454,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             if mask_crop_stitch:
                 # Locality shell (Klein/Qwen-improved): edit head crop, stitch back.
                 # Picture 1 = body crop, Picture 2 = face — never swap order.
-                body_full = resize_max_keep_ar(
-                    body.convert("RGB"),
-                    int(self.cfg.get("max_body_dim", max_dim)),
-                    div_by=div_by,
-                )
+                body_full = self._fit_body_dim(body, max_dim, div_by)
                 body_face_policy = str(
                     self.cfg.get("body_face_policy", "largest") or "largest"
                 )
