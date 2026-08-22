@@ -279,6 +279,7 @@ def extend_skin_harmonization(
     body_visible_thresh: float = 0.09,
     feather_px: int = 20,
     transfer_strength: float = 0.80,
+    luminance_preserve: float = 0.85,
 ) -> tuple[Image.Image, dict]:
     """
     Shift body-skin tone to match the donor head already composited into
