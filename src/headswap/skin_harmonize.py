@@ -406,9 +406,13 @@ def extend_skin_harmonization(
     # ------------------------------------------------------------------
     # 4. Chroma-led transfer, modulated by the continuous weight
     # ------------------------------------------------------------------
+    # NOTE: luminance_preserve is intentionally NOT forwarded. _reinhard_transfer
+    # now uses a mean/deviation split, which protects shading via the deviation
+    # term instead -- see its docstring for why holding L back actively broke
+    # light<->dark skin transfer. The parameter is still accepted by this
+    # function so existing callers keep working.
     matched_rgb = _reinhard_transfer(
         result_np, src_mean, src_std, tgt_mean, tgt_std,
-        luminance_preserve=luminance_preserve,
     )
     w3 = (weight * float(transfer_strength))[..., None]
     result_np = np.clip(
