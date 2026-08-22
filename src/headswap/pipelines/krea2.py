@@ -3688,6 +3688,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     person_h_frac_min = float(
                         self.cfg.get("body_route_person_height_frac_min", 0.55)
                     )
+                    # person_h_frac is how much of the FRAME the person's
+                    # bbox spans -- necessary but NOT sufficient for "a full
+                    # body is visible". A tight bust/portrait crop scores
+                    # ~0.99 (the highest possible value), so on its own this
+                    # metric rates a head-and-shoulders crop as MORE
+                    # full-body than an actual full-body shot that has
+                    # margin above/below the subject. GPU-confirmed on the
+                    # athlete bust test image: face_height_frac=0.3958
+                    # (correctly NOT full-body) but person_height_frac=0.9896
+                    # overrode it to full-body, sending a portrait down the
+                    # full-body path and badly degrading identity.
+                    #
+                    # Face size relative to the frame is what actually
+                    # separates the two: a real full-body subject has a small
+                    # face (~0.05-0.12), a bust has a large one. So AND the
+                    # two signals instead of letting segmentation override.
                     result.update(
                         {
                             "method": "person_segmentation",
@@ -3695,6 +3711,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                             "person_height_frac_min": person_h_frac_min,
                             "full_body_detected": bool(
                                 person_h_frac >= person_h_frac_min
+                                and face_h_frac <= face_h_frac_max
                             ),
                         }
                     )
@@ -4152,6 +4169,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # ever seeing real detail (same reasoning as the old
                 # _refine_full_frame_face path this is modeled on).
                 refine_scene = body_full.crop(refine_box)
+                # UPSCALE the crop before sampling. Without this the refine
+                # is pointless: a head/shoulder crop out of a 1024-tall photo
+                # is only a few hundred px, and sampling it at that native
+                # size gives the face no more pixels than the full-body pass
+                # already gave it. crop_stitch resizes its own crop to
+                # crop_long_side (768) for exactly this reason -- that
+                # resolution gain, not the crop itself, is what produces the
+                # identity/detail improvement. Composited back down at the
+                # box's original size, so geometry is unchanged.
+                refine_native_size = refine_scene.size
+                refine_long_side = int(self.cfg.get("crop_long_side", 768))
+                if max(refine_native_size) < refine_long_side:
+                    refine_scene = resize_max_keep_ar(
+                        refine_scene, refine_long_side, div_by=div_by
+                    )
                 with _stage(timings, "face_refine_sampling"):
                     refine_sample = self._sample_edit(
                         rt,
@@ -4163,6 +4195,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         edit_cache_info=edit_cache_info,
                     )
                 refined_crop = refine_sample["edited"]
+                # Back down to the box's native size so the composite lands
+                # in the original coordinate frame (feathered_soft_composite
+                # pastes at `refine_box`, which is in body_full coords).
+                if refined_crop.size != refine_native_size:
+                    refined_crop = refined_crop.resize(
+                        refine_native_size, Image.Resampling.LANCZOS
+                    )
                 face_mask, mask_info = build_head_hair_mask(
                     out,
                     self.cache_dir,
