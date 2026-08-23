@@ -227,17 +227,58 @@ def _cheek_lab_stats(
     result_np: np.ndarray,
     x0: int, y0: int, x1: int, y1: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """(median_lab, robust_std_lab) from the central cheek band of the donor head."""
+    """(median_lab, robust_std_lab) from the donor head's two lateral cheeks.
+
+    The window used to span 0.40-0.72 of face height across nearly the full
+    width, which covers the nose, nostrils, lips, mustache and beard shadow --
+    not skin. On a stubbled or smiling donor that pulls the reference dark and
+    warm, so the "donor skin tone" the whole transfer aims at was wrong at the
+    source: measured tgt L=131 with chroma indistinguishable from tan skin,
+    which makes a pale complexion unreachable no matter how the weights are
+    tuned.
+
+    Sample the two lateral cheeks instead -- below the eyes, above the mouth
+    line, and skipping the central nose strip (specular highlight + nostril
+    shadow). That band is the largest genuinely-skin, mostly-flat region of a
+    face and is the standard place to read complexion from.
+    """
     fw, fh = max(1, x1 - x0), max(1, y1 - y0)
-    py0 = y0 + int(fh * 0.40)
-    py1 = y0 + int(fh * 0.72)
-    px0 = x0 + int(fw * 0.18)
-    px1 = x0 + int(fw * 0.82)
-    patch = result_np[py0:py1, px0:px1]
-    if patch.size == 0:
-        patch = result_np[y0:y1, x0:x1]
-    lab = cv2.cvtColor(patch, cv2.COLOR_RGB2LAB).astype(np.float32)
-    return _robust_lab_stats(lab.reshape(-1, 3))
+    py0 = y0 + int(fh * 0.34)
+    py1 = y0 + int(fh * 0.54)
+    def _stats(flat_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        lab = cv2.cvtColor(
+            flat_rgb.reshape(1, -1, 3).astype(np.uint8), cv2.COLOR_RGB2LAB
+        ).astype(np.float32)
+        return _robust_lab_stats(lab.reshape(-1, 3))
+
+    patches = []
+    # Kept a margin in from the box edge: a face box that is even slightly
+    # loose puts an edge-hugging patch on the BACKGROUND, and a donor shot on
+    # a white backdrop then reads as L=255 neutral -- a "skin tone" that is
+    # not skin at all and would drive the whole transfer to grey.
+    for fx0, fx1 in ((0.16, 0.36), (0.64, 0.84)):
+        cx0 = x0 + int(fw * fx0)
+        cx1 = x0 + int(fw * fx1)
+        p = result_np[py0:py1, cx0:cx1]
+        if p.size:
+            patches.append(p.reshape(-1, 3))
+
+    if patches:
+        mean, std = _stats(np.concatenate(patches, axis=0))
+        # Plausibility guard: real skin always carries some warm chroma. A
+        # near-neutral sample means the patches missed the face (backdrop,
+        # hair, deep shadow), so fall back to the central band rather than
+        # aiming the transfer at a colour no skin has.
+        chroma = abs(float(mean[1]) - 128.0) + abs(float(mean[2]) - 128.0)
+        if chroma >= 8.0:
+            return mean, std
+
+    central = result_np[py0:py1, x0 + int(fw * 0.18): x0 + int(fw * 0.82)]
+    if central.size == 0:
+        central = result_np[y0:y1, x0:x1]
+    if central.size == 0:
+        central = result_np
+    return _stats(central.reshape(-1, 3))
 
 
 def _reinhard_transfer(

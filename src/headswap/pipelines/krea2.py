@@ -4191,13 +4191,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "person's face, facial features, hairstyle, hair colour, hair "
             "length and hairline. Remove any hat, headwear or head covering "
             "the first person is wearing, and do not keep any of the first "
-            "person's own hair. The body must also take on the second "
-            "person's skin colour: every area of bare skin that is visible "
-            "-- neck, shoulders, arms, hands, legs and feet -- must match "
-            "the second person's complexion exactly, so the result looks "
-            "like one single person rather than one person's head on "
-            "another person's body. Keep the pose, body shape, clothing, "
-            "background and lighting exactly the same."
+            "person's own hair. "
+            # Naming body parts as "bare skin" (shoulders, arms, legs...) made
+            # the model treat them AS bare and strip the garment -- a robed
+            # figure came back with a naked torso. State the clothing
+            # constraint first and as a prohibition, and describe the skin
+            # change as a recolour of skin that is ALREADY uncovered, never as
+            # a list of parts that are bare.
+            "Do not remove, redraw or alter any clothing: every garment the "
+            "first person wears must stay exactly as it is, covering exactly "
+            "what it already covers. Do not turn any clothed area into skin. "
+            "Only where the first person's skin is already uncovered and "
+            "visible, change that skin's colour to match the second person's "
+            "complexion, keeping the original shading and shadows, so the "
+            "head and the visible skin read as one single person. "
+            "Keep the pose, body shape, background and lighting exactly the "
+            "same."
         )
 
         with _stage(timings, "sampling"):
