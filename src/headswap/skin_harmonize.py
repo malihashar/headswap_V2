@@ -288,7 +288,7 @@ def _reinhard_transfer(
     tgt_mean: np.ndarray,
     tgt_std: np.ndarray,
     *,
-    contrast_clamp: tuple[float, float] = (0.75, 1.30),
+    contrast_clamp: tuple[float, float] = (0.55, 1.30),
 ) -> np.ndarray:
     """Per-channel LAB statistical transfer (Reinhard et al.).
 
@@ -310,6 +310,19 @@ def _reinhard_transfer(
         exactly what deviation-from-mean encodes.
     Only the std *ratio* is clamped, so a low-contrast donor patch cannot
     flatten (or a high-contrast one exaggerate) the target's own modelling.
+
+    The lower clamp matters more than it looks. The selected skin spans very
+    different tones at once -- a lit chest around L=120 and tan arms down at
+    L=60 -- while the donor reference is a single uniform cheek patch. A pure
+    mean-shift (ratio 1.0) moves both ends by the same amount, so with
+    src=96 -> tgt=124 the chest overshoots to 148 while the arm only reaches
+    88 and still reads as its original tan. Allowing more compression pulls
+    the two ends TOWARD the face tone instead of translating them past it:
+        ratio 0.75 (old floor):  arm 60 -> 97,   chest 120 -> 142
+        ratio 0.55 (now):        arm 60 -> 104,  chest 120 -> 139
+    The cost is some flattening of shading contrast within skin, so this is
+    a genuine trade -- lower it further only if arms still read too dark, and
+    raise it if skin starts looking matte.
     """
     lo, hi = contrast_clamp
     lab = cv2.cvtColor(region_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
