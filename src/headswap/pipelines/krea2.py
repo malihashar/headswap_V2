@@ -3863,6 +3863,40 @@ class Krea2IdentityEditPipeline(BasePipeline):
             flush=True,
         )
         if not detection.get("full_body_detected"):
+            # A bust/half-body shot is not a "full body", but it can still show
+            # a lot of bare skin (arms, shoulders, chest) that has to take the
+            # donor's complexion. crop_stitch structurally cannot do that: the
+            # model is only ever shown the head crop, so it never sees the
+            # arms, and the post-hoc LAB transfer can only aim at whatever tone
+            # the composited head ended up with -- measured on the athlete, the
+            # generated face lands at L=124, exactly the target's OWN original
+            # face tone, so "make the arms match the donor" degenerates into
+            # "make the arms match the person they already are". No downstream
+            # tuning can fix that; the donor's complexion is simply not present
+            # in the image by then.
+            #
+            # The model-driven path does work (it is what made the robed figure
+            # come out right), and it carries its own high-res face-refine
+            # pass, so a large face does not lose the quality this size gate
+            # was protecting. Route on "is there enough visible body to matter"
+            # rather than on face size.
+            below = float(detection.get("below_face_frac") or 0.0)
+            simple_min = float(
+                self.cfg.get("simple_path_below_face_frac_min", 0.38)
+            )
+            if n_faces <= 1 and below >= simple_min:
+                meta["applied"] = True
+                meta["route"] = "simple_full_body"
+                meta["reason"] = "single_person_body_visible_not_full_body"
+                meta["below_face_frac"] = round(below, 4)
+                print(
+                    "[krea2 body_route] resolved_mode=simple_full_body "
+                    f"reason=body_visible below_face_frac={below:.3f} "
+                    f">= {simple_min} (not a full body, but enough bare skin "
+                    "that only the model can recolour it)",
+                    flush=True,
+                )
+                return meta
             meta["route"] = "crop_stitch_unchanged"
             meta["reason"] = "no_full_body_detected"
             return meta
