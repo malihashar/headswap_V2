@@ -206,6 +206,21 @@ python -c "import mediapipe" 2>/dev/null \
   && echo "   mediapipe OK" \
   || echo "   WARN: mediapipe not importable; skin harmonization will fall back to the coarse geometric limb mask"
 
+# Skin-vs-clothes segmenter for skin_harmonize.py. Without this model the
+# skin mask falls back to colour only, which cannot tell skin from
+# skin-coloured fabric -- GPU-observed repainting a cream dress (its "skin"
+# region measured L=197, i.e. the garment) by 59 L-points.
+echo "-> Downloading selfie multiclass segmenter (skin vs clothes)..."
+mkdir -p /content/models
+if [ ! -f /content/models/selfie_multiclass_256x256.tflite ]; then
+  curl -sSL -o /content/models/selfie_multiclass_256x256.tflite \
+    "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite" \
+    && echo "   selfie multiclass segmenter OK" \
+    || echo "   WARN: segmenter download failed; skin harmonization may recolour skin-coloured clothing"
+else
+  echo "   selfie multiclass segmenter already present"
+fi
+
 echo "Setup complete."
 echo "COMFYUI_PATH=$COMFYUI_PATH"
 echo "HEADSWAP_MODEL_STORE=$HEADSWAP_MODEL_STORE"

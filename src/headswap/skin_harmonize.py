@@ -147,6 +147,71 @@ def _hsv_skin_mask(rgb_np: np.ndarray) -> np.ndarray:
 # LAB cheek sampling + Reinhard transfer
 # ---------------------------------------------------------------------------
 
+_SEM_MODEL_PATHS = (
+    "/content/models/selfie_multiclass_256x256.tflite",
+    "/root/.cache/headswap/selfie_multiclass_256x256.tflite",
+)
+# MediaPipe multiclass selfie segmentation labels.
+_SEM_BODY_SKIN, _SEM_FACE_SKIN = 2, 3
+
+
+def _semantic_skin_mask(rgb_np: np.ndarray) -> np.ndarray | None:
+    """Per-pixel P(skin) from a segmenter that knows skin from CLOTHES.
+
+    Chroma alone cannot do this. Skin-coloured fabric -- a cream dress, a
+    beige skirt, tan trousers -- sits at the same LAB chroma as skin, so a
+    colour-only rule recolours the garment: measured on a hanfu dress, the
+    "skin" region came back at L=197 (the fabric, not the wearer) and got
+    darkened by 59 L-points. No threshold separates those two populations
+    because they genuinely overlap; the discriminator has to be semantic.
+
+    This model emits explicit body-skin / face-skin / clothes classes, so
+    clothing is excluded by label rather than by hoping its colour differs.
+    Returns None when unavailable, and the caller falls back to the
+    colour-only path.
+    """
+    import os as _os  # noqa: PLC0415
+
+    model_path = next((p for p in _SEM_MODEL_PATHS if _os.path.exists(p)), None)
+    if model_path is None:
+        print(
+            "[skin_harm] semantic segmenter model not found -- falling back to "
+            "colour-only skin detection (skin-coloured CLOTHING may be recoloured)",
+            flush=True,
+        )
+        return None
+    try:
+        import mediapipe as mp  # noqa: PLC0415
+        from mediapipe.tasks import python as mp_python  # noqa: PLC0415
+        from mediapipe.tasks.python import vision as mp_vision  # noqa: PLC0415
+
+        opts = mp_vision.ImageSegmenterOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=model_path),
+            output_category_mask=True,
+        )
+        with mp_vision.ImageSegmenter.create_from_options(opts) as seg:
+            mp_img = mp.Image(
+                image_format=mp.ImageFormat.SRGB,
+                data=np.ascontiguousarray(rgb_np),
+            )
+            res = seg.segment(mp_img)
+        cat = res.category_mask.numpy_view()
+        skin = np.isin(cat, (_SEM_BODY_SKIN, _SEM_FACE_SKIN)).astype(np.float32)
+        if skin.shape != rgb_np.shape[:2]:
+            skin = cv2.resize(
+                skin, (rgb_np.shape[1], rgb_np.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        return np.clip(skin, 0.0, 1.0)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[skin_harm] semantic segmenter failed ({type(exc).__name__}: {exc}) "
+            "-- falling back to colour-only skin detection",
+            flush=True,
+        )
+        return None
+
+
 def _skin_likeness(
     rgb_np: np.ndarray,
     ref_mean: np.ndarray,
@@ -482,6 +547,22 @@ def extend_skin_harmonization(
 
     weight = _skin_likeness(result_np, ref_mean, ref_std)
     weight *= np.clip(person_matte.astype(np.float32) / 255.0, 0.0, 1.0)
+    # Semantic gate: keep only what a skin/clothes-aware segmenter calls skin.
+    # Without this the colour rule alone repaints skin-coloured garments.
+    _sem = _semantic_skin_mask(result_np)
+    info["semantic_skin"] = _sem is not None
+    if _sem is not None:
+        # Soften the class boundary so the gate never contributes a hard edge
+        # of its own, then keep a floor of 0 outside skin: clothing must go to
+        # zero, not merely be attenuated.
+        _k = max(3, (int(max(H, W) * 0.01) * 2 + 1))
+        _sem = cv2.GaussianBlur(_sem, (_k, _k), 0)
+        weight *= np.clip(_sem, 0.0, 1.0)
+        print(
+            f"[skin_harm] semantic skin gate applied "
+            f"(skin px={int((_sem > 0.5).sum())})",
+            flush=True,
+        )
     weight[:head_excl] = 0.0
     # Smooth the weight field itself. This is the only "feather" now, and it
     # is applied to a continuous field rather than to a hard mask edge, so
