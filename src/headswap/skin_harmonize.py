@@ -155,6 +155,55 @@ _SEM_MODEL_PATHS = (
 _SEM_BODY_SKIN, _SEM_FACE_SKIN = 2, 3
 
 
+def _semantic_category_mask(rgb_np: np.ndarray) -> np.ndarray | None:
+    """Raw per-pixel class ids from the multiclass selfie segmenter."""
+    import os as _os  # noqa: PLC0415
+
+    model_path = next((q for q in _SEM_MODEL_PATHS if _os.path.exists(q)), None)
+    if model_path is None:
+        return None
+    try:
+        import mediapipe as mp  # noqa: PLC0415
+        from mediapipe.tasks import python as mp_python  # noqa: PLC0415
+        from mediapipe.tasks.python import vision as mp_vision  # noqa: PLC0415
+
+        opts = mp_vision.ImageSegmenterOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=model_path),
+            output_category_mask=True,
+        )
+        with mp_vision.ImageSegmenter.create_from_options(opts) as seg:
+            res = seg.segment(mp.Image(
+                image_format=mp.ImageFormat.SRGB,
+                data=np.ascontiguousarray(rgb_np),
+            ))
+        return res.category_mask.numpy_view()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[skin_harm] segmenter failed ({type(exc).__name__}: {exc})", flush=True)
+        return None
+
+
+_SEM_CLOTHES = 4
+
+
+def semantic_clothes_mask(rgb_np: np.ndarray) -> np.ndarray | None:
+    """Per-pixel P(clothes) from the multiclass selfie segmenter, or None.
+
+    Exposed so compositing can refuse to paint over a garment. Geometry
+    cannot make that decision: a horizontal ramp under the chin blends the
+    generated neck against whatever the original has there, which on a
+    high-collared robe is black fabric -- producing a tan-to-black gradient
+    down the chest that reads as "the colour on the shirt is bad".
+    """
+    cat = _semantic_category_mask(rgb_np)
+    if cat is None:
+        return None
+    m = (cat == _SEM_CLOTHES).astype(np.float32)
+    if m.shape != rgb_np.shape[:2]:
+        m = cv2.resize(m, (rgb_np.shape[1], rgb_np.shape[0]),
+                       interpolation=cv2.INTER_LINEAR)
+    return np.clip(m, 0.0, 1.0)
+
+
 def _semantic_skin_mask(rgb_np: np.ndarray) -> np.ndarray | None:
     """Per-pixel P(skin) from a segmenter that knows skin from CLOTHES.
 
@@ -181,21 +230,9 @@ def _semantic_skin_mask(rgb_np: np.ndarray) -> np.ndarray | None:
         )
         return None
     try:
-        import mediapipe as mp  # noqa: PLC0415
-        from mediapipe.tasks import python as mp_python  # noqa: PLC0415
-        from mediapipe.tasks.python import vision as mp_vision  # noqa: PLC0415
-
-        opts = mp_vision.ImageSegmenterOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=model_path),
-            output_category_mask=True,
-        )
-        with mp_vision.ImageSegmenter.create_from_options(opts) as seg:
-            mp_img = mp.Image(
-                image_format=mp.ImageFormat.SRGB,
-                data=np.ascontiguousarray(rgb_np),
-            )
-            res = seg.segment(mp_img)
-        cat = res.category_mask.numpy_view()
+        cat = _semantic_category_mask(rgb_np)
+        if cat is None:
+            return None
         skin = np.isin(cat, (_SEM_BODY_SKIN, _SEM_FACE_SKIN)).astype(np.float32)
         if skin.shape != rgb_np.shape[:2]:
             skin = cv2.resize(

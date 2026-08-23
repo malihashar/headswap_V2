@@ -4434,6 +4434,31 @@ class Krea2IdentityEditPipeline(BasePipeline):
             body_restore_col = (
                 int(max(0, cx - half - soft)), int(min(W2, cx + half + soft))
             )
+            # Content gate: never regenerate over a garment. Geometry alone
+            # cannot know that -- the ramp under the chin blends the generated
+            # neck against whatever the ORIGINAL holds there, which on a
+            # high-collared robe is black fabric, giving the tan-to-black
+            # gradient down the chest ("the colour on the shirt is bad").
+            # Anything the segmenter calls clothing in the ORIGINAL is kept
+            # verbatim, so a collar/strap can never be repainted and a
+            # shoulder can never straddle the column edge with one half from
+            # each render.
+            try:
+                from headswap.skin_harmonize import (  # noqa: PLC0415
+                    semantic_clothes_mask,
+                )
+                _cloth = semantic_clothes_mask(
+                    np.asarray(body_full.convert("RGB"), dtype=np.uint8)
+                )
+            except Exception:  # noqa: BLE001
+                _cloth = None
+            if _cloth is not None:
+                _ck = max(3, int(W2 * 0.01) * 2 + 1)
+                _cloth = cv2.GaussianBlur(_cloth, (_ck, _ck), 0)
+                keep *= np.clip(1.0 - _cloth, 0.0, 1.0)
+                body_restore_diag_cloth = int((_cloth > 0.5).sum())
+            else:
+                body_restore_diag_cloth = -1
             kk = max(3, int(W2 * 0.02) * 2 + 1)
             keep = cv2.GaussianBlur(keep, (kk, kk), 0)[..., None]
             gen_np = np.asarray(out.convert("RGB"), dtype=np.float32)
@@ -4446,12 +4471,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "ramp_hi": ramp_hi,
                 "ramp_lo": ramp_lo,
                 "head_col": list(body_restore_col),
+                "clothes_px_protected": body_restore_diag_cloth,
             }
             print(
                 f"[krea2 body_restore] generated region = head column "
                 f"x={body_restore_col[0]}..{body_restore_col[1]}, above "
                 f"y={ramp_lo} (ramp from y={ramp_hi}); arms/clothing/"
-                "background stay original so no limb is split across the seam",
+                "background stay original so no limb is split across the seam"
+                f"; clothing pixels protected={body_restore_diag_cloth}",
                 flush=True,
             )
 
