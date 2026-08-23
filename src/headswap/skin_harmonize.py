@@ -223,6 +223,48 @@ def _robust_lab_stats(flat_lab: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return med, robust_std
 
 
+def _face_skin_lab_stats(
+    rgb_np: np.ndarray,
+    x0: int, y0: int, x1: int, y1: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Robust skin tone from a face box, chosen by CONTENT not by geometry.
+
+    A fixed rectangle inside the face box keeps landing on things that are
+    not skin, and the failure is silent and directional: the old wide window
+    caught mustache/lips/beard and read L=131 on a pale donor; the narrower
+    lateral window then caught brow shadow or hair and read L=102 -- darker
+    than the target's own face, which is impossible for a paler person under
+    the same light. Every downstream fix then aims at a wrong target.
+
+    Instead select pixels by skin-likeness within the box and read the tone
+    off those. Facial hair, brows, nostrils, lips and cast shadow all fall
+    out on chroma or luminance, so the answer no longer depends on guessing
+    a rectangle that avoids them.
+    """
+    x0 = max(0, x0); y0 = max(0, y0)
+    x1 = min(rgb_np.shape[1], x1); y1 = min(rgb_np.shape[0], y1)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    box = rgb_np[y0:y1, x0:x1]
+    lab = cv2.cvtColor(box, cv2.COLOR_RGB2LAB).astype(np.float32)
+    flat = lab.reshape(-1, 3)
+    L, a, b = flat[:, 0], flat[:, 1], flat[:, 2]
+    # Warm chroma is what separates skin from hair, brows and cloth; a wide
+    # band keeps every complexion in while dropping neutral/cool pixels.
+    warm = (a > 132.0) & (b > 132.0) & (a < 180.0) & (b < 190.0)
+    if int(warm.sum()) < 64:
+        return None
+    Lw = L[warm]
+    # Drop the darkest 35% (beard, nostrils, cast shadow, hair edges) and the
+    # brightest 5% (specular highlight), then read the tone off what's left --
+    # lit, unoccluded skin.
+    lo_c, hi_c = np.percentile(Lw, 35.0), np.percentile(Lw, 95.0)
+    keep = warm & (L >= lo_c) & (L <= hi_c)
+    if int(keep.sum()) < 32:
+        keep = warm
+    return _robust_lab_stats(flat[keep])
+
+
 def _cheek_lab_stats(
     result_np: np.ndarray,
     x0: int, y0: int, x1: int, y1: int,
@@ -420,9 +462,15 @@ def extend_skin_harmonization(
     orig_np = np.asarray(body_full_pil.convert("RGB"), dtype=np.uint8)
     if orig_np.shape[:2] != (H, W):
         orig_np = cv2.resize(orig_np, (W, H), interpolation=cv2.INTER_LINEAR)
-    ref_mean, ref_std = _cheek_lab_stats(
-        orig_np, head_x0, head_y0, head_x1, head_y1
-    )
+    # Measure BOTH ends of the transfer the same way, or the difference
+    # between them is partly just a difference in how they were sampled.
+    _ref = _face_skin_lab_stats(orig_np, head_x0, head_y0, head_x1, head_y1)
+    if _ref is not None:
+        ref_mean, ref_std = _ref
+    else:
+        ref_mean, ref_std = _cheek_lab_stats(
+            orig_np, head_x0, head_y0, head_x1, head_y1
+        )
     info["ref_lab_mean"] = [round(float(x), 2) for x in ref_mean]
 
     weight = _skin_likeness(result_np, ref_mean, ref_std)
@@ -502,9 +550,17 @@ def extend_skin_harmonization(
     # ------------------------------------------------------------------
     # 3. Donor tone (target of the shift) + this body's current skin stats
     # ------------------------------------------------------------------
-    tgt_mean, tgt_std = _cheek_lab_stats(
+    _tgt = _face_skin_lab_stats(
         result_np, head_x0, head_y0, head_x1, head_y1
     )
+    if _tgt is not None:
+        tgt_mean, tgt_std = _tgt
+        info["tgt_source"] = "face_skin_pixels"
+    else:
+        tgt_mean, tgt_std = _cheek_lab_stats(
+            result_np, head_x0, head_y0, head_x1, head_y1
+        )
+        info["tgt_source"] = "cheek_rect_fallback"
     sel = weight > 0.35
     if int(sel.sum()) < 300:
         sel = weight > 0.15
