@@ -335,6 +335,7 @@ def extend_skin_harmonization(
     feather_px: int = 20,
     transfer_strength: float = 0.80,
     luminance_preserve: float = 0.85,
+    neck_ramp_frac: float = 0.35,
 ) -> tuple[Image.Image, dict]:
     """
     Shift body-skin tone to match the donor head already composited into
@@ -426,6 +427,21 @@ def extend_skin_harmonization(
     # (pair1) and 11 (pair2) before this reorder, violating the byte-
     # identical guarantee this function promises.
     weight[:head_excl] = 0.0
+    # Ease the transfer in over the rows just below the head instead of
+    # switching it on in a single row. The head region receives NO transfer by
+    # design (it must stay byte-identical), so a hard cut puts full-strength
+    # recolouring immediately against untouched pixels: with a large shift
+    # (measured -27.6 L on the robed figure) that boundary renders as a dark
+    # band under the chin. The ramp spans a fraction of head height, so it
+    # scales with the subject rather than being a fixed pixel count.
+    ramp_rows = max(1, int(head_h * float(neck_ramp_frac)))
+    r0, r1 = head_excl, min(H, head_excl + ramp_rows)
+    if r1 > r0:
+        ramp = np.linspace(0.0, 1.0, r1 - r0, dtype=np.float32)
+        # smoothstep so both ends meet their neighbours with zero slope
+        ramp = ramp * ramp * (3.0 - 2.0 * ramp)
+        weight[r0:r1] *= ramp[:, None]
+    info["neck_ramp_rows"] = int(ramp_rows)
     weight = np.clip(weight, 0.0, 1.0)
 
     # Report what the transfer will actually DO, not just how many pixels it
