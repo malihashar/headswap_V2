@@ -4222,10 +4222,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
         prompt = (
             "Replace the person's entire head in the first image with the "
             "head of the person from the second image. Use the second "
-            "person's face, facial features, hairstyle, hair colour, hair "
-            "length and hairline. Remove any hat, headwear or head covering "
-            "the first person is wearing, and do not keep any of the first "
-            "person's own hair. "
+            "person's face and facial features, and reproduce whatever is on "
+            "the second person's head exactly as it appears there: if their "
+            "hair is visible, copy its style, colour, length and hairline; "
+            "if they are wearing a hat, cap, or any head covering, KEEP that "
+            "head covering on the new head -- do not remove it and do not "
+            "replace it with hair or a bare scalp. Remove only the hat, "
+            "headwear or head covering that the FIRST person is wearing, and "
+            "do not keep any of the first person's own hair. "
             # Naming body parts as "bare skin" (shoulders, arms, legs...) made
             # the model treat them AS bare and strip the garment -- a robed
             # figure came back with a naked torso. State the clothing
@@ -4408,6 +4412,28 @@ class Krea2IdentityEditPipeline(BasePipeline):
             if ramp_lo > ramp_hi:
                 col = np.linspace(1.0, 0.0, ramp_lo - ramp_hi, dtype=np.float32)
                 keep[ramp_hi:ramp_lo] = col[:, None]
+            # Restrict the generated region to a column around the head.
+            # The ramp above is a horizontal cut across the FULL width, so any
+            # body part crossing it gets its top half from the regenerated
+            # frame and its bottom half from the original -- and since
+            # simple_full_body regenerates the whole image, the model is free
+            # to shift a shoulder, so the halves need not line up. Measured on
+            # the athlete: face box [462,20,639,246] -> ramp_lo = 246 +
+            # 1.10*226 = 494 in a 576-tall frame, landing straight through
+            # both arms (which span y~250-576). That is the misaligned arm.
+            # Limbs sit outside a head-width column, so gating on x keeps them
+            # wholly original and leaves nothing to misalign.
+            fx0, fx1 = int(selected_face.x0), int(selected_face.x1)
+            fw = max(1, fx1 - fx0)
+            cx = 0.5 * (fx0 + fx1)
+            half = float(self.cfg.get("simple_full_body_head_col_frac", 1.35)) * fw
+            soft = max(4.0, 0.35 * fw)
+            xs = np.arange(W2, dtype=np.float32)
+            col_w = np.clip((half + soft - np.abs(xs - cx)) / soft, 0.0, 1.0)
+            keep *= col_w[None, :]
+            body_restore_col = (
+                int(max(0, cx - half - soft)), int(min(W2, cx + half + soft))
+            )
             kk = max(3, int(W2 * 0.02) * 2 + 1)
             keep = cv2.GaussianBlur(keep, (kk, kk), 0)[..., None]
             gen_np = np.asarray(out.convert("RGB"), dtype=np.float32)
@@ -4419,11 +4445,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "applied": True,
                 "ramp_hi": ramp_hi,
                 "ramp_lo": ramp_lo,
+                "head_col": list(body_restore_col),
             }
             print(
-                f"[krea2 body_restore] original body kept below y={ramp_lo} "
-                f"(ramp from y={ramp_hi}); clothing/shoulders/background "
-                "cannot be altered by the head swap",
+                f"[krea2 body_restore] generated region = head column "
+                f"x={body_restore_col[0]}..{body_restore_col[1]}, above "
+                f"y={ramp_lo} (ramp from y={ramp_hi}); arms/clothing/"
+                "background stay original so no limb is split across the seam",
                 flush=True,
             )
 
