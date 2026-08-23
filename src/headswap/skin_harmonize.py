@@ -154,6 +154,7 @@ def _skin_likeness(
     *,
     tolerance: float = 2.6,
     knee: float = 0.22,
+    confident: float = 0.45,
 ) -> np.ndarray:
     """Continuous 0..1 "how much does this pixel look like the reference skin".
 
@@ -189,13 +190,26 @@ def _skin_likeness(
     # -- their a/b sit near neutral and can score as "skin" by accident.
     L = lab[:, :, 0]
     w *= np.clip((L - 8.0) / 18.0, 0.0, 1.0)
-    # Soft knee: drive weak matches (clothing that merely isn't far away) to
-    # exactly zero, while keeping the ramp continuous above the knee so no
-    # hard edge is introduced. Without it, fabric sitting at w~0.2-0.3 picks
-    # up a faint tint over a large area, which reads as the whole garment
-    # having shifted colour.
-    w = (w - knee) / max(1e-6, 1.0 - knee)
-    return np.clip(w, 0.0, 1.0)
+    # Map the raw score onto [0,1] between `knee` (definitely not skin) and
+    # `confident` (definitely skin, transfer fully).
+    #
+    # This previously divided by (1.0 - knee), i.e. it only reached 1.0 for a
+    # pixel scoring an exact 1.0 -- which exp(-d^2/..) essentially never
+    # returns, since that needs chroma *identical* to the reference. Real skin
+    # scored 0.3-0.6 and so only ever travelled 30-60% of the way to the donor
+    # tone. That single line caused both remaining artifacts:
+    #   * arms/hands stayed visibly near their original tone, and
+    #   * a step at the head-exclusion line, because pixels above it are 100%
+    #     generated donor face while pixels just below were only ~40% shifted.
+    # The step was a difference in TRANSFER DISTANCE, not a spatial mask edge,
+    # which is why widening feathers never removed it.
+    #
+    # Saturating at `confident` means the neck lands on the same tone as the
+    # face it meets, so the two sides converge instead of stepping.
+    w = (w - knee) / max(1e-6, confident - knee)
+    w = np.clip(w, 0.0, 1.0)
+    # Smoothstep: C1-continuous at both ends, so saturation adds no hard edge.
+    return w * w * (3.0 - 2.0 * w)
 
 
 def _robust_lab_stats(flat_lab: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
