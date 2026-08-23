@@ -4169,15 +4169,35 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # and that the target's headwear goes away. "Replace the head, face
         # and hair" alone left the target's own hat/hair partly surviving as
         # dark fragments around the new head.
+        # Skin tone is asked for HERE rather than fixed afterwards.
+        #
+        # This prompt used to end "keep ... pose, body, clothing, background
+        # and lighting unchanged", which explicitly instructed the model to
+        # preserve the target's body -- including its skin tone -- and the
+        # pipeline then tried to overpower that instruction with a masked LAB
+        # transfer downstream. That is why round after round of mask/threshold
+        # tuning kept failing: the masking was fighting the model's own
+        # instruction, not a bug in the mask.
+        #
+        # Letting the model do it is also strictly better than any masked
+        # recolour can be: a post-hoc transfer changes colour inside a region
+        # and not outside it, so SOME boundary always exists (every previous
+        # attempt moved the seam rather than removing it). The model has no
+        # mask at all, and renders the new tone under the photo's real
+        # lighting, so shading and shadow terminators stay physically right.
         prompt = (
             "Replace the person's entire head in the first image with the "
             "head of the person from the second image. Use the second "
             "person's face, facial features, hairstyle, hair colour, hair "
             "length and hairline. Remove any hat, headwear or head covering "
             "the first person is wearing, and do not keep any of the first "
-            "person's own hair. Keep everything else in the first image "
-            "exactly the same: pose, body, clothing, background and lighting "
-            "unchanged."
+            "person's own hair. The body must also take on the second "
+            "person's skin colour: every area of bare skin that is visible "
+            "-- neck, shoulders, arms, hands, legs and feet -- must match "
+            "the second person's complexion exactly, so the result looks "
+            "like one single person rather than one person's head on "
+            "another person's body. Keep the pose, body shape, clothing, "
+            "background and lighting exactly the same."
         )
 
         with _stage(timings, "sampling"):
@@ -5594,6 +5614,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "body_route": body_route_meta,
             "full_frame_face_refine": face_prep_diag.get("full_frame_face_refine"),
             "head_direction_relock": face_prep_diag.get("head_direction_relock"),
+            # Surface under the SAME key simple_full_body uses. crop_stitch
+            # filed this only under face_prep_diag, so every crop_stitch run
+            # reported skin src/tgt as None and this path was being debugged
+            # blind -- its actual transfer numbers were never once visible.
+            "skin_harmonize": face_prep_diag.get("skin_harmonization"),
             "face_detection_backend": str(
                 self.cfg.get("face_detection_backend", "current") or "current"
             ),

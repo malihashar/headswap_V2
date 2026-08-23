@@ -387,6 +387,22 @@ def extend_skin_harmonization(
     weight[:head_excl] = 0.0
     weight = np.clip(weight, 0.0, 1.0)
 
+    # Report what the transfer will actually DO, not just how many pixels it
+    # selected. A high skin_px with a near-zero mean weight means "selected a
+    # lot, changed almost nothing" -- indistinguishable from "didn't run" in
+    # the output image, which is exactly the state that kept being misread as
+    # a masking failure. matte_frac catches the other candidate: on a photo
+    # whose background is a blurred crowd (skin-coloured), a person matte that
+    # leaks would drag src_mean toward the background and flatten the shift.
+    _sel = weight > 0.15
+    info["weight_mean_over_selected"] = (
+        round(float(weight[_sel].mean()), 3) if _sel.any() else 0.0
+    )
+    info["weight_frac_full"] = round(float((weight > 0.9).mean()), 4)
+    info["matte_frac"] = round(
+        float((person_matte > 16).mean()), 4
+    )
+
     skin_px = int((weight > 0.15).sum())
     info["skin_px"] = skin_px
     _t = H // 3
@@ -402,7 +418,10 @@ def extend_skin_harmonization(
     print(
         f"[skin_harm] weighted skin_px={skin_px} coverage "
         f"upper={info['cover_upper']} mid={info['cover_mid']} "
-        f"lower={info['cover_lower']}",
+        f"lower={info['cover_lower']} "
+        f"w_mean={info['weight_mean_over_selected']} "
+        f"w_full_frac={info['weight_frac_full']} "
+        f"matte_frac={info['matte_frac']}",
         flush=True,
     )
     if skin_px < 300:
@@ -423,6 +442,17 @@ def extend_skin_harmonization(
     src_mean, src_std = _robust_lab_stats(lab_all[sel])
     info["src_lab_mean"] = [round(float(x), 2) for x in src_mean]
     info["tgt_lab_mean"] = [round(float(x), 2) for x in tgt_mean]
+    # The L shift a fully-weighted pixel receives, scaled by the mean weight
+    # actually applied. This is the single number that says whether the result
+    # can look different: a large src->tgt gap still produces no visible change
+    # if the mean weight is small, and that combination is precisely what has
+    # been misdiagnosed as a mask problem repeatedly.
+    info["effective_dL"] = round(
+        float(tgt_mean[0] - src_mean[0])
+        * float(info.get("weight_mean_over_selected", 0.0))
+        * float(transfer_strength),
+        2,
+    )
 
     # ------------------------------------------------------------------
     # 4. Chroma-led transfer, modulated by the continuous weight
@@ -464,7 +494,10 @@ def extend_skin_harmonization(
 
     info["applied"] = True
     print(
-        f"[skin_harm] done — strength={transfer_strength} feather={feather_px}px",
+        f"[skin_harm] done — strength={transfer_strength} feather={feather_px}px "
+        f"| L {info.get('src_lab_mean',[None])[0]} -> "
+        f"{info.get('tgt_lab_mean',[None])[0]} "
+        f"(effective dL={info.get('effective_dL')})",
         flush=True,
     )
     return Image.fromarray(result_np), info
