@@ -618,7 +618,13 @@ preserve_headwear: false
 extend_skin_harmonization: true
 skin_harmony_body_visible_thresh: 0.09   # min fraction of person px below head
 skin_harmony_feather_px: 20              # mask blur radius at sleeve/collar edges
-skin_harmony_transfer_strength: 0.80    # blend weight (0=off, 1=full transfer)
+# Raised from 0.80 (2026-08-18): GPU-confirmed the change was too subtle to
+# read as "recolored" on real renders. transfer_strength multiplies the
+# per-pixel skin-likeness weight, which is already <1 for most real skin
+# pixels (a moderately-confident match, e.g. an arm in harsher light, scored
+# ~0.36 in local testing) -- at 0.80 that only reaches ~29% blend opacity.
+# 1.0 = don't discount an already-uncertain match a second time.
+skin_harmony_transfer_strength: 1.0    # blend weight (0=off, 1=full transfer)
 
 head_direction_roll_deg_thresh: 3.0
 head_direction_yaw_thresh: 0.12

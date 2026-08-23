@@ -364,6 +364,13 @@ def extend_skin_harmonization(
     # there is no boundary for it to reveal.
     blur_k = max(3, (int(max(H, W) * 0.02) * 2 + 1))
     weight = cv2.GaussianBlur(weight, (blur_k, blur_k), 0)
+    # Re-zero AFTER the blur. Blurring smears nonzero weight from just below
+    # head_excl back up across the line -- the same "hard-zero, then blur"
+    # ordering bug diagnosed earlier this session for the isolated-layer
+    # composite mask. GPU-confirmed here too: head region max_diff was 19
+    # (pair1) and 11 (pair2) before this reorder, violating the byte-
+    # identical guarantee this function promises.
+    weight[:head_excl] = 0.0
     weight = np.clip(weight, 0.0, 1.0)
 
     skin_px = int((weight > 0.15).sum())
