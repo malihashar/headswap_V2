@@ -154,7 +154,7 @@ def _skin_likeness(
     *,
     tolerance: float = 2.6,
     knee: float = 0.22,
-    confident: float = 0.45,
+    confident: float = 0.35,
 ) -> np.ndarray:
     """Continuous 0..1 "how much does this pixel look like the reference skin".
 
@@ -206,6 +206,13 @@ def _skin_likeness(
     #
     # Saturating at `confident` means the neck lands on the same tone as the
     # face it meets, so the two sides converge instead of stepping.
+    #
+    # `confident` also sets HOW MUCH of the transfer actually lands: with it
+    # at 0.45 the mean applied weight measured 0.681, so a correct +38 L
+    # target only delivered +26 and the arms read as under-corrected. At 0.35
+    # a shadowed arm scoring 0.356 goes 0.64 -> 1.00. `knee` is unchanged, so
+    # clothing is unaffected: the vest (0.06) and robe (0.00) still map to
+    # exactly 0.00.
     w = (w - knee) / max(1e-6, confident - knee)
     w = np.clip(w, 0.0, 1.0)
     # Smoothstep: C1-continuous at both ends, so saturation adds no hard edge.
