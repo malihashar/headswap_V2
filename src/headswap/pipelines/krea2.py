@@ -4460,9 +4460,30 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # L=74 when harmonization ran. Clothes and background are
                 # still excluded here, so garments/pose/background continue to
                 # come back from the original verbatim.
+                from headswap.skin_harmonize import (  # noqa: PLC0415
+                    semantic_head_mask as _sem_head_only,
+                )
                 _head = semantic_person_skin_mask(
                     np.asarray(out.convert("RGB"), dtype=np.uint8)
                 )
+                # Union in the ORIGINAL head region. The mask above is derived
+                # from the GENERATED frame, so it only covers where the DONOR's
+                # hair ended up. Anywhere the original person's hair was and the
+                # donor's is not falls outside it and gets restored verbatim --
+                # which puts the original hairstyle back around the new head.
+                # Overwriting the original head footprint with generated pixels
+                # is what actually removes the old hair.
+                _orig_head = _sem_head_only(
+                    np.asarray(body_full.convert("RGB"), dtype=np.uint8)
+                )
+                if _head is not None and _orig_head is not None:
+                    _head = np.maximum(_head, _orig_head)
+                    print(
+                        f"[krea2 body_restore] unioned ORIGINAL head footprint "
+                        f"({int((_orig_head > 0.5).sum())}px) into the keep mask "
+                        "so the previous person's hair is replaced, not restored",
+                        flush=True,
+                    )
             except Exception as _sexc:  # noqa: BLE001
                 # Was a bare swallow. That made an exception here look
                 # identical to "segmenter unavailable" and to "mask below
