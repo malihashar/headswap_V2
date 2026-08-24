@@ -4451,8 +4451,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 _head = semantic_person_skin_mask(
                     np.asarray(out.convert("RGB"), dtype=np.uint8)
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as _sexc:  # noqa: BLE001
+                # Was a bare swallow. That made an exception here look
+                # identical to "segmenter unavailable" and to "mask below
+                # threshold" -- three different causes, one silent outcome,
+                # and a log message that asserted the wrong one.
                 _head = None
+                _head_fail = f"exception: {type(_sexc).__name__}: {_sexc}"
+                print(f"[krea2 body_restore] person-skin mask FAILED - {_head_fail}", flush=True)
+            else:
+                _head_fail = None
             _W3, _H3 = out.size
             _fh3 = max(1, int(selected_face.y1) - int(selected_face.y0))
             _fw3 = max(1, int(selected_face.x1) - int(selected_face.x0))
@@ -4461,6 +4469,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # edit, so demand it cover a real fraction of the face box before
             # trusting it.
             _need = 0.25 * _fh3 * _fw3
+            if _head is not None:
+                _got = float((_head > 0.5).sum())
+                if _got < _need:
+                    _head_fail = (
+                        f"mask too small: {int(_got)}px < required "
+                        f"{int(_need)}px (25% of the {_fw3}x{_fh3} face box)"
+                    )
+                    print(
+                        f"[krea2 body_restore] person-skin mask REJECTED - {_head_fail}",
+                        flush=True,
+                    )
+            elif _head_fail is None:
+                _head_fail = "semantic_person_skin_mask returned None"
+                print(f"[krea2 body_restore] person-skin mask unavailable - {_head_fail}", flush=True)
             if _head is not None and float((_head > 0.5).sum()) >= _need:
                 _grow = max(3, int(0.10 * _fh3) * 2 + 1)
                 _hm = cv2.dilate(
@@ -4632,10 +4654,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
         else:
             print(
-                "[krea2 skin] LAB wash ON - person-skin restore did not run "
-                "(semantic segmenter unavailable), so the ORIGINAL body was "
-                "restored and the model's skin was discarded. Falling back to "
-                "the wash so the skin still changes.",
+                "[krea2 skin] LAB wash ON - person-skin restore did not run, "
+                f"so the ORIGINAL body was restored and the model's skin was "
+                f"discarded. Measured reason: "
+                f"{locals().get('_head_fail') or 'restore disabled or no face'}. "
+                "Falling back to the wash so the skin still changes.",
                 flush=True,
             )
         if bool(self.cfg.get("simple_full_body_skin_harmonize", _wash_default)) and selected_face is not None:
