@@ -752,3 +752,13 @@ simple_full_body_restore_body: true
 simple_full_body_neck_keep_frac: 0.35
 # ...then ramp to fully-original by this fraction below the chin.
 simple_full_body_shoulder_frac: 1.10
+
+# Bottom extent of the face-refine blend mask, as a fraction of face height.
+# Deliberately NOT mask_bot_extend (0.40): that is tuned for crop_stitch where
+# the face is a small part of the frame. In simple_full_body the face can be a
+# third of the frame, so 0.40 reaches past the chin onto the shoulders -- and
+# since the refine is a separate generation, it then composites a second,
+# different render of the shoulder over the main frame (measured: mask reached
+# y=327 with shoulders starting ~y=300). Keep this small so the refine stays
+# on the face and neck.
+refine_mask_bot_extend: 0.12

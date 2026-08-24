@@ -4350,6 +4350,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     refined_crop = refined_crop.resize(
                         refine_native_size, Image.Resampling.LANCZOS
                     )
+                # The refine mask needs its OWN bottom extent, not
+                # mask_bot_extend. That value (0.40) is tuned for crop_stitch,
+                # where the face is a small part of the frame; here the face
+                # can be a third of it, so 0.40 * face_height reaches far past
+                # the chin. Measured on the athlete (face 192px, chin ~y=250):
+                # the mask reached y=327 while the shoulders start ~y=300, so
+                # the refine -- which is a SEPARATE generation from the
+                # pristine crop -- composited its own different render of the
+                # shoulder over the main frame. That is the offset shoulder
+                # edge, and it survives even with body_restore skipped because
+                # it is a different composite entirely.
+                refine_bot_ext = float(
+                    self.cfg.get("refine_mask_bot_extend", 0.12)
+                )
                 face_mask, mask_info = build_head_hair_mask(
                     out,
                     self.cache_dir,
@@ -4359,7 +4373,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     blur_px=int(self.cfg.get("mask_blur_px", 12)),
                     top_extend=top_ext,
                     side_extend=side_ext,
-                    bot_extend=bot_ext,
+                    bot_extend=refine_bot_ext,
+                )
+                _fh_r = max(1, int(selected_face.y1) - int(selected_face.y0))
+                print(
+                    f"[krea2 face_refine] mask bot_extend={refine_bot_ext} "
+                    f"-> reaches y={int(selected_face.y1) + refine_bot_ext * _fh_r:.0f} "
+                    f"(chin y={int(selected_face.y1)}); keeps the refine off the "
+                    "shoulders so it cannot composite a second render of them",
+                    flush=True,
                 )
                 out = feathered_soft_composite(
                     out,
@@ -4372,6 +4394,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     "applied": True,
                     "box": list(refine_box),
                     "mask_backend": mask_info.get("requested_backend"),
+                    "mask_bot_extend": refine_bot_ext,
                 }
         else:
             refine_diag["reason"] = "disabled"
