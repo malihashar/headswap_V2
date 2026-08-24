@@ -4174,6 +4174,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
         a single plain instruction, and accepts whatever it produces
         directly, rather than trying to correct it after the fact.
         """
+        # Hoisted to the TOP of the function on purpose. These used to be
+        # imported inside a later block, which makes `np`/`cv2` local to the
+        # WHOLE function scope -- so any earlier use raised
+        # UnboundLocalError: cannot access local variable 'np'. That is
+        # exactly what happened to the person-skin restore: it was caught by
+        # a bare except, reported as "segmenter unavailable", and silently
+        # never ran on a single image. There is no module-level numpy/cv2
+        # import in this file to fall back on.
+        import cv2  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
+
         t0 = time.perf_counter()
         timings: dict[str, float] = {}
         rt = self._ensure_runtime(timings)
@@ -4540,8 +4551,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if selected_face is not None and not _head_restored and not _bust_skip and bool(
             self.cfg.get("simple_full_body_restore_body", True)
         ):
-            import cv2  # noqa: PLC0415
-            import numpy as np  # noqa: PLC0415
 
             fh = max(1, int(selected_face.y1) - int(selected_face.y0))
             W2, H2 = out.size
