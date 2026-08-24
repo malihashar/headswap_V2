@@ -589,17 +589,37 @@ def extend_skin_harmonization(
     _sem = _semantic_skin_mask(result_np)
     info["semantic_skin"] = _sem is not None
     if _sem is not None:
-        # Soften the class boundary so the gate never contributes a hard edge
-        # of its own, then keep a floor of 0 outside skin: clothing must go to
-        # zero, not merely be attenuated.
-        _k = max(3, (int(max(H, W) * 0.01) * 2 + 1))
-        _sem = cv2.GaussianBlur(_sem, (_k, _k), 0)
-        weight *= np.clip(_sem, 0.0, 1.0)
-        print(
-            f"[skin_harm] semantic skin gate applied "
-            f"(skin px={int((_sem > 0.5).sum())})",
-            flush=True,
-        )
+        # Sanity-check the gate before trusting it to veto. Measured on the
+        # athlete: the segmenter returned 79k CLOTHES pixels but ZERO skin, so
+        # multiplying by it zeroed the whole weight field and the recolour was
+        # silently skipped ("too_few_skin_px") -- the arms simply never
+        # changed. A gate that finds no skin at all on a person with a bare
+        # face and arms is wrong, not authoritative, so fall back to the
+        # colour-only weight rather than letting it suppress everything.
+        _sem_px = int((_sem > 0.5).sum())
+        _sem_frac = _sem_px / float(max(1, H * W))
+        _min_frac = 0.005
+        if _sem_frac < _min_frac:
+            info["semantic_skin"] = False
+            info["semantic_skin_rejected"] = round(_sem_frac, 5)
+            print(
+                f"[skin_harm] semantic gate REJECTED - it found only "
+                f"{_sem_px}px ({_sem_frac:.3%}) of skin, below {_min_frac:.1%}. "
+                "Treating that as a segmenter failure, not as 'no skin here'; "
+                "falling back to colour-only weighting so the recolour still runs.",
+                flush=True,
+            )
+        else:
+            # Soften the class boundary so the gate never contributes a hard
+            # edge of its own, then keep a floor of 0 outside skin: clothing
+            # must go to zero, not merely be attenuated.
+            _k = max(3, (int(max(H, W) * 0.01) * 2 + 1))
+            _sem = cv2.GaussianBlur(_sem, (_k, _k), 0)
+            weight *= np.clip(_sem, 0.0, 1.0)
+            print(
+                f"[skin_harm] semantic skin gate applied (skin px={_sem_px})",
+                flush=True,
+            )
     weight[:head_excl] = 0.0
     # Smooth the weight field itself. This is the only "feather" now, and it
     # is applied to a continuous field rather than to a hard mask edge, so

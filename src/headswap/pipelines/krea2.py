@@ -4391,7 +4391,36 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # chin (keep the generated neck -- it carries the donor's skin) down
         # to roughly the shoulder line, then keeps the original verbatim.
         body_restore_diag: dict[str, Any] = {"applied": False}
-        if selected_face is not None and bool(
+        # body_restore protects a body that is FAR from the head -- the robed
+        # full-body case, where the face is ~8% of the frame and the model
+        # would otherwise redraw distant clothing/shoulders. On a bust shot
+        # the face is ~40% of the frame: the frame IS head and shoulders, so
+        # every restore boundary necessarily cuts through the subject.
+        # Measured on the athlete (face 228px of 576 = 39.6%): the shoulders
+        # sit inside the vertical fade band (y=354..498) AND cross both column
+        # edges (x=272, x=854), which is the misaligned shoulder. There is no
+        # distant body to protect here, so skip it and keep the model's own
+        # coherent frame.
+        _bust_skip = False
+        if selected_face is not None:
+            _fh_frac = (int(selected_face.y1) - int(selected_face.y0)) / max(1, out.size[1])
+            _bust_skip = _fh_frac > float(
+                self.cfg.get("simple_full_body_restore_max_face_frac", 0.25)
+            )
+            if _bust_skip:
+                body_restore_diag = {
+                    "applied": False,
+                    "reason": f"bust_shot face_frac={_fh_frac:.3f} > 0.25 "
+                              "(no distant body to protect; restoring would "
+                              "cut through the shoulders)",
+                }
+                print(
+                    f"[krea2 body_restore] SKIPPED - bust shot "
+                    f"(face is {_fh_frac:.1%} of frame). Any restore seam would "
+                    "cross the shoulders; keeping the model's coherent frame.",
+                    flush=True,
+                )
+        if selected_face is not None and not _bust_skip and bool(
             self.cfg.get("simple_full_body_restore_body", True)
         ):
             import cv2  # noqa: PLC0415
