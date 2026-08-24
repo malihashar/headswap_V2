@@ -629,11 +629,29 @@ def extend_skin_harmonization(
         if _sem_frac < _min_frac:
             info["semantic_skin"] = False
             info["semantic_skin_rejected"] = round(_sem_frac, 5)
+            # Colour-only weighting on its own is NOT a safe fallback: chroma
+            # distance alone scores this athlete's blue/purple jersey at
+            # weight 1.00 (its raw score, 0.46, still clears the knee). That
+            # measurably wrecked the result -- mask area went 78,938 ->
+            # 150,626 px, src b-channel 149 -> 130 as jersey pixels entered
+            # the statistics, and the computed shift collapsed from +21.6 to
+            # +5.9, so the body barely changed colour at all.
+            #
+            # Re-apply the HSV skin heuristic that the semantic gate had been
+            # standing in for. It discriminates on HUE, which is exactly what
+            # separates skin from a blue/purple garment: tan (h=12) and pale
+            # (h=13) skin pass, blue (h=124) and purple (h=138) are rejected.
+            _hsv = _hsv_skin_mask(result_np).astype(np.float32) / 255.0
+            _hk = max(3, (int(max(H, W) * 0.01) * 2 + 1))
+            _hsv = cv2.GaussianBlur(_hsv, (_hk, _hk), 0)
+            weight *= np.clip(_hsv, 0.0, 1.0)
+            info["semantic_skin_fallback"] = "hsv_hue"
             print(
                 f"[skin_harm] semantic gate REJECTED - it found only "
                 f"{_sem_px}px ({_sem_frac:.3%}) of skin, below {_min_frac:.1%}. "
-                "Treating that as a segmenter failure, not as 'no skin here'; "
-                "falling back to colour-only weighting so the recolour still runs.",
+                "Treating that as a segmenter failure, not as 'no skin here'. "
+                "Falling back to colour + HSV-hue weighting (hue rejects the "
+                "blue/purple jersey that chroma alone scored as skin).",
                 flush=True,
             )
         else:
