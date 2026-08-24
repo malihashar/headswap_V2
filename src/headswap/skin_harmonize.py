@@ -159,8 +159,26 @@ def _semantic_category_mask(rgb_np: np.ndarray) -> np.ndarray | None:
     """Raw per-pixel class ids from the multiclass selfie segmenter."""
     import os as _os  # noqa: PLC0415
 
-    model_path = next((q for q in _SEM_MODEL_PATHS if _os.path.exists(q)), None)
+    model_path = next(
+        (q for q in _SEM_MODEL_PATHS
+         if _os.path.exists(q) and _os.path.getsize(q) > 100_000),
+        None,
+    )
     if model_path is None:
+        # Loud, not silent. A missing/truncated model made every semantic
+        # call return None, which silently downgraded compositing to the
+        # column fallback -- and with the LAB wash off that produced a run
+        # where the skin changed by nothing at all and nothing said why.
+        # Size-check too: a failed curl leaves a short HTML error body that
+        # exists() would happily accept.
+        _found = [(q, _os.path.getsize(q)) for q in _SEM_MODEL_PATHS if _os.path.exists(q)]
+        print(
+            "[skin_harm] semantic segmenter model NOT usable -- searched "
+            f"{list(_SEM_MODEL_PATHS)}, found {_found or 'nothing'}. "
+            "Skin-vs-clothes separation is unavailable this run; re-run "
+            "scripts/setup_colab.sh to fetch selfie_multiclass_256x256.tflite.",
+            flush=True,
+        )
         return None
     try:
         import mediapipe as mp  # noqa: PLC0415

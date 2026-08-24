@@ -212,13 +212,24 @@ python -c "import mediapipe" 2>/dev/null \
 # region measured L=197, i.e. the garment) by 59 L-points.
 echo "-> Downloading selfie multiclass segmenter (skin vs clothes)..."
 mkdir -p /content/models
-if [ ! -f /content/models/selfie_multiclass_256x256.tflite ]; then
-  curl -sSL -o /content/models/selfie_multiclass_256x256.tflite \
+SEG_TFLITE=/content/models/selfie_multiclass_256x256.tflite
+# Verify by SIZE, not just existence: a failed curl leaves a short HTML error
+# body behind, which -f would accept and the pipeline would then treat as a
+# working model. Observed downstream as a run where the semantic restore
+# silently fell back and the skin changed by nothing at all.
+if [ ! -f "$SEG_TFLITE" ] || [ "$(wc -c < "$SEG_TFLITE")" -lt 100000 ]; then
+  rm -f "$SEG_TFLITE"
+  curl -fsSL --retry 3 --retry-delay 2 -o "$SEG_TFLITE" \
     "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite" \
-    && echo "   selfie multiclass segmenter OK" \
-    || echo "   WARN: segmenter download failed; skin harmonization may recolour skin-coloured clothing"
+    || echo "   WARN: segmenter download failed"
+fi
+if [ -f "$SEG_TFLITE" ] && [ "$(wc -c < "$SEG_TFLITE")" -ge 100000 ]; then
+  echo "   selfie multiclass segmenter OK ($(wc -c < "$SEG_TFLITE") bytes)"
 else
-  echo "   selfie multiclass segmenter already present"
+  rm -f "$SEG_TFLITE"
+  echo "   WARN: segmenter UNUSABLE - skin/clothes separation will be off,"
+  echo "         the original body will be restored, and the pipeline will"
+  echo "         fall back to the LAB wash for skin tone."
 fi
 
 echo "Setup complete."

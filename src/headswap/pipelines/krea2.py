@@ -4614,7 +4614,31 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # skin rather than as skin -- which is exactly the "painted on" look.
         # Left available for the crop_stitch route, where the model never sees
         # the body and so cannot recolour it.
-        if bool(self.cfg.get("simple_full_body_skin_harmonize", False)) and selected_face is not None:
+        # The LAB wash is off ONLY when the person-skin restore actually ran,
+        # because that is the case where the model's own rendered skin
+        # survives into the output. If the semantic segmenter was unavailable
+        # we fall back to a restore that puts the ORIGINAL body back -- and
+        # with the wash also off, the skin would then change by nothing at
+        # all, silently. GPU-observed exactly that: body_restore reported the
+        # column fallback (head_col/ramp_hi/ramp_lo) and skin_applied=False,
+        # so neither mechanism touched the skin. Re-enable the wash whenever
+        # the model's skin did NOT survive, so this can never no-op.
+        _wash_default = not _head_restored
+        if _head_restored:
+            print(
+                "[krea2 skin] LAB wash OFF - the model's own rendered skin "
+                "survived the restore, which is the natural-looking source.",
+                flush=True,
+            )
+        else:
+            print(
+                "[krea2 skin] LAB wash ON - person-skin restore did not run "
+                "(semantic segmenter unavailable), so the ORIGINAL body was "
+                "restored and the model's skin was discarded. Falling back to "
+                "the wash so the skin still changes.",
+                flush=True,
+            )
+        if bool(self.cfg.get("simple_full_body_skin_harmonize", _wash_default)) and selected_face is not None:
             try:
                 from headswap.skin_harmonize import extend_skin_harmonization
 
