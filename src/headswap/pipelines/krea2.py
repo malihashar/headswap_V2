@@ -4533,6 +4533,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # again -- the same zero-then-blur ordering trap as the head
                 # exclusion), so background stays 100% original.
                 _pm = semantic_person_mask(np.asarray(out.convert("RGB"), dtype=np.uint8))
+                # Clamp to BOTH silhouettes, not just the generated one. The
+                # pixels the original-head union exists to cover are, by
+                # definition, background in the GENERATED frame (the old hair
+                # is there, the donor's is not) -- so clamping to the
+                # generated person mask alone zeroed exactly those and the
+                # previous hairstyle came back. Only pixels outside BOTH
+                # silhouettes are true background, which is what the halo fix
+                # actually needs to protect.
+                _pm_orig = semantic_person_mask(
+                    np.asarray(body_full.convert("RGB"), dtype=np.uint8)
+                )
+                if _pm is not None and _pm_orig is not None:
+                    _pm = np.maximum(_pm, _pm_orig)
+                elif _pm is None:
+                    _pm = _pm_orig
                 if _pm is not None:
                     _pm = cv2.GaussianBlur(_pm.astype(np.float32), (3, 3), 0)
                     _before = float(_hm.sum())
