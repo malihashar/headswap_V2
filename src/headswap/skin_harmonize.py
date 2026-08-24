@@ -209,6 +209,40 @@ def semantic_head_mask(rgb_np: np.ndarray) -> np.ndarray | None:
     return np.clip(m, 0.0, 1.0)
 
 
+def semantic_person_skin_mask(rgb_np: np.ndarray) -> np.ndarray | None:
+    """Per-pixel P(head OR bare skin) = hair + face-skin + body-skin +
+    accessories, or None.
+
+    This is the region the GENERATED image should win, so the model's own
+    skin rendering survives compositing.
+
+    The head-silhouette restore kept the generated pixels only inside the
+    head and restored the ORIGINAL everywhere else -- which discarded every
+    bit of skin the model had just recoloured, then a LAB wash was painted
+    onto those restored original pixels. Measured on the full-body case:
+    by the time harmonization ran, the legs were still at their ORIGINAL
+    L=74, because the model's version had already been thrown away one step
+    earlier. That is why the result reads as tinted skin rather than skin --
+    a mean-shift adds a uniform offset and preserves luminance, so dark legs
+    stay dark and merely change hue. No strength setting can fix that; only
+    keeping the model's render can, because it carries the right luminance,
+    shadow terminators and subsurface look.
+
+    Clothes (4) and background (0) are deliberately excluded, so garments,
+    pose and background still come back from the original verbatim.
+    """
+    cat = _semantic_category_mask(rgb_np)
+    if cat is None:
+        return None
+    m = np.isin(
+        cat, (_SEM_HAIR, _SEM_FACE_SKIN, _SEM_BODY_SKIN, _SEM_OTHERS)
+    ).astype(np.float32)
+    if m.shape != rgb_np.shape[:2]:
+        m = cv2.resize(m, (rgb_np.shape[1], rgb_np.shape[0]),
+                       interpolation=cv2.INTER_LINEAR)
+    return np.clip(m, 0.0, 1.0)
+
+
 _SEM_CLOTHES = 4
 
 

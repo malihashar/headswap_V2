@@ -4439,9 +4439,16 @@ class Krea2IdentityEditPipeline(BasePipeline):
         ):
             try:
                 from headswap.skin_harmonize import (  # noqa: PLC0415
-                    semantic_head_mask,
+                    semantic_person_skin_mask,
                 )
-                _head = semantic_head_mask(
+                # Keep the generated HEAD *and* SKIN. Restoring everything
+                # outside the head discarded the skin the model had just
+                # rendered, and a LAB wash was then painted onto the restored
+                # original pixels -- measured: legs still at their ORIGINAL
+                # L=74 when harmonization ran. Clothes and background are
+                # still excluded here, so garments/pose/background continue to
+                # come back from the original verbatim.
+                _head = semantic_person_skin_mask(
                     np.asarray(out.convert("RGB"), dtype=np.uint8)
                 )
             except Exception:  # noqa: BLE001
@@ -4470,14 +4477,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 _head_restored = True
                 body_restore_diag = {
                     "applied": True,
-                    "mode": "head_silhouette",
+                    "mode": "person_skin",
                     "head_px": int((_head > 0.5).sum()),
                     "dilate_px": _grow,
                 }
                 print(
-                    f"[krea2 body_restore] head-silhouette restore: generated "
-                    f"kept only inside the head mask ({int((_head > 0.5).sum())}px, "
-                    f"dilated {_grow}px); the ORIGINAL body/shoulders are kept "
+                    f"[krea2 body_restore] person-skin restore: generated "
+                    f"kept inside head+skin ({int((_head > 0.5).sum())}px, "
+                    f"dilated {_grow}px); the ORIGINAL clothing/background are kept "
                     "verbatim and the seam runs around the head, not across a limb",
                     flush=True,
                 )
@@ -4600,7 +4607,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
             )
 
         skin_diag: dict[str, Any] = {"applied": False}
-        if bool(self.cfg.get("simple_full_body_skin_harmonize", True)) and selected_face is not None:
+        # OFF by default now. The model renders the donor's skin tone itself,
+        # under the photo's real lighting, and body_restore above keeps that
+        # render. A post-hoc LAB mean-shift on top can only add a uniform
+        # offset while preserving luminance, so it reads as tint over the old
+        # skin rather than as skin -- which is exactly the "painted on" look.
+        # Left available for the crop_stitch route, where the model never sees
+        # the body and so cannot recolour it.
+        if bool(self.cfg.get("simple_full_body_skin_harmonize", False)) and selected_face is not None:
             try:
                 from headswap.skin_harmonize import extend_skin_harmonization
 
