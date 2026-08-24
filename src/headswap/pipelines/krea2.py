@@ -4362,7 +4362,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # edge, and it survives even with body_restore skipped because
                 # it is a different composite entirely.
                 refine_bot_ext = float(
-                    self.cfg.get("refine_mask_bot_extend", 0.12)
+                    self.cfg.get("refine_mask_bot_extend", 0.06)
                 )
                 face_mask, mask_info = build_head_hair_mask(
                     out,

@@ -761,4 +761,9 @@ simple_full_body_shoulder_frac: 1.10
 # different render of the shoulder over the main frame (measured: mask reached
 # y=327 with shoulders starting ~y=300). Keep this small so the refine stays
 # on the face and neck.
-refine_mask_bot_extend: 0.12
+# 0.12 still overlapped: measured chin y=286, mask reached y=309, shoulders
+# begin ~y=300 -> 9px of overlap, enough for a faint edge. 0.06 reaches y=297
+# and clears by 3px. This framing has only ~14px of visible neck, so the mask
+# has very little room; on the robed case (small face) this shrinks the neck
+# band from ~10px to ~5px, which is worth watching for a jaw seam.
+refine_mask_bot_extend: 0.06
