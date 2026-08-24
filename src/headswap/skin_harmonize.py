@@ -182,6 +182,33 @@ def _semantic_category_mask(rgb_np: np.ndarray) -> np.ndarray | None:
         return None
 
 
+_SEM_HAIR, _SEM_OTHERS = 1, 5
+
+
+def semantic_head_mask(rgb_np: np.ndarray) -> np.ndarray | None:
+    """Per-pixel P(head) = hair + face-skin + accessories (hats), or None.
+
+    Lets compositing put the generated/original boundary along the HEAD
+    SILHOUETTE instead of across the body. A straight line or rectangle must
+    cross whatever lies at that coordinate -- measured on the athlete, both a
+    horizontal ramp (y=354..498) and a head column (x=272..854) cut through
+    the shoulders. A head-shaped boundary only ever runs through hair, hat
+    edge and a short piece of neck.
+
+    Accessories are included so a hat stays part of the head; without it the
+    songkok would fall outside and be restored from the original, undoing the
+    swap.
+    """
+    cat = _semantic_category_mask(rgb_np)
+    if cat is None:
+        return None
+    m = np.isin(cat, (_SEM_HAIR, _SEM_FACE_SKIN, _SEM_OTHERS)).astype(np.float32)
+    if m.shape != rgb_np.shape[:2]:
+        m = cv2.resize(m, (rgb_np.shape[1], rgb_np.shape[0]),
+                       interpolation=cv2.INTER_LINEAR)
+    return np.clip(m, 0.0, 1.0)
+
+
 _SEM_CLOTHES = 4
 
 

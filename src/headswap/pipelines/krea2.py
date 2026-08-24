@@ -4424,8 +4424,73 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # edges (x=272, x=854), which is the misaligned shoulder. There is no
         # distant body to protect here, so skip it and keep the model's own
         # coherent frame.
+        # Preferred path: restore the original body everywhere EXCEPT a
+        # head-shaped region. Skipping the restore entirely (below) leaves the
+        # whole frame regenerated from a blurry upscale, and the model then
+        # reinvents body shape -- GPU-observed as a dark wedge across the
+        # athlete's left shoulder that does not exist in the source, whose
+        # deltoid is smooth and unbroken. Restoring with a straight boundary
+        # is no good either: a horizontal ramp (y=354..498) and a head column
+        # (x=272..854) both cut across the shoulders. A head-SILHOUETTE
+        # boundary only crosses hair, hat edge and a short piece of neck.
+        _head_restored = False
+        if selected_face is not None and bool(
+            self.cfg.get("simple_full_body_restore_body", True)
+        ):
+            try:
+                from headswap.skin_harmonize import (  # noqa: PLC0415
+                    semantic_head_mask,
+                )
+                _head = semantic_head_mask(
+                    np.asarray(out.convert("RGB"), dtype=np.uint8)
+                )
+            except Exception:  # noqa: BLE001
+                _head = None
+            _W3, _H3 = out.size
+            _fh3 = max(1, int(selected_face.y1) - int(selected_face.y0))
+            _fw3 = max(1, int(selected_face.x1) - int(selected_face.x0))
+            # Plausibility guard. If the segmenter under-finds the head we
+            # would restore over the swapped face and silently undo the whole
+            # edit, so demand it cover a real fraction of the face box before
+            # trusting it.
+            _need = 0.25 * _fh3 * _fw3
+            if _head is not None and float((_head > 0.5).sum()) >= _need:
+                _grow = max(3, int(0.10 * _fh3) * 2 + 1)
+                _hm = cv2.dilate(
+                    (_head > 0.5).astype(np.uint8),
+                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_grow, _grow)),
+                ).astype(np.float32)
+                _fk = max(3, int(0.05 * _fh3) * 2 + 1)
+                _hm = cv2.GaussianBlur(_hm, (_fk, _fk), 0)[..., None]
+                _gen = np.asarray(out.convert("RGB"), dtype=np.float32)
+                _orig = np.asarray(body_full.convert("RGB"), dtype=np.float32)
+                out = Image.fromarray(
+                    np.clip(_gen * _hm + _orig * (1.0 - _hm), 0, 255).astype(np.uint8)
+                )
+                _head_restored = True
+                body_restore_diag = {
+                    "applied": True,
+                    "mode": "head_silhouette",
+                    "head_px": int((_head > 0.5).sum()),
+                    "dilate_px": _grow,
+                }
+                print(
+                    f"[krea2 body_restore] head-silhouette restore: generated "
+                    f"kept only inside the head mask ({int((_head > 0.5).sum())}px, "
+                    f"dilated {_grow}px); the ORIGINAL body/shoulders are kept "
+                    "verbatim and the seam runs around the head, not across a limb",
+                    flush=True,
+                )
+            elif _head is not None:
+                print(
+                    f"[krea2 body_restore] head mask too small "
+                    f"({int((_head > 0.5).sum())}px < {_need:.0f}) - not trusting it; "
+                    "falling back to geometric handling",
+                    flush=True,
+                )
+
         _bust_skip = False
-        if selected_face is not None:
+        if selected_face is not None and not _head_restored:
             _fh_frac = (int(selected_face.y1) - int(selected_face.y0)) / max(1, out.size[1])
             _bust_skip = _fh_frac > float(
                 self.cfg.get("simple_full_body_restore_max_face_frac", 0.25)
@@ -4443,7 +4508,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     "cross the shoulders; keeping the model's coherent frame.",
                     flush=True,
                 )
-        if selected_face is not None and not _bust_skip and bool(
+        if selected_face is not None and not _head_restored and not _bust_skip and bool(
             self.cfg.get("simple_full_body_restore_body", True)
         ):
             import cv2  # noqa: PLC0415
