@@ -227,6 +227,30 @@ def semantic_head_mask(rgb_np: np.ndarray) -> np.ndarray | None:
     return np.clip(m, 0.0, 1.0)
 
 
+_SEM_BACKGROUND = 0
+
+
+def semantic_person_mask(rgb_np: np.ndarray) -> np.ndarray | None:
+    """Per-pixel P(anything that is not background), or None.
+
+    Used to clamp the restore mask to the person's silhouette. The head+skin
+    mask gets dilated (to catch hair edges) and then blurred, which together
+    push it ~23px PAST the hair on a small-face full-body frame. Those extra
+    pixels are background, so the composite there blends the generated
+    background against the original one -- and the model never reproduces a
+    background bit-identically, so the mismatch shows up as a soft ring
+    around the head. Clamping to this mask keeps background 100% original.
+    """
+    cat = _semantic_category_mask(rgb_np)
+    if cat is None:
+        return None
+    m = (cat != _SEM_BACKGROUND).astype(np.float32)
+    if m.shape != rgb_np.shape[:2]:
+        m = cv2.resize(m, (rgb_np.shape[1], rgb_np.shape[0]),
+                       interpolation=cv2.INTER_LINEAR)
+    return np.clip(m, 0.0, 1.0)
+
+
 def semantic_person_skin_mask(rgb_np: np.ndarray) -> np.ndarray | None:
     """Per-pixel P(head OR bare skin) = hair + face-skin + body-skin +
     accessories, or None.

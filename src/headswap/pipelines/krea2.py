@@ -4450,6 +4450,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         ):
             try:
                 from headswap.skin_harmonize import (  # noqa: PLC0415
+                    semantic_person_mask,
                     semantic_person_skin_mask,
                 )
                 # Keep the generated HEAD *and* SKIN. Restoring everything
@@ -4501,7 +4502,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_grow, _grow)),
                 ).astype(np.float32)
                 _fk = max(3, int(0.05 * _fh3) * 2 + 1)
-                _hm = cv2.GaussianBlur(_hm, (_fk, _fk), 0)[..., None]
+                _hm = cv2.GaussianBlur(_hm, (_fk, _fk), 0)
+                # Clamp to the person silhouette. Dilate + blur together push
+                # the mask ~23px past the hair on a small-face frame; those
+                # pixels are BACKGROUND, so the composite there mixed the
+                # generated background with the original one and the mismatch
+                # read as a halo ring around the head. Clamped AFTER the blur
+                # (clamping before it would just let the blur spill back out
+                # again -- the same zero-then-blur ordering trap as the head
+                # exclusion), so background stays 100% original.
+                _pm = semantic_person_mask(np.asarray(out.convert("RGB"), dtype=np.uint8))
+                if _pm is not None:
+                    _pm = cv2.GaussianBlur(_pm.astype(np.float32), (3, 3), 0)
+                    _before = float(_hm.sum())
+                    _hm = _hm * np.clip(_pm, 0.0, 1.0)
+                    print(
+                        f"[krea2 body_restore] clamped restore mask to the person "
+                        f"silhouette: {int(_before - float(_hm.sum()))}px of "
+                        "background halo removed",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[krea2 body_restore] WARNING person mask unavailable - "
+                        "restore mask NOT clamped; a background halo may appear "
+                        "around the head.",
+                        flush=True,
+                    )
+                _hm = _hm[..., None]
                 _gen = np.asarray(out.convert("RGB"), dtype=np.float32)
                 _orig = np.asarray(body_full.convert("RGB"), dtype=np.float32)
                 out = Image.fromarray(
