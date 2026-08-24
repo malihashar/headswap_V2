@@ -4461,6 +4461,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # still excluded here, so garments/pose/background continue to
                 # come back from the original verbatim.
                 from headswap.skin_harmonize import (  # noqa: PLC0415
+                    semantic_clothes_mask,
                     semantic_head_mask as _sem_head_only,
                 )
                 _head = semantic_person_skin_mask(
@@ -4563,6 +4564,28 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         "[krea2 body_restore] WARNING person mask unavailable - "
                         "restore mask NOT clamped; a background halo may appear "
                         "around the head.",
+                        flush=True,
+                    )
+                # Hard rule: the ORIGINAL garment is never overwritten. The
+                # keep-mask is dilated 19px and blurred, which pushes it off
+                # the head and down onto the neckline -- so generated pixels
+                # (the donor's own collar) were compositing over the white
+                # dress. Subtracting the original's clothes class makes that
+                # structurally impossible, no matter how far the dilation
+                # reaches. Skin ADJACENT to clothing is unaffected: only
+                # pixels the segmenter calls garment are protected.
+                _cloth = semantic_clothes_mask(
+                    np.asarray(body_full.convert("RGB"), dtype=np.uint8)
+                )
+                if _cloth is not None:
+                    _cloth = cv2.GaussianBlur(_cloth.astype(np.float32), (3, 3), 0)
+                    _pre_c = float(_hm.sum())
+                    _hm = _hm * (1.0 - np.clip(_cloth, 0.0, 1.0))
+                    print(
+                        f"[krea2 body_restore] clothing protected: "
+                        f"{int(_pre_c - float(_hm.sum()))}px of the ORIGINAL "
+                        "garment removed from the keep mask, so the dress "
+                        "cannot take on the donor's collar",
                         flush=True,
                     )
                 _hm = _hm[..., None]
