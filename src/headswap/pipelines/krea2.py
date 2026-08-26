@@ -4510,6 +4510,54 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 _orig_head = _sem_head_only(
                     np.asarray(body_full.convert("RGB"), dtype=np.uint8)
                 )
+                # Do not depend on segmenter RECALL for the original head. It
+                # under-detects exactly the cases that matter: a black songkok
+                # against a dark robe returned 12,067px and fine hair strands
+                # 18,678px -- far too small for a head plus headwear -- so the
+                # uncovered remainder was restored and the previous person's
+                # hair/hat stayed in the result. The face box from InsightFace
+                # is reliable, so derive a geometric head+hair ellipse from it
+                # and union that in as a floor. Over-reach is bounded: the
+                # silhouette clamp and the clothing-protection step both run
+                # after this and still subtract background and garment.
+                try:
+                    _geo_head, _ = build_head_hair_mask(
+                        body_full,
+                        self.cache_dir,
+                        backend="ellipse",
+                        face_box=selected_face,
+                        expand_px=int(self.cfg.get("mask_expand_px", 18)),
+                        blur_px=int(self.cfg.get("mask_blur_px", 12)),
+                        top_extend=float(
+                            self.cfg.get("orig_head_union_top_extend", 1.60)
+                        ),
+                        side_extend=float(
+                            self.cfg.get("orig_head_union_side_extend", 0.70)
+                        ),
+                        bot_extend=float(
+                            self.cfg.get("orig_head_union_bot_extend", 0.15)
+                        ),
+                    )
+                    _geo = np.asarray(_geo_head.convert("L"), dtype=np.float32) / 255.0
+                    if _orig_head is not None:
+                        _pre_geo = int((_orig_head > 0.5).sum())
+                        _orig_head = np.maximum(_orig_head, _geo)
+                    else:
+                        _pre_geo = 0
+                        _orig_head = _geo
+                    print(
+                        f"[krea2 body_restore] original-head footprint widened by the "
+                        f"geometric head+hair ellipse: {_pre_geo} -> "
+                        f"{int((_orig_head > 0.5).sum())}px (segmenter recall alone "
+                        "left the old hair/hat partly uncovered)",
+                        flush=True,
+                    )
+                except Exception as _gexc:  # noqa: BLE001
+                    print(
+                        f"[krea2 body_restore] geometric head ellipse failed "
+                        f"({type(_gexc).__name__}: {_gexc}); using segmenter head only",
+                        flush=True,
+                    )
                 if _head is not None and _orig_head is not None:
                     _head = np.maximum(_head, _orig_head)
                     print(
