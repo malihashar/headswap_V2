@@ -4518,7 +4518,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 _head_fail = "semantic_person_skin_mask returned None"
                 print(f"[krea2 body_restore] person-skin mask unavailable - {_head_fail}", flush=True)
             if _head is not None and float((_head > 0.5).sum()) >= _need:
-                _grow = max(3, int(0.10 * _fh3) * 2 + 1)
+                # Cap the dilation RADIUS against the frame, not just the
+                # face. Scaling purely with face height means a bust shot
+                # (face 226px) balloons the head mask 22px in every direction
+                # -- past the hair, onto the background and across to the far
+                # arm, which is the old head showing behind the new one and
+                # the two arms being treated differently. Capping at 1.2% of
+                # the long side takes the athlete 45 -> 25px while leaving
+                # both full-body cases untouched at 17px, so this cannot
+                # regress them.
+                _r_face = int(0.10 * _fh3)
+                _r_cap = int(0.012 * max(_W3, _H3))
+                _grow = max(3, min(_r_face, _r_cap) * 2 + 1)
                 _hm = cv2.dilate(
                     (_head > 0.5).astype(np.uint8),
                     cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_grow, _grow)),
