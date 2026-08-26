@@ -4474,6 +4474,39 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # which puts the original hairstyle back around the new head.
                 # Overwriting the original head footprint with generated pixels
                 # is what actually removes the old hair.
+                # Union in a rembg-derived (person - clothes) mask. The class
+                # mask above needs MediaPipe to label EACH limb as body-skin,
+                # and it does not: on the athlete it caught one arm and missed
+                # the other, so the missed arm was restored tan while its pair
+                # came back pale. rembg answers the far easier "is this the
+                # person?" question reliably, and subtracting clothes from it
+                # recovers the limb without per-limb recognition. Union only,
+                # so it can never REMOVE coverage, and the clothing-protection
+                # step below still subtracts the garment afterwards.
+                try:
+                    from headswap.skin_harmonize import (  # noqa: PLC0415
+                        person_minus_clothes_mask,
+                    )
+                    _pmc = person_minus_clothes_mask(
+                        np.asarray(out.convert("RGB"), dtype=np.uint8), out
+                    )
+                except Exception as _pexc:  # noqa: BLE001
+                    _pmc = None
+                    print(
+                        f"[krea2 body_restore] person-minus-clothes mask failed "
+                        f"({type(_pexc).__name__}: {_pexc}); using the class mask alone",
+                        flush=True,
+                    )
+                if _head is not None and _pmc is not None:
+                    _before_pmc = float((_head > 0.5).sum())
+                    _head = np.maximum(_head, _pmc)
+                    print(
+                        f"[krea2 body_restore] unioned rembg(person - clothes): "
+                        f"keep mask {int(_before_pmc)} -> {int((_head > 0.5).sum())}px "
+                        "so a limb the class segmenter missed is not left with the "
+                        "original tone while its pair is recoloured",
+                        flush=True,
+                    )
                 _orig_head = _sem_head_only(
                     np.asarray(body_full.convert("RGB"), dtype=np.uint8)
                 )

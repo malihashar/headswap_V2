@@ -251,6 +251,36 @@ def semantic_person_mask(rgb_np: np.ndarray) -> np.ndarray | None:
     return np.clip(m, 0.0, 1.0)
 
 
+def person_minus_clothes_mask(
+    rgb_np: np.ndarray, pil_img: "Image.Image"
+) -> np.ndarray | None:
+    """rembg person matte MINUS the semantic clothes class, or None.
+
+    The class-based skin mask depends on MediaPipe labelling each limb as
+    body-skin, and it does not do that reliably: on the athlete it caught one
+    arm and missed the other, so the missed arm fell outside the keep mask and
+    was restored tan from the original while its pair came back pale. That
+    asymmetry is a segmenter recall failure, not a tuning problem.
+
+    rembg answers a much easier question -- "is this pixel the person?" -- and
+    answers it far more reliably than the selfie segmenter's per-class call.
+    Subtracting only the clothes class from it yields skin + hair +
+    accessories without needing each limb recognised individually. Used as a
+    UNION with the class mask, so it can only ever ADD coverage.
+    """
+    matte = _get_person_matte(pil_img)
+    if matte is None:
+        return None
+    m = (matte.astype(np.float32) / 255.0)
+    if m.shape != rgb_np.shape[:2]:
+        m = cv2.resize(m, (rgb_np.shape[1], rgb_np.shape[0]),
+                       interpolation=cv2.INTER_LINEAR)
+    cloth = semantic_clothes_mask(rgb_np)
+    if cloth is not None:
+        m = m * (1.0 - np.clip(cloth, 0.0, 1.0))
+    return np.clip(m, 0.0, 1.0)
+
+
 def semantic_person_skin_mask(rgb_np: np.ndarray) -> np.ndarray | None:
     """Per-pixel P(head OR bare skin) = hair + face-skin + body-skin +
     accessories, or None.
