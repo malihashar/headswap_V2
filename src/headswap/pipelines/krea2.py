@@ -4543,13 +4543,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         # (face 8%) is unaffected: there the ellipse is only
                         # ~4% of the frame and genuinely needed to cover hair.
                         top_extend=float(
-                            self.cfg.get("orig_head_union_top_extend", 1.60)
+                            self.cfg.get("orig_head_union_top_extend", 0.65)
                         ) * _oh_scale,
                         side_extend=float(
-                            self.cfg.get("orig_head_union_side_extend", 0.70)
+                            self.cfg.get("orig_head_union_side_extend", 0.45)
                         ) * _oh_scale,
                         bot_extend=float(
-                            self.cfg.get("orig_head_union_bot_extend", 0.15)
+                            self.cfg.get("orig_head_union_bot_extend", 0.10)
                         ) * _oh_scale,
                     )
                     _geo = np.asarray(_geo_head.convert("L"), dtype=np.float32) / 255.0
@@ -4622,14 +4622,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # the long side takes the athlete 45 -> 25px while leaving
                 # both full-body cases untouched at 17px, so this cannot
                 # regress them.
-                _r_face = int(0.10 * _fh3)
-                _r_cap = int(0.012 * max(_W3, _H3))
+                _r_face = int(0.08 * _fh3)
+                _r_cap = int(0.010 * max(_W3, _H3))
                 _grow = max(3, min(_r_face, _r_cap) * 2 + 1)
                 _hm = cv2.dilate(
                     (_head > 0.5).astype(np.uint8),
                     cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_grow, _grow)),
                 ).astype(np.float32)
-                _fk = max(3, int(0.05 * _fh3) * 2 + 1)
+                _fk = max(3, int(0.04 * _fh3) * 2 + 1)
                 _hm = cv2.GaussianBlur(_hm, (_fk, _fk), 0)
                 # Clamp to the person silhouette. Dilate + blur together push
                 # the mask ~23px past the hair on a small-face frame; those
@@ -4673,20 +4673,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         flush=True,
                     )
                 # Hard rule: the ORIGINAL garment is never overwritten. The
-                # keep-mask is dilated 19px and blurred, which pushes it off
-                # the head and down onto the neckline -- so generated pixels
-                # (the donor's own collar) were compositing over the white
-                # dress. Subtracting the original's clothes class makes that
-                # structurally impossible, no matter how far the dilation
-                # reaches. Skin ADJACENT to clothing is unaffected: only
-                # pixels the segmenter calls garment are protected.
-                # Protect garment from BOTH frames. Subtracting only the
-                # ORIGINAL's clothes leaves the DONOR's collar untouched --
-                # that band is garment in the GENERATED frame, so nothing
-                # removed it and it composited straight over the white dress.
-                # Any pixel that reads as clothing in either frame must come
-                # from the original, which is the "clothes always original,
-                # everything else donor" rule.
+                # keep-mask is dilated and blurred, which pushes it off
+                # the head and down onto the neckline.
+                # Protect garment from BOTH frames, with slight erosion near
+                # the neck so clothing mask doesn't create unrendered ghost gaps.
                 _cloth = semantic_clothes_mask(
                     np.asarray(body_full.convert("RGB"), dtype=np.uint8)
                 )
