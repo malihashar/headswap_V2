@@ -4680,9 +4680,31 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # structurally impossible, no matter how far the dilation
                 # reaches. Skin ADJACENT to clothing is unaffected: only
                 # pixels the segmenter calls garment are protected.
+                # Protect garment from BOTH frames. Subtracting only the
+                # ORIGINAL's clothes leaves the DONOR's collar untouched --
+                # that band is garment in the GENERATED frame, so nothing
+                # removed it and it composited straight over the white dress.
+                # Any pixel that reads as clothing in either frame must come
+                # from the original, which is the "clothes always original,
+                # everything else donor" rule.
                 _cloth = semantic_clothes_mask(
                     np.asarray(body_full.convert("RGB"), dtype=np.uint8)
                 )
+                _cloth_gen = semantic_clothes_mask(
+                    np.asarray(out.convert("RGB"), dtype=np.uint8)
+                )
+                if _cloth is not None and _cloth_gen is not None:
+                    _a = int((_cloth > 0.5).sum()); _b = int((_cloth_gen > 0.5).sum())
+                    _cloth = np.maximum(_cloth, _cloth_gen)
+                    print(
+                        f"[krea2 body_restore] clothing mask = original({_a}px) OR "
+                        f"generated({_b}px) -> {int((_cloth > 0.5).sum())}px; the "
+                        "donor's own collar is garment in the GENERATED frame and "
+                        "is now protected too",
+                        flush=True,
+                    )
+                elif _cloth is None:
+                    _cloth = _cloth_gen
                 if _cloth is not None:
                     _cloth = cv2.GaussianBlur(_cloth.astype(np.float32), (3, 3), 0)
                     _pre_c = float(_hm.sum())
