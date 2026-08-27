@@ -4696,12 +4696,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 elif _cloth is None:
                     _cloth = _cloth_gen
                 if _cloth is not None:
-                    _cloth = cv2.GaussianBlur(_cloth.astype(np.float32), (3, 3), 0)
+                    # Dilate clothing mask slightly (5px kernel) to ensure the boundary/collar of
+                    # the donor's clothing is completely zeroed out from the generated keep-mask.
+                    _cloth_dil = cv2.dilate(
+                        (_cloth > 0.3).astype(np.uint8),
+                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+                    ).astype(np.float32)
+                    _cloth_dil = cv2.GaussianBlur(_cloth_dil, (5, 5), 0)
                     _pre_c = float(_hm.sum())
-                    _hm = _hm * (1.0 - np.clip(_cloth, 0.0, 1.0))
+                    _hm = _hm * (1.0 - np.clip(_cloth_dil, 0.0, 1.0))
                     print(
                         f"[krea2 body_restore] clothing protected: "
-                        f"{int(_pre_c - float(_hm.sum()))}px of the ORIGINAL "
+                        f"{int(_pre_c - float(_hm.sum()))}px of the ORIGINAL/GENERATED "
                         "garment removed from the keep mask, so the dress "
                         "cannot take on the donor's collar",
                         flush=True,
