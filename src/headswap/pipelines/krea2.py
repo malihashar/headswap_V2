@@ -4467,33 +4467,61 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 _head = semantic_person_skin_mask(
                     np.asarray(out.convert("RGB"), dtype=np.uint8)
                 )
-                _sem_head = _sem_head_only(
-                    np.asarray(out.convert("RGB"), dtype=np.uint8)
-                )
-                if _head is not None and _sem_head is not None:
-                    _head = np.maximum(_head, _sem_head)
-                elif _head is None:
-                    _head = _sem_head
-
-                # Restrict head mask vertically so it covers head and neck only,
-                # preventing long donor hair from falling onto shoulders/chest.
-                _fh_neck = max(1, int(selected_face.y1) - int(selected_face.y0))
-                _neck_max_y = int(selected_face.y1 + 0.65 * _fh_neck)
-                if _head is not None:
-                    _gate = np.zeros_like(_head, dtype=np.float32)
-                    _gate[:_neck_max_y] = 1.0
-                    # Soft fade at the bottom of the neck gate
-                    _fade_len = int(0.20 * _fh_neck)
-                    if _fade_len > 0 and _neck_max_y < _head.shape[0]:
-                        _y_end = min(_head.shape[0], _neck_max_y + _fade_len)
-                        _ramp = np.linspace(1.0, 0.0, _y_end - _neck_max_y, dtype=np.float32)
-                        _gate[_neck_max_y:_y_end] = _ramp[:, None]
-                    _head = _head * _gate
-
+                # Union in the ORIGINAL head region. The mask above is derived
+                # from the GENERATED frame, so it only covers where the DONOR's
+                # hair ended up. Anywhere the original person's hair was and the
+                # donor's is not falls outside it and gets restored verbatim --
+                # which puts the original hairstyle back around the new head.
+                # Overwriting the original head footprint with generated pixels
+                # is what actually removes the old hair.
+                # Union in a rembg-derived (person - clothes) mask. The class
+                # mask above needs MediaPipe to label EACH limb as body-skin,
+                # and it does not: on the athlete it caught one arm and missed
+                # the other, so the missed arm was restored tan while its pair
+                # came back pale. rembg answers the far easier "is this the
+                # person?" question reliably, and subtracting clothes from it
+                # recovers the limb without per-limb recognition. Union only,
+                # so it can never REMOVE coverage, and the clothing-protection
+                # step below still subtracts the garment afterwards.
+                try:
+                    from headswap.skin_harmonize import (  # noqa: PLC0415
+                        person_minus_clothes_mask,
+                    )
+                    _pmc = person_minus_clothes_mask(
+                        np.asarray(out.convert("RGB"), dtype=np.uint8), out
+                    )
+                except Exception as _pexc:  # noqa: BLE001
+                    _pmc = None
+                    print(
+                        f"[krea2 body_restore] person-minus-clothes mask failed "
+                        f"({type(_pexc).__name__}: {_pexc}); using the class mask alone",
+                        flush=True,
+                    )
+                if _head is not None and _pmc is not None:
+                    _before_pmc = float((_head > 0.5).sum())
+                    _head = np.maximum(_head, _pmc)
+                    print(
+                        f"[krea2 body_restore] unioned rembg(person - clothes): "
+                        f"keep mask {int(_before_pmc)} -> {int((_head > 0.5).sum())}px "
+                        "so a limb the class segmenter missed is not left with the "
+                        "original tone while its pair is recoloured",
+                        flush=True,
+                    )
                 _orig_head = _sem_head_only(
                     np.asarray(body_full.convert("RGB"), dtype=np.uint8)
                 )
+                # Do not depend on segmenter RECALL for the original head. It
+                # under-detects exactly the cases that matter: a black songkok
+                # against a dark robe returned 12,067px and fine hair strands
+                # 18,678px -- far too small for a head plus headwear -- so the
+                # uncovered remainder was restored and the previous person's
+                # hair/hat stayed in the result. The face box from InsightFace
+                # is reliable, so derive a geometric head+hair ellipse from it
+                # and union that in as a floor. Over-reach is bounded: the
+                # silhouette clamp and the clothing-protection step both run
+                # after this and still subtract background and garment.
                 try:
+                    # face_frac 0.08 (full body) -> 1.00 ; 0.40 (bust) -> ~0.35
                     _ff_frac = (int(selected_face.y1) - int(selected_face.y0)) / max(
                         1, out.size[1]
                     )
@@ -4505,14 +4533,23 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         face_box=selected_face,
                         expand_px=int(self.cfg.get("mask_expand_px", 18)),
                         blur_px=int(self.cfg.get("mask_blur_px", 12)),
+                        # Scale the extends DOWN as the face grows relative to
+                        # the frame. They are multiples of face height, so on a
+                        # bust shot (face 40% of frame) the fixed values gave a
+                        # 424x621px ellipse = 35% of the whole image, spanning
+                        # far past the head onto shoulders and chest. Its soft
+                        # outer edge, where generated meets original at slightly
+                        # different tone, is the shadow ring. A full-body frame
+                        # (face 8%) is unaffected: there the ellipse is only
+                        # ~4% of the frame and genuinely needed to cover hair.
                         top_extend=float(
-                            self.cfg.get("orig_head_union_top_extend", 0.50)
+                            self.cfg.get("orig_head_union_top_extend", 1.60)
                         ) * _oh_scale,
                         side_extend=float(
-                            self.cfg.get("orig_head_union_side_extend", 0.40)
+                            self.cfg.get("orig_head_union_side_extend", 0.70)
                         ) * _oh_scale,
                         bot_extend=float(
-                            self.cfg.get("orig_head_union_bot_extend", 0.10)
+                            self.cfg.get("orig_head_union_bot_extend", 0.15)
                         ) * _oh_scale,
                     )
                     _geo = np.asarray(_geo_head.convert("L"), dtype=np.float32) / 255.0
@@ -4544,6 +4581,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         flush=True,
                     )
             except Exception as _sexc:  # noqa: BLE001
+                # Was a bare swallow. That made an exception here look
+                # identical to "segmenter unavailable" and to "mask below
+                # threshold" -- three different causes, one silent outcome,
+                # and a log message that asserted the wrong one.
                 _head = None
                 _head_fail = f"exception: {type(_sexc).__name__}: {_sexc}"
                 print(f"[krea2 body_restore] person-skin mask FAILED - {_head_fail}", flush=True)
@@ -4552,6 +4593,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
             _W3, _H3 = out.size
             _fh3 = max(1, int(selected_face.y1) - int(selected_face.y0))
             _fw3 = max(1, int(selected_face.x1) - int(selected_face.x0))
+            # Plausibility guard. If the segmenter under-finds the head we
+            # would restore over the swapped face and silently undo the whole
+            # edit, so demand it cover a real fraction of the face box before
+            # trusting it.
             _need = 0.25 * _fh3 * _fw3
             if _head is not None:
                 _got = float((_head > 0.5).sum())
@@ -4568,19 +4613,41 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 _head_fail = "semantic_person_skin_mask returned None"
                 print(f"[krea2 body_restore] person-skin mask unavailable - {_head_fail}", flush=True)
             if _head is not None and float((_head > 0.5).sum()) >= _need:
-                _r_face = int(0.08 * _fh3)
-                _r_cap = int(0.010 * max(_W3, _H3))
+                # Cap the dilation RADIUS against the frame, not just the
+                # face. Scaling purely with face height means a bust shot
+                # (face 226px) balloons the head mask 22px in every direction
+                # -- past the hair, onto the background and across to the far
+                # arm, which is the old head showing behind the new one and
+                # the two arms being treated differently. Capping at 1.2% of
+                # the long side takes the athlete 45 -> 25px while leaving
+                # both full-body cases untouched at 17px, so this cannot
+                # regress them.
+                _r_face = int(0.10 * _fh3)
+                _r_cap = int(0.012 * max(_W3, _H3))
                 _grow = max(3, min(_r_face, _r_cap) * 2 + 1)
                 _hm = cv2.dilate(
                     (_head > 0.5).astype(np.uint8),
                     cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_grow, _grow)),
                 ).astype(np.float32)
-                _fk = max(3, int(0.04 * _fh3) * 2 + 1)
+                _fk = max(3, int(0.05 * _fh3) * 2 + 1)
                 _hm = cv2.GaussianBlur(_hm, (_fk, _fk), 0)
-
-                # Clamp strictly to person silhouette. Hard-threshold background
-                # to 0.0 so no soft alpha fringe leaks into the sky/background.
+                # Clamp to the person silhouette. Dilate + blur together push
+                # the mask ~23px past the hair on a small-face frame; those
+                # pixels are BACKGROUND, so the composite there mixed the
+                # generated background with the original one and the mismatch
+                # read as a halo ring around the head. Clamped AFTER the blur
+                # (clamping before it would just let the blur spill back out
+                # again -- the same zero-then-blur ordering trap as the head
+                # exclusion), so background stays 100% original.
                 _pm = semantic_person_mask(np.asarray(out.convert("RGB"), dtype=np.uint8))
+                # Clamp to BOTH silhouettes, not just the generated one. The
+                # pixels the original-head union exists to cover are, by
+                # definition, background in the GENERATED frame (the old hair
+                # is there, the donor's is not) -- so clamping to the
+                # generated person mask alone zeroed exactly those and the
+                # previous hairstyle came back. Only pixels outside BOTH
+                # silhouettes are true background, which is what the halo fix
+                # actually needs to protect.
                 _pm_orig = semantic_person_mask(
                     np.asarray(body_full.convert("RGB"), dtype=np.uint8)
                 )
@@ -4589,10 +4656,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 elif _pm is None:
                     _pm = _pm_orig
                 if _pm is not None:
-                    # Threshold _pm sharply so true background is strictly 0.0
-                    _pm_sharp = (_pm > 0.40).astype(np.float32)
+                    _pm = cv2.GaussianBlur(_pm.astype(np.float32), (3, 3), 0)
                     _before = float(_hm.sum())
-                    _hm = _hm * _pm_sharp
+                    _hm = _hm * np.clip(_pm, 0.0, 1.0)
                     print(
                         f"[krea2 body_restore] clamped restore mask to the person "
                         f"silhouette: {int(_before - float(_hm.sum()))}px of "
@@ -4606,6 +4672,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         "around the head.",
                         flush=True,
                     )
+                # Hard rule: the ORIGINAL garment is never overwritten. The
+                # keep-mask is dilated 19px and blurred, which pushes it off
+                # the head and down onto the neckline -- so generated pixels
+                # (the donor's own collar) were compositing over the white
+                # dress. Subtracting the original's clothes class makes that
+                # structurally impossible, no matter how far the dilation
+                # reaches. Skin ADJACENT to clothing is unaffected: only
+                # pixels the segmenter calls garment are protected.
+                # Protect garment from BOTH frames. Subtracting only the
+                # ORIGINAL's clothes leaves the DONOR's collar untouched --
+                # that band is garment in the GENERATED frame, so nothing
+                # removed it and it composited straight over the white dress.
+                # Any pixel that reads as clothing in either frame must come
+                # from the original, which is the "clothes always original,
+                # everything else donor" rule.
                 _cloth = semantic_clothes_mask(
                     np.asarray(body_full.convert("RGB"), dtype=np.uint8)
                 )
@@ -4625,16 +4706,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 elif _cloth is None:
                     _cloth = _cloth_gen
                 if _cloth is not None:
-                    _cloth_dil = cv2.dilate(
-                        (_cloth > 0.3).astype(np.uint8),
-                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
-                    ).astype(np.float32)
-                    _cloth_dil = cv2.GaussianBlur(_cloth_dil, (5, 5), 0)
+                    _cloth = cv2.GaussianBlur(_cloth.astype(np.float32), (3, 3), 0)
                     _pre_c = float(_hm.sum())
-                    _hm = _hm * (1.0 - np.clip(_cloth_dil, 0.0, 1.0))
+                    _hm = _hm * (1.0 - np.clip(_cloth, 0.0, 1.0))
                     print(
                         f"[krea2 body_restore] clothing protected: "
-                        f"{int(_pre_c - float(_hm.sum()))}px of the ORIGINAL/GENERATED "
+                        f"{int(_pre_c - float(_hm.sum()))}px of the ORIGINAL "
                         "garment removed from the keep mask, so the dress "
                         "cannot take on the donor's collar",
                         flush=True,
