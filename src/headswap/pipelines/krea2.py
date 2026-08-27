@@ -5035,6 +5035,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
             except Exception as exc:  # noqa: BLE001
                 skin_diag = {"applied": False, "reason": f"failed: {exc}"}
 
+        # Opt-in mask diagnostics. Enabled with a single cfg flag so a normal
+        # render produces the overlay -- the notebook does not keep the
+        # intermediate images alive, so an after-the-fact script has nothing
+        # to read, and re-deriving the masks from saved PNGs is exactly the
+        # indirection that made three mask fixes miss.
+        if bool(self.cfg.get("dump_masks", False)):
+            from headswap.profiling.mask_dump import (  # noqa: PLC0415
+                dump_mask_montage,
+            )
+
+            dump_mask_montage(
+                out,
+                body_full,
+                str(self.cfg.get("dump_masks_dir", "/content/_mask_dump")),
+            )
+
         total_s = time.perf_counter() - t0
         meta = {
             "mode": "simple_full_body",
