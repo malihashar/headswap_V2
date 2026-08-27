@@ -4870,10 +4870,105 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # so neither mechanism touched the skin. Re-enable the wash whenever
         # the model's skin did NOT survive, so this can never no-op.
         _wash_default = not _head_restored
+        tone_diag: dict[str, Any] | None = None
         if _head_restored:
+            # A successful restore does NOT mean the tone is correct. The
+            # restore keeps whatever the model rendered, and the model does
+            # not reliably recolour the body to the donor's complexion -- GPU
+            # observed as a dark donor face over an untouched pale body, with
+            # the wash (the only mechanism that would have corrected it)
+            # switched off precisely BECAUSE the restore succeeded. The old
+            # gate was `not _head_restored`: a boolean about which code path
+            # ran, which never looked at a single pixel, so "model under-
+            # recoloured" and "tone already matches" were indistinguishable.
+            #
+            # Measure the residual instead. Compare the donor face's cheek L
+            # against the visible BODY skin's L in the same output frame and
+            # re-enable the wash when they still disagree. This is safe in a
+            # way the earlier fallback was not: with the semantic segmenter
+            # present the wash runs on a real skin mask, not the HSV colour
+            # threshold that bled across edges and produced the smeared,
+            # painted-on skin.
+            try:
+                from headswap.skin_harmonize import (  # noqa: PLC0415
+                    _cheek_lab_stats,
+                    _robust_lab_stats,
+                    semantic_person_skin_mask,
+                )
+
+                _out_np = np.asarray(out.convert("RGB"), dtype=np.uint8)
+                _face_lab, _ = _cheek_lab_stats(
+                    _out_np,
+                    int(selected_face.x0),
+                    int(selected_face.y0),
+                    int(selected_face.x1),
+                    int(selected_face.y1),
+                )
+                _skin_np = semantic_person_skin_mask(_out_np)
+                if _skin_np is not None:
+                    # Body skin only. Everything down to the chin is dropped so
+                    # the face is never compared against itself, which would
+                    # report a perfect match on every frame.
+                    _body_sel = _skin_np.copy()
+                    _body_sel[: max(0, min(_out_np.shape[0], int(selected_face.y1)))] = 0.0
+                    _body_px = _out_np[_body_sel > 0.5]
+                    _min_px = int(
+                        self.cfg.get("simple_full_body_tone_check_min_px", 500)
+                    )
+                    if int(_body_px.shape[0]) >= _min_px:
+                        _body_lab, _ = _robust_lab_stats(
+                            cv2.cvtColor(
+                                _body_px.reshape(1, -1, 3), cv2.COLOR_RGB2LAB
+                            )
+                            .astype(np.float32)
+                            .reshape(-1, 3)
+                        )
+                        _dl = float(_face_lab[0]) - float(_body_lab[0])
+                        _thr = float(
+                            self.cfg.get("simple_full_body_tone_match_max_dl", 12.0)
+                        )
+                        tone_diag = {
+                            "face_L": round(float(_face_lab[0]), 1),
+                            "body_L": round(float(_body_lab[0]), 1),
+                            "dL": round(_dl, 1),
+                            "threshold": _thr,
+                            "body_px": int(_body_px.shape[0]),
+                            "wash_forced": bool(abs(_dl) > _thr),
+                        }
+                        if abs(_dl) > _thr:
+                            _wash_default = True
+                    else:
+                        tone_diag = {
+                            "skipped": f"only {int(_body_px.shape[0])}px of body "
+                            f"skin visible (< {_min_px}); nothing to compare"
+                        }
+                else:
+                    tone_diag = {
+                        "skipped": "semantic_person_skin_mask returned None"
+                    }
+            except Exception as _texc:  # noqa: BLE001
+                tone_diag = {
+                    "skipped": f"{type(_texc).__name__}: {_texc}"
+                }
+                print(
+                    f"[krea2 skin] face/body tone check FAILED - {tone_diag['skipped']}; "
+                    "leaving the wash off as before",
+                    flush=True,
+                )
+        if _head_restored and _wash_default:
+            print(
+                f"[krea2 skin] LAB wash ON - the restore succeeded but the model "
+                f"did not recolour the body: face L={tone_diag.get('face_L')} vs "
+                f"body skin L={tone_diag.get('body_L')} (dL={tone_diag.get('dL')}, "
+                f"over the {tone_diag.get('threshold')} threshold). Correcting the "
+                "residual on the SEMANTIC skin mask.",
+                flush=True,
+            )
+        elif _head_restored:
             print(
                 "[krea2 skin] LAB wash OFF - the model's own rendered skin "
-                "survived the restore, which is the natural-looking source.",
+                f"survived the restore and already matches the face "
+                f"({tone_diag or 'tone check unavailable'}).",
                 flush=True,
             )
         else:
@@ -4918,6 +5013,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "ref_boost": sample_meta.get("ref_boost"),
             "face_refine": refine_diag,
             "body_restore": body_restore_diag,
+            "tone_check": tone_diag,
             "skin_harmonize": skin_diag,
         }
         dbg: dict[str, str] = {}
