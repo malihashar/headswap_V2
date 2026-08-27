@@ -2421,7 +2421,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
             grounding_px = int(_ff_grounding_px)
         fit_mode = str(self.cfg.get("fit_mode", "fit") or "fit")
         steps = int(self.cfg.get("steps", 8))
-        cfg = float(self.cfg.get("cfg", 1.0))
+        # Default 1.8, not 1.0. At cfg=1.0 there is no classifier-free
+        # guidance at all, so the text prompt carries zero guidance weight --
+        # the edit is shaped almost entirely by the reference images. That is
+        # why the head swapped correctly on every render (image-driven) while
+        # the "change the body's skin colour" clause was ignored on every
+        # render (prompt-driven), and why several rounds of prompt rewriting
+        # changed nothing: the lever was disconnected.
+        #
+        # Measured on the one A/B pair that completed: identity 0.561 at
+        # cfg=1.0 -> 0.671 at cfg=1.8, the only arm of five that moved the
+        # number at all (named-tone and skin-repaint returned byte-identical
+        # scores to baseline). Costs ~2x sampling time -- two UNet evaluations
+        # per step instead of one.
+        cfg = float(self.cfg.get("cfg", 1.8))
         seed_i = int(self.cfg.get("seed", 46) if seed is None else seed)
         denoise = float(self.cfg.get("denoise", 1.0))
         skip_neg_vlm = bool(self.cfg.get("skip_negative_grounding", True)) and cfg <= 1.0 + 1e-6
