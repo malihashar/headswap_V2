@@ -4981,6 +4981,131 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # column fallback (head_col/ramp_hi/ramp_lo) and skin_applied=False,
         # so neither mechanism touched the skin. Re-enable the wash whenever
         # the model's skin did NOT survive, so this can never no-op.
+        # ------------------------------------------------------------------
+        # Skin REPAINT: let the model render the new skin, head frozen.
+        # ------------------------------------------------------------------
+        # The LAB wash is a recolour, and a recolour always reads as paint. It
+        # shifts existing pixels toward a target mean, so it cannot add the
+        # subsurface warmth, shadow terminators or pore texture a real skin
+        # tone has -- which is why a fully-corrected body still looks coloured
+        # ON rather than rendered. Every setting of it trades one artifact for
+        # another: reach far enough to fix a shaded limb and it starts
+        # repainting garments; pull back and the limb stays original.
+        #
+        # The model does not have that problem: it renders skin under the
+        # photo's real light. It just was not asked to, in a way it could act
+        # on -- the main pass has the whole frame to change and treats the body
+        # as context to preserve.
+        #
+        # So ask it directly, with the head made physically unchangeable.
+        # sampling_containment attaches the mask as noise_mask, and ComfyUI
+        # re-pins every latent OUTSIDE it to the source at each step. Masking
+        # to body skin only therefore means the head, hair, clothing and
+        # background cannot move at all -- not "are restored afterwards", but
+        # cannot be altered in the first place. That removes the skin-vs-head
+        # trade entirely: the head is out of the sampler's reach while the
+        # skin is being made.
+        #
+        # Off by default: this adds a third sampling pass and has not been
+        # A/B'd on GPU. Enable with cfg["simple_full_body_skin_repaint"]=True
+        # or HEADSWAP_SKIN_REPAINT=1.
+        _repaint_diag: dict[str, Any] | None = None
+        _repaint_on = bool(
+            self.cfg.get("simple_full_body_skin_repaint", False)
+        ) or os.environ.get("HEADSWAP_SKIN_REPAINT") not in (None, "", "0")
+        if _repaint_on and selected_face is not None:
+            try:
+                from headswap.skin_harmonize import (  # noqa: PLC0415
+                    person_minus_clothes_mask as _pmc_fn,
+                    semantic_clothes_mask as _cl_fn,
+                    semantic_person_skin_mask as _sk_fn,
+                )
+
+                _o = np.asarray(out.convert("RGB"), dtype=np.uint8)
+                _sk = _sk_fn(_o)
+                _pmc2 = _pmc_fn(_o, out)
+                _sk = (
+                    np.maximum(_sk, _pmc2)
+                    if _sk is not None and _pmc2 is not None
+                    else (_sk if _sk is not None else _pmc2)
+                )
+                if _sk is None:
+                    raise RuntimeError("no skin mask available for repaint")
+                # Subtract clothing so garments stay pinned, and everything
+                # above the chin so the head is outside the editable region.
+                _cl2 = _cl_fn(_o)
+                if _cl2 is not None:
+                    _sk = _sk * (1.0 - np.clip(_cl2, 0.0, 1.0))
+                _chin_y = max(0, min(_o.shape[0], int(selected_face.y1)))
+                _sk[:_chin_y] = 0.0
+                _cov = float((_sk > 0.5).mean())
+                _min_cov = float(
+                    self.cfg.get("skin_repaint_min_coverage", 0.01)
+                )
+                if _cov < _min_cov:
+                    _repaint_diag = {
+                        "skipped": f"skin coverage {_cov:.3%} < {_min_cov:.1%}"
+                    }
+                    print(
+                        f"[krea2 skin_repaint] SKIPPED - {_repaint_diag['skipped']}; "
+                        "not enough visible skin to be worth a pass",
+                        flush=True,
+                    )
+                else:
+                    _sk_pil = Image.fromarray(
+                        (np.clip(_sk, 0.0, 1.0) * 255).astype(np.uint8), mode="L"
+                    )
+                    _repaint_prompt = (
+                        "Keep everything exactly as it is -- the same person, "
+                        "pose, clothing, background and lighting. Only change "
+                        "the colour of the bare skin that is already visible "
+                        "on the body, so it matches the complexion of the face "
+                        "in this same image. Render the skin naturally under "
+                        "the existing light, with the same shadows, highlights "
+                        "and texture it already has. Do not alter the face or "
+                        "head. Do not change any garment."
+                    )
+                    _prev_cont = self.cfg.get("sampling_containment")
+                    self.cfg["sampling_containment"] = True
+                    try:
+                        with _stage(timings, "skin_repaint"):
+                            _rs = self._sample_edit(
+                                rt,
+                                bundle,
+                                out,
+                                face_crop,
+                                timings,
+                                prompt=_repaint_prompt,
+                                edit_cache_info=edit_cache_info,
+                                edit_mask=_sk_pil,
+                            )
+                    finally:
+                        if _prev_cont is None:
+                            self.cfg.pop("sampling_containment", None)
+                        else:
+                            self.cfg["sampling_containment"] = _prev_cont
+                    _new = _rs["edited"]
+                    if _new.size != out.size:
+                        _new = _new.resize(out.size, Image.Resampling.LANCZOS)
+                    out = _new
+                    _repaint_diag = {
+                        "applied": True,
+                        "skin_coverage": round(_cov, 4),
+                    }
+                    print(
+                        f"[krea2 skin_repaint] model re-rendered the skin inside a "
+                        f"{_cov:.2%} mask with the head/clothing/background pinned "
+                        "by noise_mask; this is rendered skin, not a recolour",
+                        flush=True,
+                    )
+            except Exception as _rexc:  # noqa: BLE001
+                _repaint_diag = {"failed": f"{type(_rexc).__name__}: {_rexc}"}
+                print(
+                    f"[krea2 skin_repaint] FAILED - {_repaint_diag['failed']}; "
+                    "falling through to the LAB wash",
+                    flush=True,
+                )
+
         _wash_default = not _head_restored
         tone_diag: dict[str, Any] | None = None
         if _head_restored:
@@ -5151,6 +5276,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "face_refine": refine_diag,
             "body_restore": body_restore_diag,
             "tone_check": tone_diag,
+            "skin_repaint": _repaint_diag,
             "skin_harmonize": skin_diag,
         }
         dbg: dict[str, str] = {}
