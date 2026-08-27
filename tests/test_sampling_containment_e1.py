@@ -35,7 +35,11 @@ def test_containment_is_off_by_default_in_production_config():
     cfg = yaml.safe_load((ROOT / "configs" / "krea2_identity_edit.yaml").read_text())
     assert cfg["sampling_containment"] is False
     # E1 must not have disturbed any of the knobs we were told not to touch.
-    assert cfg["denoise"] == 1.0
+    # denoise is 0.85, not 1.0: the sampler now seeds from the SOURCE latent
+    # (img2img) rather than EmptySD3LatentImage, so denoise is how far the
+    # render may travel from the original photo rather than a no-op. At 1.0 it
+    # regenerated the whole frame from noise and reinvented clothing.
+    assert 0.0 < cfg["denoise"] < 1.0
     assert cfg["mask_expand_px"] == 18
     assert cfg["mask_blur_px"] == 12
     assert cfg["stitch_feather_px"] == 10

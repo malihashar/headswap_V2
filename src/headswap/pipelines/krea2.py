@@ -2559,6 +2559,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     f"mask={list(_m.size)} scene={list(scene.size)}",
                     flush=True,
                 )
+            elif denoise < 0.999 and scene_lat is not None:
+                # img2img: start from the SOURCE image's latent, not noise.
+                #
+                # Everything below EmptySD3LatentImage starts sampling from
+                # PURE NOISE, which means the model regenerates the entire
+                # frame every render with nothing anchoring the original. That
+                # is the direct cause of the failures seen across the sweep:
+                # a black robe came back as a bare torso, a lace dress came
+                # back as a top plus a patterned skirt, a silver chain
+                # appeared on an athlete who was not wearing one, and the top
+                # of the head was cropped. No prompt wording can prevent this
+                # -- "keep the clothing exactly as it is" cannot constrain a
+                # sampler that never saw the clothing as a starting point.
+                #
+                # Seeding from the scene latent with denoise < 1 is the
+                # standard fix and is neither masking nor compositing: the
+                # WHOLE frame is preserved to the same degree, so there is no
+                # boundary anywhere and no seam can appear. Denoise sets how
+                # far the render may travel from the original -- high enough
+                # to replace a head, low enough to keep a garment.
+                latent = get_value_at_index(scene_lat, 0)
+                empty_node = f"scene_latent_img2img(denoise={denoise})"
+                print(
+                    f"[krea2 img2img] starting from the SOURCE latent at "
+                    f"denoise={denoise} (not empty noise), so clothing, pose "
+                    "and framing are preserved globally without any mask",
+                    flush=True,
+                )
             elif rt.has("EmptySD3LatentImage"):
                 empty = rt.call(
                     "EmptySD3LatentImage", width=w, height=h, batch_size=1

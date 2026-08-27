@@ -33,7 +33,14 @@ cfg: 1.8
 sampler: euler
 scheduler: simple
 seed: 46
-denoise: 1.0
+# 0.85, not 1.0. With the img2img path the sampler now starts from the SOURCE
+# latent, so denoise is how far the render may travel from the original photo.
+# At 1.0 it starts from pure noise and regenerates everything -- measured as a
+# black robe returning as a bare torso, a lace dress as a top plus skirt, and a
+# silver chain appearing on an athlete who wore none. 0.85 is high enough to
+# replace a head and change skin tone, low enough to keep the garment.
+# Lower toward 0.75 if clothing still drifts; raise if the head stops changing.
+denoise: 0.85
 
 # Match Turbo distilled timestep shift (mu=1.15) when ModelSamplingFlux exists.
 apply_timestep_shift: true
@@ -64,7 +71,11 @@ verbose: false
 # image-reference conditioning is the correct lever here, not more prompt
 # text -- cfg=1.0 (required by this distilled checkpoint) already caps how
 # much the text prompt alone can steer generation.
-ref_boost: 7.0
+# 4.0, not 7.0. docs/PIPELINE_STATE.md CHECKPOINT-06 records 7.0 as REJECTED
+# ("overcooks face, synthetic/uncanny look") and 4.0 as the most defensible
+# stable value -- but 7.0 was what production actually ran, which is the waxy
+# plastic skin visible across the whole 8-pair sweep.
+ref_boost: 4.0
 ref_boost_a: 1.6
 grounding_px: 768
 fit_mode: fit
