@@ -219,6 +219,10 @@ def main() -> int:
     ap.add_argument("--config", default="configs/krea2_identity_edit.yaml")
     ap.add_argument("-o", "--out", default="results/_ab_skin_variants")
     ap.add_argument("--only", default="", help="comma-separated variant keys")
+    ap.add_argument("--resume", action="store_true", default=True,
+                    help="skip renders already on disk (default on)")
+    ap.add_argument("--no-resume", dest="resume", action="store_false",
+                    help="re-render everything")
     a = ap.parse_args()
 
     from headswap.config import load_config
@@ -247,8 +251,23 @@ def main() -> int:
 
     rows: list[dict[str, Any]] = []
     for pair in pairs:
-        body = Image.open(pair / "body.png").convert("RGB")
-        face = Image.open(pair / "face.png").convert("RGB")
+        # Re-check on use, not just at listing time. An interrupted upload
+        # leaves a directory holding face.png and no body.png, and crashing on
+        # it threw away an hour of completed renders for the pairs before it.
+        if not (pair / "body.png").exists() or not (pair / "face.png").exists():
+            print(
+                f"[ab] SKIP {pair.name}: incomplete pair "
+                f"(body={ (pair/'body.png').exists() } "
+                f"face={ (pair/'face.png').exists() }) -- re-upload it",
+                flush=True,
+            )
+            continue
+        try:
+            body = Image.open(pair / "body.png").convert("RGB")
+            face = Image.open(pair / "face.png").convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ab] SKIP {pair.name}: unreadable ({exc})", flush=True)
+            continue
         tone_words, donor_l = _donor_tone_words(face)
         panels = [_label(body, f"{pair.name}: BODY"),
                   _label(face, f"{pair.name}: DONOR")]
@@ -259,6 +278,13 @@ def main() -> int:
             if v.get("name_tone") and tone_words:
                 cfg["simple_full_body_tone_words"] = tone_words
             tag = f"{pair.name}/{v['key']}"
+            # Resume: a render already on disk is not repeated. A crash or a
+            # Colab disconnect part-way through an hour-long sweep should cost
+            # the remaining renders, not the finished ones.
+            _done = out_dir / v["key"] / f"{pair.name}.png"
+            if a.resume and _done.exists():
+                print(f"[ab] SKIP {tag}: already rendered", flush=True)
+                continue
             print(f"\n===== {tag} =====", flush=True)
             t0 = time.perf_counter()
             rec: dict[str, Any] = {
