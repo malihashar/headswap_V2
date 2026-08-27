@@ -28,12 +28,21 @@ HARM = (ROOT / "src" / "headswap" / "skin_harmonize.py").read_text()
 
 def test_clothing_protection_is_lifted_on_original_hair():
     assert "_orig_hair_sem" in KREA2, "original hair class is not captured"
-    i_lift = KREA2.find("_cloth = _cloth * (1.0 - np.clip(_orig_hair_sem")
+    i_lift = KREA2.find("_cloth = _cloth * (1.0 - np.clip(_hair_lift")
     assert i_lift > 0, "clothing protection is not lifted where hair overlapped"
     i_apply = KREA2.find("_hm = _hm * (1.0 - np.clip(_cloth, 0.0, 1.0))")
     assert 0 < i_lift < i_apply, (
         "the lift must happen BEFORE the clothing mask is subtracted from the "
         "keep mask, or it has no effect"
+    )
+
+
+def test_hair_lift_dilation_is_bounded():
+    """An unbounded grow reopens collar protection and the donor collar returns."""
+    assert "hair_lift_dilate_face_frac" in KREA2, "hair lift dilation is not configurable"
+    assert "0.02 * max(out.size[0], out.size[1])" in KREA2, (
+        "the hair-lift dilation has no frame-relative cap; on a large face it "
+        "would punch a wide hole in clothing protection"
     )
 
 

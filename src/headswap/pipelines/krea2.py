@@ -4728,15 +4728,45 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     # segmenter's ORIGINAL hair class -- never the geometric
                     # ellipse, which would punch a hole in the collar
                     # protection and let the donor's own collar back in.
-                    _hair_over_cloth = float(
-                        ((_cloth > 0.5) & (_orig_hair_sem > 0.5)).sum()
+                    # Dilate the hair class first. The segmenter finds the
+                    # hair MASS but not the thin flyaway strands that trail off
+                    # it, and those strands are exactly what ghosts: measured,
+                    # the undilated lift reached only 1,102px and left the
+                    # visible wisps untouched. Strands are contiguous with
+                    # detected hair, so a bounded dilation picks them up
+                    # without needing per-strand recall.
+                    #
+                    # Bounded deliberately. This dilation reopens clothing
+                    # protection wherever it reaches, so an unbounded grow
+                    # would let the donor's own collar back in -- the artifact
+                    # 9931abe and cd84863 were fighting. Radius is a small
+                    # fraction of face height and capped against the frame.
+                    _fh_hair = max(1, int(selected_face.y1) - int(selected_face.y0))
+                    _hr = int(
+                        min(
+                            float(self.cfg.get("hair_lift_dilate_face_frac", 0.10))
+                            * _fh_hair,
+                            0.02 * max(out.size[0], out.size[1]),
+                        )
                     )
-                    _cloth = _cloth * (1.0 - np.clip(_orig_hair_sem, 0.0, 1.0))
+                    _hair_lift = _orig_hair_sem
+                    if _hr >= 1:
+                        _hair_lift = cv2.dilate(
+                            (_orig_hair_sem > 0.5).astype(np.uint8),
+                            cv2.getStructuringElement(
+                                cv2.MORPH_ELLIPSE, (_hr * 2 + 1, _hr * 2 + 1)
+                            ),
+                        ).astype(np.float32)
+                    _hair_over_cloth = float(
+                        ((_cloth > 0.5) & (_hair_lift > 0.5)).sum()
+                    )
+                    _cloth = _cloth * (1.0 - np.clip(_hair_lift, 0.0, 1.0))
                     print(
                         f"[krea2 body_restore] lifted clothing protection on "
                         f"{int(_hair_over_cloth)}px where the ORIGINAL person's hair "
-                        "overlapped their garment, so overhanging strands are "
-                        "replaced instead of restored with the clothing",
+                        f"(dilated {_hr}px to catch flyaway strands the hair class "
+                        "misses) overlapped their garment, so overhanging strands "
+                        "are replaced instead of restored with the clothing",
                         flush=True,
                     )
                 if _cloth is not None:

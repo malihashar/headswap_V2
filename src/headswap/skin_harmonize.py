@@ -506,14 +506,50 @@ def _face_skin_lab_stats(
     if int(warm.sum()) < 64:
         return None
     Lw = L[warm]
-    # Drop the darkest 35% (beard, nostrils, cast shadow, hair edges) and the
-    # brightest 5% (specular highlight), then read the tone off what's left --
-    # lit, unoccluded skin.
-    lo_c, hi_c = np.percentile(Lw, 35.0), np.percentile(Lw, 95.0)
+    # Drop the darkest 10% (nostrils, cast shadow, hair edges) and the
+    # brightest 5% (specular highlight), then read the tone off what's left.
+    #
+    # This cut used to be 35%, which is directionally unsafe. It assumes dark
+    # pixels are beard/shadow -- true for a pale donor, false for a dark-
+    # complexioned one, where the dark pixels ARE the skin. Discarding the
+    # darkest third of a dark face biases the reported tone brighter, and
+    # since this value is the TARGET of the transfer, the whole body then
+    # aims too light and stops there.
+    #
+    # GPU-measured: a dark donor read L=106 here while the lateral-cheek
+    # estimate of the same face read L=81. The body transferred to 106 and
+    # remained permanently lighter than the face -- diagnosed repeatedly as a
+    # mask-coverage problem, because a body that stops short looks identical
+    # to a body that was never fully selected.
+    #
+    # 10% still removes nostrils and hard shadow, and _robust_lab_stats below
+    # is median/MAD-based, so it is already outlier-resistant; the aggressive
+    # extra haircut was redundant with it as well as biased.
+    lo_c, hi_c = np.percentile(Lw, 10.0), np.percentile(Lw, 95.0)
     keep = warm & (L >= lo_c) & (L <= hi_c)
     if int(keep.sum()) < 32:
         keep = warm
-    return _robust_lab_stats(flat[keep])
+    mean, std = _robust_lab_stats(flat[keep])
+    # Cross-check against the lateral-cheek reading, which samples with an
+    # explicit margin in from the box edge and cannot drift bright by
+    # percentile choice. If the content-selected answer is much BRIGHTER, it
+    # has eaten real skin; prefer the cheek reading. Only guards the bright
+    # direction -- a darker answer here is legitimate (it means the cheek
+    # rectangle caught background or hair).
+    try:
+        cheek_mean, cheek_std = _cheek_lab_stats(rgb_np, x0, y0, x1, y1)
+        if float(mean[0]) - float(cheek_mean[0]) > 12.0:
+            print(
+                f"[skin_harm] face-skin tone L={float(mean[0]):.0f} is "
+                f"{float(mean[0]) - float(cheek_mean[0]):.0f} brighter than the "
+                f"cheek reading L={float(cheek_mean[0]):.0f}; using the cheek "
+                "value so a dark complexion is not read as light",
+                flush=True,
+            )
+            return cheek_mean, cheek_std
+    except Exception:  # noqa: BLE001 — cross-check must never break the read
+        pass
+    return mean, std
 
 
 def _cheek_lab_stats(
