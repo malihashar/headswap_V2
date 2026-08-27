@@ -4445,8 +4445,36 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # is no good either: a horizontal ramp (y=354..498) and a head column
         # (x=272..854) both cut across the shoulders. A head-SILHOUETTE
         # boundary only crosses hair, hat edge and a short piece of neck.
+        # RAW MODEL mode: no restore, no wash, no repaint -- ship exactly what
+        # the model rendered.
+        #
+        # Every compositing stage creates a boundary between model pixels and
+        # original pixels, and that boundary is visible precisely when the two
+        # sides differ, which is exactly when the stage was thought necessary.
+        # So the stages move seams rather than remove them: the accumulated
+        # result was a hard-edged patch across an athlete's arm where the keep
+        # mask ended. The LAB wash compounds it -- shifting pixels toward a
+        # target mean cannot produce skin rendered under the scene's light, so
+        # a fully "corrected" body still reads as paint.
+        #
+        # The model already receives one plain instruction covering the whole
+        # job (replace the head, recolour the visible skin, keep everything
+        # else), and its own output has no seams in it by construction. This
+        # mode tests that directly instead of assuming the post-stages are
+        # load-bearing -- they have never actually been switched off together.
+        _raw_model = bool(
+            self.cfg.get("simple_full_body_raw_model", False)
+        ) or os.environ.get("HEADSWAP_RAW_MODEL") not in (None, "", "0")
+        if _raw_model:
+            print(
+                "[krea2 raw_model] body_restore + LAB wash + skin_repaint all "
+                "DISABLED; shipping the model's own render so no composite "
+                "boundary can appear",
+                flush=True,
+            )
+
         _head_restored = False
-        if selected_face is not None and bool(
+        if not _raw_model and selected_face is not None and bool(
             self.cfg.get("simple_full_body_restore_body", True)
         ):
             try:
@@ -4875,7 +4903,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     "cross the shoulders; keeping the model's coherent frame.",
                     flush=True,
                 )
-        if selected_face is not None and not _head_restored and not _bust_skip and bool(
+        if not _raw_model and selected_face is not None and not _head_restored and not _bust_skip and bool(
             self.cfg.get("simple_full_body_restore_body", True)
         ):
 
@@ -5013,7 +5041,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         _repaint_on = bool(
             self.cfg.get("simple_full_body_skin_repaint", False)
         ) or os.environ.get("HEADSWAP_SKIN_REPAINT") not in (None, "", "0")
-        if _repaint_on and selected_face is not None:
+        if _repaint_on and not _raw_model and selected_face is not None:
             try:
                 from headswap.skin_harmonize import (  # noqa: PLC0415
                     person_minus_clothes_mask as _pmc_fn,
@@ -5217,7 +5245,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "Falling back to the wash so the skin still changes.",
                 flush=True,
             )
-        if bool(self.cfg.get("simple_full_body_skin_harmonize", _wash_default)) and selected_face is not None:
+        if not _raw_model and bool(self.cfg.get("simple_full_body_skin_harmonize", _wash_default)) and selected_face is not None:
             try:
                 from headswap.skin_harmonize import extend_skin_harmonization
 
@@ -5277,6 +5305,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "body_restore": body_restore_diag,
             "tone_check": tone_diag,
             "skin_repaint": _repaint_diag,
+            "raw_model": _raw_model,
             "skin_harmonize": skin_diag,
         }
         dbg: dict[str, str] = {}
