@@ -774,10 +774,35 @@ def extend_skin_harmonization(
             # edge of its own, then keep a floor of 0 outside skin: clothing
             # must go to zero, not merely be attenuated.
             _k = max(3, (int(max(H, W) * 0.01) * 2 + 1))
-            _sem = cv2.GaussianBlur(_sem, (_k, _k), 0)
-            weight *= np.clip(_sem, 0.0, 1.0)
+            _sem_soft = cv2.GaussianBlur(_sem, (_k, _k), 0)
+            # Promote to FULL weight inside validated semantic skin instead of
+            # attenuating it by the colour score.
+            #
+            # `weight` above is _skin_likeness: a graded chroma distance from
+            # the target's ORIGINAL face. As a skin FINDER that is sound, but
+            # as a per-pixel STRENGTH it under-corrects exactly where skin is
+            # shaded, because shadow moves a pixel away from the sunlit-face
+            # reference and the score falls. Multiplying the two then caps the
+            # correction at the colour score everywhere: GPU-measured
+            # w_mean=0.727 with only w_full_frac=0.049 of selected pixels at
+            # full strength, which is why one leg came back visibly
+            # half-corrected while the rest of the body matched -- the darker
+            # leg simply scored lower and got proportionally less of the
+            # shift.
+            #
+            # Once the semantic gate has passed its own sanity check it has
+            # already answered "is this skin" on class, not colour, so the
+            # colour score has no remaining job. Take the max so semantic skin
+            # gets the full transfer regardless of shading, while everything
+            # the segmenter rejects still goes to zero (floor preserved) and
+            # the colour score still carries any skin the segmenter missed.
+            _sem_c = np.clip(_sem_soft, 0.0, 1.0)
+            _matte = np.clip(person_matte.astype(np.float32) / 255.0, 0.0, 1.0)
+            weight = np.maximum(weight * _sem_c, _sem_c * _matte)
             print(
-                f"[skin_harm] semantic skin gate applied (skin px={_sem_px})",
+                f"[skin_harm] semantic skin gate applied (skin px={_sem_px}); "
+                "full transfer weight inside semantic skin so shaded limbs are "
+                "not left half-corrected",
                 flush=True,
             )
     weight[:head_excl] = 0.0
