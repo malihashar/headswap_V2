@@ -4251,8 +4251,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "second image, with none of the first person's head remaining. "
             "Second: change the skin colour of the body -- the neck, arms, "
             "hands and legs that are already bare -- to the skin colour of "
-            "the person in the second image, so the head and body are one "
-            "person. "
+            "the person in the second image"
+            # Naming the measured tone in words turns "match the other image"
+            # (an inference the model may not attend to) into a literal
+            # instruction. Set by the A/B runner for variant C; empty
+            # elsewhere, so the default prompt is unchanged.
+            + (
+                f", which is {self.cfg['simple_full_body_tone_words']} skin"
+                if self.cfg.get("simple_full_body_tone_words")
+                else ""
+            )
+            + ", so the head and body are one person. "
             "Keep the clothing, pose, body shape, background and lighting "
             "exactly as they are. Do not turn any clothed area into skin."
         )
