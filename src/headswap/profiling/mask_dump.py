@@ -19,6 +19,12 @@ from PIL import Image, ImageDraw
 _COLS = 5
 _THUMB_W = 340.0
 
+# Every call used to write straight into the same directory, so running two
+# pairs back to back left only the SECOND pair's montage on disk -- the first
+# was silently overwritten seconds later, which looked exactly like "the dump
+# did not run". Number each call so both survive.
+_RUN_N = 0
+
 
 def _overlay(base: Image.Image, mask: Any, label: str) -> Image.Image:
     """Red = mask on, over a dimmed base, so gaps read at a glance."""
@@ -48,8 +54,10 @@ def dump_mask_montage(
     out_dir: str | Path,
 ) -> Path | None:
     """Write <out_dir>/masks_montage.png. Returns the path, or None on failure."""
+    global _RUN_N
     try:
-        out_dir = Path(out_dir)
+        _RUN_N += 1
+        out_dir = Path(out_dir) / f"run{_RUN_N:02d}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         res_pil = result_pil.convert("RGB")
@@ -116,7 +124,12 @@ def dump_mask_montage(
             sheet.paste(im.resize((tw, th)), ((i % _COLS) * tw, (i // _COLS) * th))
         dest = out_dir / "masks_montage.png"
         sheet.save(dest)
-        print(f"[mask_dump] wrote {dest} ({len(imgs)} panels)", flush=True)
+        print(
+            f"[mask_dump] wrote {dest} ({len(imgs)} panels) -- run #{_RUN_N}; "
+            "each render gets its own runNN folder so a later pair cannot "
+            "overwrite an earlier one",
+            flush=True,
+        )
         return dest
     except Exception as exc:  # noqa: BLE001 — diagnostics must never break a run
         print(f"[mask_dump] FAILED: {type(exc).__name__}: {exc}", flush=True)
