@@ -86,3 +86,30 @@ def test_no_neck_gate_shrinks_the_generated_head_coverage():
         "the neck gate is back; it shrinks GENERATED coverage and cannot "
         "remove old hair"
     )
+
+
+def test_silhouette_clamp_is_widened_by_the_original_head():
+    """The clamp, not the clothing rule, was holding hair ghosting in place.
+
+    semantic_person_mask finds the body MASS and drops thin flyaway strands,
+    which are a pixel or two wide against the background. Those strands fall
+    outside every silhouette, the clamp zeroes the keep mask on them, and the
+    ORIGINAL -- where the strands live -- is restored. Measured ~62,000px
+    removed by this clamp on the failing pair, the largest single subtraction
+    in the chain, which is why widening the head union and lifting clothing
+    protection both failed to reach them.
+    """
+    i_widen = KREA2.find("_pm = np.maximum(_pm, np.clip(_orig_head, 0.0, 1.0))")
+    assert i_widen > 0, "silhouette clamp is not widened by the original head"
+    i_clamp = KREA2.find("_hm = _hm * np.clip(_pm, 0.0, 1.0)")
+    assert 0 < i_widen < i_clamp, (
+        "the widening must happen BEFORE the clamp multiplies it into the keep "
+        "mask, or it has no effect"
+    )
+
+
+def test_silhouette_widening_uses_rembg_matte_for_hair():
+    assert "_get_person_matte(body_full)" in KREA2, (
+        "rembg's original matte is not unioned in; the class segmenter alone "
+        "drops hair strands and the ghosting returns"
+    )

@@ -4661,6 +4661,54 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     _pm = np.maximum(_pm, _pm_orig)
                 elif _pm is None:
                     _pm = _pm_orig
+                # Widen the allowed region by rembg's ORIGINAL matte and by the
+                # original-head footprint.
+                #
+                # semantic_person_mask is a class segmenter: it finds the body
+                # MASS and drops thin flyaway hair strands, which are only a
+                # pixel or two wide against the background. Those strands are
+                # therefore outside every silhouette used here, the clamp zeroes
+                # the keep mask on them, the ORIGINAL is restored -- and the
+                # original is where the strands live. This clamp removes ~62k px
+                # on the failing pair, the largest single subtraction in the
+                # chain, so it, not the clothing rule, is what was holding the
+                # ghosting in place. No amount of widening the head union or
+                # lifting clothing protection could reach past it.
+                #
+                # rembg mattes hair far better than the class segmenter, and
+                # _orig_head is exactly "where the previous person's head was",
+                # which is the one region generated pixels are *supposed* to
+                # win. Background away from the head is still protected, so the
+                # halo fix this clamp exists for is preserved.
+                try:
+                    from headswap.skin_harmonize import (  # noqa: PLC0415
+                        _get_person_matte,
+                    )
+
+                    _matte_orig = _get_person_matte(body_full)
+                    if _matte_orig is not None and _pm is not None:
+                        _mo = np.asarray(_matte_orig, dtype=np.float32) / 255.0
+                        if _mo.shape != _pm.shape:
+                            _mo = cv2.resize(_mo, (_pm.shape[1], _pm.shape[0]))
+                        _pm = np.maximum(_pm, _mo)
+                except Exception as _mexc:  # noqa: BLE001
+                    print(
+                        f"[krea2 body_restore] rembg original matte unavailable "
+                        f"({type(_mexc).__name__}: {_mexc}); silhouette widening "
+                        "falls back to the class masks",
+                        flush=True,
+                    )
+                if _pm is not None and _orig_head is not None:
+                    _pre_widen = float((_pm > 0.5).sum())
+                    _pm = np.maximum(_pm, np.clip(_orig_head, 0.0, 1.0))
+                    print(
+                        f"[krea2 body_restore] silhouette widened by the ORIGINAL "
+                        f"head footprint: {int(_pre_widen)} -> "
+                        f"{int((_pm > 0.5).sum())}px, so hair strands the class "
+                        "segmenter treats as background are still overwritten by "
+                        "the generated frame",
+                        flush=True,
+                    )
                 if _pm is not None:
                     _pm = cv2.GaussianBlur(_pm.astype(np.float32), (3, 3), 0)
                     _before = float(_hm.sum())
