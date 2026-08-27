@@ -12,6 +12,7 @@ show where wall time goes (bootstrap / load / encode / sample / decode).
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 from contextlib import contextmanager
@@ -5040,7 +5041,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # intermediate images alive, so an after-the-fact script has nothing
         # to read, and re-deriving the masks from saved PNGs is exactly the
         # indirection that made three mask fixes miss.
-        if bool(self.cfg.get("dump_masks", False)):
+        # Also readable from the environment: the caller may not have a
+        # convenient place to set a cfg key, and a diagnostic that requires
+        # finding the right cell first is a diagnostic that does not get run.
+        if bool(self.cfg.get("dump_masks", False)) or os.environ.get(
+            "HEADSWAP_DUMP_MASKS"
+        ) not in (None, "", "0"):
             from headswap.profiling.mask_dump import (  # noqa: PLC0415
                 dump_mask_montage,
             )
@@ -5048,7 +5054,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             dump_mask_montage(
                 out,
                 body_full,
-                str(self.cfg.get("dump_masks_dir", "/content/_mask_dump")),
+                str(
+                    self.cfg.get("dump_masks_dir")
+                    or os.environ.get("HEADSWAP_DUMP_MASKS_DIR")
+                    or "/content/_mask_dump"
+                ),
             )
 
         total_s = time.perf_counter() - t0
