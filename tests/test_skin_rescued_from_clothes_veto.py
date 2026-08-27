@@ -24,11 +24,18 @@ import headswap.skin_harmonize as sh
 HARM = (ROOT / "src" / "headswap" / "skin_harmonize.py").read_text()
 
 
-def test_rescue_threshold_is_high_enough_to_reject_a_garment():
-    """A blue jersey scored 1.00 on colour alone in an earlier regression."""
-    assert sh._SKIN_RESCUE_FROM_CLOTHES >= 0.7, (
-        f"threshold {sh._SKIN_RESCUE_FROM_CLOTHES} is too permissive; a "
-        "skin-coloured garment would be recoloured"
+def test_rescue_is_disabled_by_default():
+    """At 0.75 it recoloured garments: 102,850px on one frame.
+
+    A white top came back pink and a patterned skirt brown. A garment
+    photographed under the same light as its wearer sits close to that
+    wearer's face in chroma, so _skin_likeness cannot separate them: any
+    threshold low enough to reach shaded skin also admits cloth.
+    """
+    assert sh._SKIN_RESCUE_FROM_CLOTHES > 1.0, (
+        f"threshold {sh._SKIN_RESCUE_FROM_CLOTHES} is reachable "
+        "(_skin_likeness maxes at 1.0), so the clothes-recolouring regression "
+        "is live again"
     )
 
 

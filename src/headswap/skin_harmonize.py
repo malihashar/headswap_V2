@@ -157,11 +157,24 @@ _SEM_MODEL_PATHS = (
 _SEM_BODY_SKIN, _SEM_FACE_SKIN = 2, 3
 
 # Skin-likeness score above which a pixel overrides a CLOTHES class veto.
-# Deliberately high: colour alone scored a blue jersey at 1.00 in an earlier
-# regression, so the override needs strong colour evidence AND rembg agreeing
-# the pixel is the person. Set to a value > 1.0 to disable the rescue.
+#
+# DISABLED BY DEFAULT (2.0 is unreachable; _skin_likeness maxes at 1.0).
+#
+# At 0.75 this rescued 102,850px on a single frame and what it rescued was
+# GARMENT: a white top came back pink and a patterned skirt came back brown.
+# That is the exact regression this file already documents -- chroma distance
+# alone scored a blue jersey at 1.00 -- and it reappeared because a garment
+# photographed under the same light as its wearer sits close to that wearer's
+# face in chroma. The reference cannot separate them, so no threshold on this
+# score is safe: raising it far enough to exclude clothing also excludes the
+# shaded skin the rescue existed to reach.
+#
+# Kept as a knob rather than deleted because the underlying observation still
+# holds -- a bare limb rendered in a garment-like tone IS vetoed by the
+# clothes class. That has to be fixed with a signal that distinguishes cloth
+# from skin (texture//geometry), not with a chroma threshold.
 _SKIN_RESCUE_FROM_CLOTHES = float(
-    os.environ.get("HEADSWAP_SKIN_RESCUE_THR", "0.75")
+    os.environ.get("HEADSWAP_SKIN_RESCUE_THR", "2.0")
 )
 
 
