@@ -4510,6 +4510,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 _orig_head = _sem_head_only(
                     np.asarray(body_full.convert("RGB"), dtype=np.uint8)
                 )
+                # Keep the segmenter's ORIGINAL head/hair answer separately
+                # from the geometric ellipse below. It is class-derived, so it
+                # follows actual hair strands; the ellipse is a crude shape and
+                # would drag the collar with it if used for the same purpose.
+                _orig_hair_sem = None if _orig_head is None else _orig_head.copy()
                 # Do not depend on segmenter RECALL for the original head. It
                 # under-detects exactly the cases that matter: a black songkok
                 # against a dark robe returned 12,067px and fine hair strands
@@ -4572,60 +4577,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         f"({type(_gexc).__name__}: {_gexc}); using segmenter head only",
                         flush=True,
                     )
-                # Cap the ORIGINAL-head union at neck height before it is
-                # unioned in.
-                #
-                # _orig_head is a geometric ellipse sized from the face box
-                # (top_extend=1.60, side_extend=0.70 of face height). On a
-                # full-body frame that deliberately over-reaches to guarantee
-                # the previous person's hair is covered, but the same
-                # over-reach drags the ellipse down over the shoulders and
-                # upper chest -- so ORIGINAL pixels there, including the old
-                # hairstyle's loose strands and pigtail tails, are pulled into
-                # the keep mask and composited back into the result. That is
-                # the hair ghosting seen on the shoulders.
-                #
-                # Commit 356d344 fixed the symptom by gating the whole keep
-                # mask at neck height, and was reverted in a398bd4. Applied
-                # there the gate is genuinely harmful: by that point the keep
-                # mask also carries the body-SKIN mask (arms, legs), so a
-                # vertical cut at the neck zeroes every limb and the entire
-                # body below the chin is restored at its original tone -- it
-                # would silently undo the skin-tone correction.
-                #
-                # Gate only the ellipse, which is the component that
-                # over-reaches. Skin coverage is untouched, so limbs still
-                # recolour, and the ramp keeps the cut from becoming a hard
-                # horizontal edge across the shoulders.
-                if _orig_head is not None:
-                    _fh_neck = max(1, int(selected_face.y1) - int(selected_face.y0))
-                    _neck_y = int(
-                        int(selected_face.y1)
-                        + float(
-                            self.cfg.get("simple_full_body_head_union_neck_frac", 0.65)
-                        )
-                        * _fh_neck
-                    )
-                    if 0 < _neck_y < _orig_head.shape[0]:
-                        _gate = np.zeros_like(_orig_head, dtype=np.float32)
-                        _gate[:_neck_y] = 1.0
-                        _fade = int(0.20 * _fh_neck)
-                        _y_end = min(_orig_head.shape[0], _neck_y + max(0, _fade))
-                        if _y_end > _neck_y:
-                            _ramp = np.linspace(
-                                1.0, 0.0, _y_end - _neck_y, dtype=np.float32
-                            )
-                            _gate[_neck_y:_y_end] = _ramp[:, None]
-                        _pre_gate = int((_orig_head > 0.5).sum())
-                        _orig_head = _orig_head * _gate
-                        print(
-                            f"[krea2 body_restore] original-head union capped at "
-                            f"neck height y={_neck_y} (chin y={int(selected_face.y1)}): "
-                            f"{_pre_gate} -> {int((_orig_head > 0.5).sum())}px, so the "
-                            "old hairstyle's strands cannot be pulled back onto the "
-                            "shoulders; body skin coverage is unaffected",
-                            flush=True,
-                        )
                 if _head is not None and _orig_head is not None:
                     _head = np.maximum(_head, _orig_head)
                     print(
@@ -4759,6 +4710,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     )
                 elif _cloth is None:
                     _cloth = _cloth_gen
+                if _cloth is not None and _orig_hair_sem is not None:
+                    # Hair that overhangs a garment is the one place these two
+                    # rules collide. The clothing rule says "any pixel that
+                    # reads as clothing comes from the ORIGINAL"; the hair rule
+                    # says "none of the first person's hair survives". Where the
+                    # previous person's strands fall across their own shoulders
+                    # and chest, the segmenter labels that band CLOTHES, the
+                    # clothing subtraction pulls it out of the keep mask, the
+                    # original is restored there -- and the original still has
+                    # the strands in it. That is the hair ghosting on the
+                    # shoulders, and it survives any change to the head union
+                    # because the subtraction runs afterwards and wins.
+                    #
+                    # Resolve it in the hair rule's favour, but only on the
+                    # segmenter's ORIGINAL hair class -- never the geometric
+                    # ellipse, which would punch a hole in the collar
+                    # protection and let the donor's own collar back in.
+                    _hair_over_cloth = float(
+                        ((_cloth > 0.5) & (_orig_hair_sem > 0.5)).sum()
+                    )
+                    _cloth = _cloth * (1.0 - np.clip(_orig_hair_sem, 0.0, 1.0))
+                    print(
+                        f"[krea2 body_restore] lifted clothing protection on "
+                        f"{int(_hair_over_cloth)}px where the ORIGINAL person's hair "
+                        "overlapped their garment, so overhanging strands are "
+                        "replaced instead of restored with the clothing",
+                        flush=True,
+                    )
                 if _cloth is not None:
                     _cloth = cv2.GaussianBlur(_cloth.astype(np.float32), (3, 3), 0)
                     _pre_c = float(_hm.sum())

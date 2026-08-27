@@ -729,6 +729,42 @@ def extend_skin_harmonization(
     # Semantic gate: keep only what a skin/clothes-aware segmenter calls skin.
     # Without this the colour rule alone repaints skin-coloured garments.
     _sem = _semantic_skin_mask(result_np)
+    # Union in rembg(person - clothes) - minus the head - as a skin FLOOR.
+    #
+    # The multiclass segmenter has to label each limb as body-skin and it does
+    # not do so reliably: krea2's restore already works around exactly this
+    # ("caught one arm and missed the other"). When it misses a limb here the
+    # gate contributes nothing there, the pixel keeps only the graded colour
+    # score, and a shaded leg ends up visibly half-corrected next to a
+    # fully-corrected one -- measured w_full_frac=0.05 with the miss.
+    #
+    # rembg answers the much easier "is this the person?" question reliably,
+    # and clothes are already subtracted from it. The head is subtracted too,
+    # so hair overhanging a shoulder is never mistaken for skin and recoloured.
+    if _sem is not None:
+        try:
+            _pmc = person_minus_clothes_mask(result_np, result_pil)
+            if _pmc is not None:
+                _pm_head = semantic_head_mask(result_np)
+                if _pm_head is not None:
+                    _pmc = _pmc * (1.0 - np.clip(_pm_head, 0.0, 1.0))
+                _pre_union = int((_sem > 0.5).sum())
+                _sem = np.maximum(_sem, _pmc)
+                info["semantic_skin_pmc_union"] = [
+                    _pre_union, int((_sem > 0.5).sum())
+                ]
+                print(
+                    f"[skin_harm] skin gate widened by rembg(person-clothes-head): "
+                    f"{_pre_union} -> {int((_sem > 0.5).sum())}px so a limb the class "
+                    "segmenter missed is corrected as fully as its pair",
+                    flush=True,
+                )
+        except Exception as _uexc:  # noqa: BLE001
+            print(
+                f"[skin_harm] person-minus-clothes union failed "
+                f"({type(_uexc).__name__}: {_uexc}); using the class mask alone",
+                flush=True,
+            )
     info["semantic_skin"] = _sem is not None
     if _sem is not None:
         # Sanity-check the gate before trusting it to veto. Measured on the
