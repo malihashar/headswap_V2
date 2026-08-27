@@ -4521,6 +4521,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # silhouette clamp and the clothing-protection step both run
                 # after this and still subtract background and garment.
                 try:
+                    # face_frac 0.08 (full body) -> 1.00 ; 0.40 (bust) -> ~0.35
+                    _ff_frac = (int(selected_face.y1) - int(selected_face.y0)) / max(
+                        1, out.size[1]
+                    )
+                    _oh_scale = float(min(1.0, max(0.30, 0.10 / max(1e-6, _ff_frac))))
                     _geo_head, _ = build_head_hair_mask(
                         body_full,
                         self.cache_dir,
@@ -4528,15 +4533,24 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         face_box=selected_face,
                         expand_px=int(self.cfg.get("mask_expand_px", 18)),
                         blur_px=int(self.cfg.get("mask_blur_px", 12)),
+                        # Scale the extends DOWN as the face grows relative to
+                        # the frame. They are multiples of face height, so on a
+                        # bust shot (face 40% of frame) the fixed values gave a
+                        # 424x621px ellipse = 35% of the whole image, spanning
+                        # far past the head onto shoulders and chest. Its soft
+                        # outer edge, where generated meets original at slightly
+                        # different tone, is the shadow ring. A full-body frame
+                        # (face 8%) is unaffected: there the ellipse is only
+                        # ~4% of the frame and genuinely needed to cover hair.
                         top_extend=float(
                             self.cfg.get("orig_head_union_top_extend", 1.60)
-                        ),
+                        ) * _oh_scale,
                         side_extend=float(
                             self.cfg.get("orig_head_union_side_extend", 0.70)
-                        ),
+                        ) * _oh_scale,
                         bot_extend=float(
                             self.cfg.get("orig_head_union_bot_extend", 0.15)
-                        ),
+                        ) * _oh_scale,
                     )
                     _geo = np.asarray(_geo_head.convert("L"), dtype=np.float32) / 255.0
                     if _orig_head is not None:
