@@ -4231,32 +4231,30 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # attempt moved the seam rather than removing it). The model has no
         # mask at all, and renders the new tone under the photo's real
         # lighting, so shading and shadow terminators stay physically right.
+        # Two instructions, both stated first, both concrete.
+        #
+        # The previous prompt was ~120 words and put the skin instruction
+        # third, after two clauses of prohibitions ("do not remove, redraw or
+        # alter any clothing... do not turn any clothed area into skin"). At
+        # cfg=1.0 there is no classifier-free guidance, so prompt adherence is
+        # weak to begin with and the model simply did not act on a buried
+        # clause: the head swapped correctly on every render while the arms
+        # stayed at the body's original tone.
+        #
+        # The prohibitions exist for real reasons -- naming body parts as
+        # "bare skin" once made the model strip a robe -- so they are kept,
+        # but demoted to a short tail after the two things that must happen.
         prompt = (
-            "Replace the person's entire head in the first image with the "
-            "head of the person from the second image. Use the second "
-            "person's face and facial features, and reproduce whatever is on "
-            "the second person's head exactly as it appears there: if their "
-            "hair is visible, copy its style, colour, length and hairline; "
-            "if they are wearing a hat, cap, or any head covering, KEEP that "
-            "head covering on the new head -- do not remove it and do not "
-            "replace it with hair or a bare scalp. Remove only the hat, "
-            "headwear or head covering that the FIRST person is wearing, and "
-            "do not keep any of the first person's own hair. "
-            # Naming body parts as "bare skin" (shoulders, arms, legs...) made
-            # the model treat them AS bare and strip the garment -- a robed
-            # figure came back with a naked torso. State the clothing
-            # constraint first and as a prohibition, and describe the skin
-            # change as a recolour of skin that is ALREADY uncovered, never as
-            # a list of parts that are bare.
-            "Do not remove, redraw or alter any clothing: every garment the "
-            "first person wears must stay exactly as it is, covering exactly "
-            "what it already covers. Do not turn any clothed area into skin. "
-            "Only where the first person's skin is already uncovered and "
-            "visible, change that skin's colour to match the second person's "
-            "complexion, keeping the original shading and shadows, so the "
-            "head and the visible skin read as one single person. "
-            "Keep the pose, body shape, background and lighting exactly the "
-            "same."
+            "Two changes. First: replace the head from the first image with "
+            "the head from the second image completely -- the face, the hair "
+            "and anything worn on the head, exactly as they appear in the "
+            "second image, with none of the first person's head remaining. "
+            "Second: change the skin colour of the body -- the neck, arms, "
+            "hands and legs that are already bare -- to the skin colour of "
+            "the person in the second image, so the head and body are one "
+            "person. "
+            "Keep the clothing, pose, body shape, background and lighting "
+            "exactly as they are. Do not turn any clothed area into skin."
         )
 
         with _stage(timings, "sampling"):
