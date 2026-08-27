@@ -8,47 +8,86 @@ helped one pair regressed another, and a change that moved 2% of the pixels
 looked the same by eye as one that moved none. Six pairs x five arms with two
 measured numbers settles it in one run.
 
-## Cell A — upload 6–7 pairs
+## Cell A — upload every image at once
 
-Paste as one Colab cell. For each pair it asks for the BODY, then the DONOR
-face. Enter a blank name when finished.
+One upload, one click. Select **all** your files in the picker together --
+bodies and faces, any order. They are paired by the number in the filename,
+so name them `body1.png` + `face1.png`, `body2.png` + `face2.png`, and so on.
+
+The old version called `files.upload()` once per image inside a loop. That
+widget silently does nothing if the cell loses focus between calls, which is
+how thirteen of fourteen pair directories ended up empty. One call cannot fail
+that way.
 
 ```python
-#@title Upload A/B pairs (body + face per pair)
+#@title Upload all pairs at once (body1/face1, body2/face2, ...)
+import re, shutil
 from io import BytesIO
 from pathlib import Path
 from PIL import Image
-from IPython.display import display, Markdown
 from google.colab import files
 
 DEST = Path("/content/headswap_V2/data/custom/ab_pairs")
-DEST.mkdir(parents=True, exist_ok=True)
+shutil.rmtree(DEST, ignore_errors=True)
+DEST.mkdir(parents=True)
 
-def pick(prompt):
-    display(Markdown(f"**{prompt}** — select exactly 1 file"))
-    up = files.upload()
-    if len(up) != 1:
-        raise ValueError(f"select exactly 1 file, got {len(up)}")
-    name, data = next(iter(up.items()))
-    return Image.open(BytesIO(data)).convert("RGB")
+print("Select ALL images at once (body1.png, face1.png, body2.png, ...)")
+up = files.upload()
+
+imgs = {}
+for name, data in up.items():
+    nums = re.findall(r"\d+", name)
+    if not nums:
+        print(f"  ! {name}: no number in filename, skipped")
+        continue
+    kind = "body" if name.lower().startswith("body") else (
+        "face" if name.lower().startswith("face") else None)
+    if kind is None:
+        print(f"  ! {name}: must start with 'body' or 'face', skipped")
+        continue
+    imgs.setdefault(nums[0], {})[kind] = Image.open(BytesIO(data)).convert("RGB")
 
 n = 0
-while True:
-    label = input("\nPair name (blank to finish): ").strip()
-    if not label:
-        break
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)
-    d = DEST / safe
+for idx in sorted(imgs, key=lambda x: int(x)):
+    pair = imgs[idx]
+    if "body" not in pair or "face" not in pair:
+        print(f"  ! pair{idx}: missing {'body' if 'body' not in pair else 'face'}, skipped")
+        continue
+    d = DEST / f"pair{idx}"
     d.mkdir(parents=True, exist_ok=True)
-    pick(f"[{safe}] BODY (scene to keep)").save(d / "body.png")
-    pick(f"[{safe}] DONOR face (head to put on)").save(d / "face.png")
+    pair["body"].save(d / "body.png")
+    pair["face"].save(d / "face.png")
     n += 1
-    print(f"  saved {d}")
+    print(f"  pair{idx}: ok")
 
-print(f"\n{n} pairs ready in {DEST}")
-for d in sorted(DEST.iterdir()):
-    if d.is_dir():
-        print(" ", d.name)
+print(f"\n{n} complete pairs in {DEST}")
+```
+
+### If the upload widget still misbehaves
+
+Drag the files straight into `/content/` using the folder icon in the left
+sidebar, then run this instead -- no widget involved at all:
+
+```python
+import re, shutil
+from pathlib import Path
+from PIL import Image
+
+SRC, DEST = Path("/content"), Path("/content/headswap_V2/data/custom/ab_pairs")
+shutil.rmtree(DEST, ignore_errors=True); DEST.mkdir(parents=True)
+n = 0
+for b in sorted(SRC.glob("body*.*")):
+    nums = re.findall(r"\d+", b.name)
+    if not nums:
+        continue
+    f = next((p for p in SRC.glob(f"face{nums[0]}.*")), None)
+    if f is None:
+        print(f"  ! no face{nums[0]} for {b.name}"); continue
+    d = DEST / f"pair{nums[0]}"; d.mkdir(parents=True, exist_ok=True)
+    Image.open(b).convert("RGB").save(d / "body.png")
+    Image.open(f).convert("RGB").save(d / "face.png")
+    n += 1; print(f"  pair{nums[0]}: {b.name} + {f.name}")
+print(f"\n{n} complete pairs")
 ```
 
 ## Cell B — run all five arms

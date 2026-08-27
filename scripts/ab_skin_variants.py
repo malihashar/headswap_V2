@@ -162,7 +162,29 @@ def _tone_gap(result: Image.Image) -> float | None:
         skin = skin.copy()
         skin[: max(0, min(rnp.shape[0], int(box.y1)))] = 0.0
         px = rnp[skin > 0.5]
-        if px.shape[0] < 500:
+        # A bust shot has little skin below the chin -- a neck and the tops of
+        # two shoulders. The old 500px floor rejected exactly those frames, so
+        # tone_gap came back None on every arm and the comparison could not
+        # answer the question it exists to answer. Scale the floor to the
+        # frame and keep it small: 200px of neck is a perfectly good sample of
+        # body tone, and the robust (median-based) statistic does not need a
+        # large region to be stable.
+        _floor = max(200, int(0.0005 * rnp.shape[0] * rnp.shape[1]))
+        if px.shape[0] < _floor:
+            # Last resort: rembg person minus clothes, below the chin. Catches
+            # the case where the class segmenter labels a neck as "face skin"
+            # (so it was zeroed with the head) and finds nothing below it.
+            try:
+                from headswap.skin_harmonize import person_minus_clothes_mask
+
+                alt = person_minus_clothes_mask(rnp, result)
+                if alt is not None:
+                    alt = alt.copy()
+                    alt[: max(0, min(rnp.shape[0], int(box.y1)))] = 0.0
+                    px = rnp[alt > 0.5]
+            except Exception:  # noqa: BLE001
+                pass
+        if px.shape[0] < 200:
             return None
         body_lab, _ = _robust_lab_stats(
             cv2.cvtColor(px.reshape(1, -1, 3), cv2.COLOR_RGB2LAB)
