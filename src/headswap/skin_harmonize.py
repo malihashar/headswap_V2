@@ -194,7 +194,16 @@ def _semantic_category_mask(rgb_np: np.ndarray) -> np.ndarray | None:
                 image_format=mp.ImageFormat.SRGB,
                 data=np.ascontiguousarray(rgb_np),
             ))
-        return res.category_mask.numpy_view()
+            # COPY inside the context. numpy_view() is a view into a buffer
+            # owned by MediaPipe; leaving the `with` closes the segmenter and
+            # frees it, so returning the view hands back freed memory. It
+            # sometimes still held valid data and sometimes read as all
+            # zeros -- which every caller then took at face value as "no skin
+            # here" / "no clothes here". That is the intermittent failure
+            # behind skin gate 112,842px -> 0, clothes 15,367px -> 0 and head
+            # 18,678px -> 0 across otherwise identical runs.
+            cat = np.array(res.category_mask.numpy_view(), copy=True)
+        return cat
     except Exception as exc:  # noqa: BLE001
         print(f"[skin_harm] segmenter failed ({type(exc).__name__}: {exc})", flush=True)
         return None
