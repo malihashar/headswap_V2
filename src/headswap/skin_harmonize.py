@@ -21,6 +21,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import os
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -153,6 +155,14 @@ _SEM_MODEL_PATHS = (
 )
 # MediaPipe multiclass selfie segmentation labels.
 _SEM_BODY_SKIN, _SEM_FACE_SKIN = 2, 3
+
+# Skin-likeness score above which a pixel overrides a CLOTHES class veto.
+# Deliberately high: colour alone scored a blue jersey at 1.00 in an earlier
+# regression, so the override needs strong colour evidence AND rembg agreeing
+# the pixel is the person. Set to a value > 1.0 to disable the rescue.
+_SKIN_RESCUE_FROM_CLOTHES = float(
+    os.environ.get("HEADSWAP_SKIN_RESCUE_THR", "0.75")
+)
 
 
 def _semantic_category_mask(rgb_np: np.ndarray) -> np.ndarray | None:
@@ -799,6 +809,47 @@ def extend_skin_harmonization(
             print(
                 f"[skin_harm] person-minus-clothes union failed "
                 f"({type(_uexc).__name__}: {_uexc}); using the class mask alone",
+                flush=True,
+            )
+    # Rescue skin the CLOTHES class has vetoed.
+    #
+    # Observed as a hard vertical edge down one leg: pale/original on one side,
+    # correctly toned on the other. A soft under-correction fades; a hard edge
+    # is a mask boundary. A bare leg rendered in a pale cream tone reads as a
+    # stocking or legging to the class segmenter, so it is labelled CLOTHES --
+    # which both drops it from this gate and marks it for original-pixel
+    # protection upstream. The limb is then frozen at its original tone with a
+    # class boundary running down it, and no weighting change can reach it
+    # because the veto happens before weighting.
+    #
+    # `weight` here is _skin_likeness scored against THIS person's own face in
+    # THIS photo's light, which is the right discriminator: their leg is close
+    # to their face in chroma, a genuine garment generally is not. The
+    # threshold is deliberately high -- colour alone scored a blue jersey at
+    # 1.00 in an earlier regression, so this only overrides the class veto
+    # where the colour evidence is strong AND rembg agrees the pixel is the
+    # person. Set skin_rescue_from_clothes to 0 to disable if a skin-coloured
+    # garment starts being recoloured.
+    _rescue_thr = _SKIN_RESCUE_FROM_CLOTHES
+    if _sem is not None:
+        try:
+            _pm_norm = np.clip(person_matte.astype(np.float32) / 255.0, 0.0, 1.0)
+            _rescue = ((weight >= _rescue_thr) & (_pm_norm > 0.5)).astype(np.float32)
+            _rescued = int(((_rescue > 0.5) & (_sem <= 0.5)).sum())
+            if _rescued > 0:
+                _sem = np.maximum(_sem, _rescue)
+                info["skin_rescued_from_clothes"] = _rescued
+                print(
+                    f"[skin_harm] rescued {_rescued}px the clothes class vetoed but "
+                    f"that score >= {_rescue_thr:.2f} against this person's own face "
+                    "and sit inside the rembg matte -- bare skin rendered in a "
+                    "garment-like tone is not frozen at the original",
+                    flush=True,
+                )
+        except Exception as _rexc:  # noqa: BLE001
+            print(
+                f"[skin_harm] clothes-veto rescue failed "
+                f"({type(_rexc).__name__}: {_rexc}); class mask used unchanged",
                 flush=True,
             )
     info["semantic_skin"] = _sem is not None
