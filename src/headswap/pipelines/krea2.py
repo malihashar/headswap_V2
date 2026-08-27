@@ -4462,9 +4462,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # else), and its own output has no seams in it by construction. This
         # mode tests that directly instead of assuming the post-stages are
         # load-bearing -- they have never actually been switched off together.
-        _raw_model = bool(
-            self.cfg.get("simple_full_body_raw_model", False)
-        ) or os.environ.get("HEADSWAP_RAW_MODEL") not in (None, "", "0")
+        # DEFAULT ON. The composited path was given many attempts and each one
+        # traded one artifact for another, because the trade is structural: a
+        # composite has a boundary, and the boundary is visible exactly when
+        # the two sides differ -- which is when the stage was wanted. The most
+        # recent render shows it as a halo around the head. Shipping the
+        # model's own frame has no boundary to show.
+        #
+        # Set simple_full_body_raw_model=False (or HEADSWAP_RAW_MODEL=0) to
+        # get the old composited behaviour back.
+        _env_raw = os.environ.get("HEADSWAP_RAW_MODEL")
+        _raw_model = (
+            (_env_raw not in (None, ""))
+            and _env_raw != "0"
+            or (_env_raw in (None, ""))
+            and bool(self.cfg.get("simple_full_body_raw_model", True))
+        )
         if _raw_model:
             print(
                 "[krea2 raw_model] body_restore + LAB wash + skin_repaint all "

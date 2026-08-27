@@ -18,8 +18,11 @@ sys.path.insert(0, str(ROOT / "src"))
 KREA2 = (ROOT / "src" / "headswap" / "pipelines" / "krea2.py").read_text()
 
 
-def test_raw_model_flag_exists_and_defaults_off():
-    assert 'self.cfg.get("simple_full_body_raw_model", False)' in KREA2
+def test_raw_model_defaults_ON():
+    """The composited path was given many attempts; each traded one artifact
+    for another because a composite always has a boundary. Default to the
+    model's own frame, which has none."""
+    assert 'self.cfg.get("simple_full_body_raw_model", True)' in KREA2
 
 
 def test_raw_model_is_reachable_from_the_environment():
