@@ -4699,6 +4699,47 @@ class Krea2IdentityEditPipeline(BasePipeline):
         else:
             refine_diag["reason"] = "disabled"
 
+        # EXPERIMENTAL, branch expression-mouth-composite ONLY. Not part of
+        # T4 (docs/PIPELINE_STATE.md CHECKPOINT-10) and must never land on the
+        # simple-full-body-head-swap branch by default -- off unless the
+        # caller explicitly opts in, so a merge that forgets to strip this
+        # cannot silently change T4's output.
+        #
+        # CHECKPOINT-11/12/13 tested prompt text, face_refine, and ref_boost
+        # as ways to keep the BODY photo's expression; none moved it. This
+        # composites the original mouth/eyes back onto the generated head as
+        # a POST-PROCESS step instead of trying to reach it through
+        # generation. Known risk: this is a masked composite, the exact class
+        # of thing that produced ghosting/seams elsewhere in this project.
+        expr_diag: dict[str, Any] = {"applied": False}
+        if bool(self.cfg.get("expression_mouth_composite", False)):
+            from headswap.expression_composite import (  # noqa: PLC0415
+                composite_original_expression,
+            )
+
+            out, expr_diag = composite_original_expression(
+                out,
+                body_full,
+                feather_px=int(self.cfg.get("expression_composite_feather_px", 14)),
+                color_match=bool(
+                    self.cfg.get("expression_composite_color_match", True)
+                ),
+            )
+            if expr_diag.get("applied"):
+                print(
+                    f"[expr_composite] pasted original expression: "
+                    f"{expr_diag['region_px']}px "
+                    f"({expr_diag['region_frac']:.2%} of frame), "
+                    f"color_matched={expr_diag['color_matched']}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[expr_composite] SKIPPED - {expr_diag.get('reason')}; "
+                    "output unchanged",
+                    flush=True,
+                )
+
         # Restore the ORIGINAL body below the shoulder line.
         #
         # This is a head swap: clothing, shoulders and background must not
@@ -5604,6 +5645,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "ref_boost": sample_meta.get("ref_boost"),
             "face_refine": refine_diag,
             "body_restore": body_restore_diag,
+            "expression_composite": expr_diag,
             "expression_hint": expression_diag,
             "tone_check": tone_diag,
             "skin_repaint": _repaint_diag,
