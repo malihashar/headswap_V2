@@ -4502,6 +4502,40 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "exactly as they are. Do not turn any clothed area into skin."
         )
 
+        # Explicit headwear-removal clause. Off by default (never applied to
+        # T4 unless requested), same discipline this file already enforces
+        # for every prompt addition: A/B on face_fraction before landing.
+        #
+        # _append_headwear_policy (used by the crop_stitch/_prompt_for_edit
+        # route, never by this one) documents the real bug this exists for: a
+        # hat on the ORIGINAL person survived a swap as a translucent oval
+        # with "wings" at ear level, because the base prompt said "replace
+        # the head... with none of the first person's head remaining" but
+        # never named headwear specifically, and a hat is not obviously part
+        # of "the head" to the model. It resolved the ambiguity by producing
+        # a hat/hair hybrid rather than fully replacing either.
+        #
+        # This is the REMOVAL half only (not the dead helper's default
+        # PRESERVE branch) -- Ali asked specifically that a hat on the
+        # original person be replaced by the donor's hair, not kept.
+        if not _prompt_override and bool(
+            self.cfg.get("simple_full_body_remove_headwear", False)
+        ):
+            prompt += (
+                " CRITICAL: if the person in the first image is wearing a "
+                "hat, cap, headscarf or any other head covering, REMOVE it "
+                "completely and replace it with the second person's hair. "
+                "No part of the original headwear -- including flaps, brim, "
+                "straps or its outline -- may remain or show through. "
+                "Reconstruct whatever background the headwear was covering "
+                "so nothing of its silhouette is left."
+            )
+            print(
+                "[krea2 headwear] remove-and-replace clause appended -- "
+                f"chars={len(prompt)}",
+                flush=True,
+            )
+
         # Print the prompt that will actually be used, and where it came
         # from. Two runs of this route can differ ONLY by prompt -- every
         # other knob (ref_boost, denoise, cfg, seed, route, dims) is already
