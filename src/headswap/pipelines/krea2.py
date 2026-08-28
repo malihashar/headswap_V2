@@ -4339,6 +4339,24 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "they are. Do not turn any clothed area into skin."
         )
 
+        # Print the prompt that will actually be used, and where it came
+        # from. Two runs of this route can differ ONLY by prompt -- every
+        # other knob (ref_boost, denoise, cfg, seed, route, dims) is already
+        # logged and was identical across an A/B whose arms produced visibly
+        # different faces. With the prompt unlogged there was no way to tell
+        # from a saved log which wording produced a given render, so a good
+        # result could not be reproduced: an arm that lived only in a Colab
+        # cell was unrecoverable once the cell was gone.
+        #
+        # Logged in full rather than truncated -- the whole point is that the
+        # log is enough to reconstruct the arm.
+        print(
+            "[krea2 prompt] source="
+            + ("cfg:simple_full_body_prompt" if _prompt_override else "built-in default")
+            + f" chars={len(prompt)}",
+            flush=True,
+        )
+        print(f"[krea2 prompt] {prompt}", flush=True)
         with _stage(timings, "sampling"):
             sample_meta = self._sample_edit(
                 rt,
