@@ -249,3 +249,43 @@ the donor crop and is the most likely single source), `ref_boost` / `ref_boost_a
 and the donor crop geometry itself (`crop_face_reference`). Any attempt must be
 A/B'd on one seed with the `face is N% of frame` value compared, which is what
 caught both failures above.
+
+---
+
+## CHECKPOINT-12 — face_refine: innocent on expression, wasteful on bust shots
+**Status:** ✅ gated by face size
+
+A/B on one bust-shot pair (face 42.0% of frame), same seed and sampling:
+
+| arm | time | result |
+|---|---|---|
+| refine ON (T4 default) | 76s | smiling (donor expression) |
+| refine OFF | 53s | **visually indistinguishable** |
+
+Two findings.
+
+**Expression: eliminated.** face_refine was the leading suspect from
+CHECKPOINT-11 — it re-renders the face from the donor crop, the largest single
+dose of donor pixels. Turning it off changed the expression not at all. The
+donor's expression therefore enters through the main pass's image
+conditioning, not the refine. Next lever is `ref_boost` / `ref_boost_a`.
+
+**Speed: ~30% for nothing, on bust shots.** face_refine exists to recover
+identity detail when the face is SMALL — it re-renders a head crop at full
+resolution. At 42% of frame the main pass already rendered the face at high
+resolution, so there is nothing to recover. It was not gated on face size at
+all; it ran unconditionally.
+
+Now skipped above `simple_full_body_refine_max_face_frac` (0.25, matching
+`simple_full_body_restore_max_face_frac`, which already encodes "is this a
+bust shot?"). Full-body frames (face ~8%) keep the refine, which is where it
+earns its cost. Skipping also removes a composite — and so a boundary — from
+exactly the frames where the face is large enough for misalignment to show,
+which is the class of the Iron Man helmet/face offset.
+
+**Detector hazard found while building the gate:** `detect_best_face` falls
+back to a CENTRE BOX when it finds nothing — on a flat grey image it returns
+0.417, above the threshold. Gating on it would have silently skipped the
+refine on every frame where detection failed, while looking like a real
+measurement. The gate uses `detect_faces` instead, which reports real
+detections only, and treats None as "unknown" rather than as either answer.
