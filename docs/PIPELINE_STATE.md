@@ -298,3 +298,40 @@ back to a CENTRE BOX when it finds nothing — on a flat grey image it returns
 refine on every frame where detection failed, while looking like a real
 measurement. The gate uses `detect_faces` instead, which reports real
 detections only, and treats None as "unknown" rather than as either answer.
+
+---
+
+## CHECKPOINT-13 — Expression: ref_boost eliminated too
+**Status:** ❌ third dead end; one lever left
+
+`ref_boost` sweep on the athlete pair, T4 otherwise unchanged, same seed:
+
+| arm | ref_boost | expression |
+|---|---|---|
+| R55_T4 | 5.5 | donor smile |
+| R40 | 4.0 | donor smile |
+| R30 | 3.0 | donor smile |
+| R40_a08 | 4.0 + ref_boost_a 0.8 | donor smile |
+
+A 45% cut in donor conditioning strength produced no expression change, and
+identity held up throughout. Combined with the earlier results, every channel
+I proposed has now been tested and eliminated:
+
+| channel | attempts | result |
+|---|---|---|
+| prompt text | 2 (meta-instruction, measured hint) | no change; both moved framing |
+| face_refine pass | 1 (ON vs OFF) | no change |
+| ref_boost / ref_boost_a | 4 (5.5 / 4.0 / 3.0 / +a0.8) | no change |
+
+### What that leaves
+`identity_lora_strength` (currently 1.0) is the only untested lever.
+`krea2_identity_edit_v1_2_r64` is trained to transplant the head from image 2
+-- and a head includes its expression. If the LoRA is what carries it, that is
+not a bug to tune out; it is what the LoRA does.
+
+### If the LoRA test also fails
+Expression is intrinsic to this model + LoRA and cannot be separated from
+identity by configuration. The honest options then are: accept the donor
+expression, choose donor photos whose expression suits the target scene, or
+change the identity model. Further sampling-parameter sweeps would be waste --
+three channels, seven arms, zero movement is enough evidence to stop.
