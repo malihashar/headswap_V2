@@ -4252,79 +4252,51 @@ class Krea2IdentityEditPipeline(BasePipeline):
             tight_identity_crop=bool(self.cfg.get("tight_identity_crop", True)),
         )
 
-        # The prompt for the production simple_full_body route.
+        # Spell out that the DONOR's hair/hairline replaces the target's,
+        # and that the target's headwear goes away. "Replace the head, face
+        # and hair" alone left the target's own hat/hair partly surviving as
+        # dark fragments around the new head.
+        # Skin tone is asked for HERE rather than fixed afterwards.
         #
-        # Two things must actually change (identity, skin tone) and everything
-        # else must survive. The ordering below is load-bearing: an earlier
-        # version buried the skin instruction third, behind two clauses of
-        # prohibitions, and at cfg=1.0 the model simply did not act on it --
-        # the head swapped on every render while the arms stayed at the body's
-        # original tone. Anything that MUST happen is stated before anything
-        # that must NOT.
+        # This prompt used to end "keep ... pose, body, clothing, background
+        # and lighting unchanged", which explicitly instructed the model to
+        # preserve the target's body -- including its skin tone -- and the
+        # pipeline then tried to overpower that instruction with a masked LAB
+        # transfer downstream. That is why round after round of mask/threshold
+        # tuning kept failing: the masking was fighting the model's own
+        # instruction, not a bug in the mask.
         #
-        # Overridable via simple_full_body_prompt so A/B arms can differ by
-        # wording alone; it used to be hardcoded, so testing a phrasing meant
-        # a code edit and a push.
+        # Letting the model do it is also strictly better than any masked
+        # recolour can be: a post-hoc transfer changes colour inside a region
+        # and not outside it, so SOME boundary always exists (every previous
+        # attempt moved the seam rather than removing it). The model has no
+        # mask at all, and renders the new tone under the photo's real
+        # lighting, so shading and shadow terminators stay physically right.
+        # Two instructions, both stated first, both concrete.
+        #
+        # The previous prompt was ~120 words and put the skin instruction
+        # third, after two clauses of prohibitions ("do not remove, redraw or
+        # alter any clothing... do not turn any clothed area into skin"). At
+        # cfg=1.0 there is no classifier-free guidance, so prompt adherence is
+        # weak to begin with and the model simply did not act on a buried
+        # clause: the head swapped correctly on every render while the arms
+        # stayed at the body's original tone.
+        #
+        # The prohibitions exist for real reasons -- naming body parts as
+        # "bare skin" once made the model strip a robe -- so they are kept,
+        # but demoted to a short tail after the two things that must happen.
+        # Overridable so A/B arms can differ by wording alone. The prompt was
+        # hardcoded, so every attempt to test a different phrasing required a
+        # code edit and a push.
         _prompt_override = str(self.cfg.get("simple_full_body_prompt", "") or "").strip()
         prompt = _prompt_override or (
-            # CHANGE IDENTITY ONLY -- do not "replace the head".
-            #
-            # This clause used to read "replace the head from the first image
-            # with the head from the second image completely -- the face, the
-            # hair and anything worn on the head, EXACTLY AS THEY APPEAR in
-            # the second image, with none of the first person's head
-            # remaining". That is an instruction to copy the donor's rendered
-            # head pixels, and the donor is a studio portrait, so it is also
-            # an instruction to copy the donor's smile, gaze and head angle.
-            #
-            # A later clause then said the opposite ("the expression stays
-            # exactly as it is in the first image"). The model followed the
-            # first, stronger, earlier statement: the sprinting athlete came
-            # back wearing the donor's open-mouth studio grin. Contradicting
-            # a copy-the-head instruction from further down the prompt does
-            # not work; the copy-the-head instruction has to go.
-            #
-            # So the operation is now framed the way it actually is -- change
-            # WHO this person looks like, leaving the performance alone --
-            # rather than as a transplant of one head onto another body.
-            "Change identity only. Change who the person in the first image "
-            "looks like so that they have the identity of the person in the "
-            "second image, while every part of their facial performance stays "
-            "exactly as it already is in the first image. "
-            # What "identity" is allowed to carry over. Headwear and hair are
-            # here (a head swap that keeps the target's haircut does not read
-            # as the donor) but nothing that encodes performance.
-            "From the second image take only identity: face shape, jawline, "
-            "cheek structure, eye shape, nose shape, lip anatomy, ears, "
-            "hairline, hair and any headwear. "
-            # What the first image keeps, enumerated. Named individually
-            # because "keep the expression" is one abstract noun the model can
-            # satisfy loosely, while gaze direction, eyelid state and head
-            # angle are separate concrete things that each failed separately.
-            "The first image has absolute priority for the eye gaze and "
-            "looking direction, the pupil position, the eyelid openness and "
-            "squint, the eyebrow position, the mouth shape and lip pose, the "
-            "facial expression, the head pitch, yaw and roll, and the neck "
-            "angle. "
-            "Do not copy the second image's expression, gaze, pupil position, "
-            "eyelid state, eyebrow pose, mouth pose or head angle. "
-            # The second required change: skin tone.
-            #
-            # This is stated as an instruction to the model rather than done
-            # by a masked LAB transfer downstream. An earlier prompt told the
-            # model to preserve the target body (and so its skin tone) while
-            # the pipeline tried to overpower that with a masked recolour --
-            # which is why round after round of mask/threshold tuning failed:
-            # the masking was fighting the model's own instruction, not a bug
-            # in the mask. Letting the model do it is also strictly better
-            # than any masked recolour can be: a post-hoc transfer changes
-            # colour inside a region and not outside it, so SOME boundary
-            # always exists. The model has no mask at all and renders the new
-            # tone under the photo's real lighting, so shading and shadow
-            # terminators stay physically right.
-            "Change the skin colour of the body -- the neck, arms, hands and "
-            "legs that are already bare -- to the skin colour of the person "
-            "in the second image"
+            "Two changes. First: replace the head from the first image with "
+            "the head from the second image completely -- the face, the hair "
+            "and anything worn on the head, exactly as they appear in the "
+            "second image, with none of the first person's head remaining. "
+            "Second: change the skin colour of the body -- the neck, arms, "
+            "hands and legs that are already bare -- to the skin colour of "
+            "the person in the second image"
             # Naming the measured tone in words turns "match the other image"
             # (an inference the model may not attend to) into a literal
             # instruction. Set by the A/B runner for variant C; empty
@@ -4335,11 +4307,30 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 else ""
             )
             + ", so the head and body are one person. "
+            # Expression comes from the BODY photo, identity from the donor.
+            #
+            # The second image is a portrait, so its expression, gaze and head
+            # angle come along with the identity unless told otherwise -- a
+            # sprinting athlete inherited a studio smile, and subjects ended up
+            # looking at the camera instead of where the original was looking.
+            # preserve_expression / _apply_expression_policy already exist for
+            # exactly this, but they only touch _prompt_for_edit, which this
+            # route does not call, so they were dead here.
+            #
+            # Kept to the four things that actually read as "expression"
+            # (mouth, eyes, gaze, head angle) rather than the long enumerated
+            # list this idea came from. At cfg=1.8 the prompt now has real
+            # guidance weight, and long prompts have already been observed to
+            # bury their own instructions.
+            "Take ONLY the identity from the second image -- the face shape, "
+            "features, hair and headwear. The expression stays exactly as it "
+            "is in the first image: the same mouth, the same smile or lack of "
+            "one, the same eyes and where they look, and the same head angle. "
+            "Do not copy the expression, gaze or head angle of the second "
+            "image. "
             # Clothing stated as an absolute, not a preference. On a robed
             # subject the garment was removed outright and the torso came back
-            # bare -- the strongest remaining failure in the T4 arm. The
-            # prohibitions exist for real reasons: naming body parts as "bare
-            # skin" above once made the model strip a robe.
+            # bare -- the strongest remaining failure in the T4 arm.
             "Every garment stays on and unchanged: same colour, same shape, "
             "covering exactly the skin it already covers. Never remove, open "
             "or shorten any clothing, and never expose a chest, torso or "
