@@ -167,3 +167,49 @@ log), not code-inspection alone:
 - Whether Krea2 can reach acceptable identity fidelity on highly-recognizable faces at all,
   vs. requiring a dedicated deterministic swap model (InSwapper/SimSwap-class) as the core
   identity stage with Krea2 demoted to harmonization-only.
+
+---
+
+## CHECKPOINT-10 — T4: the approved simple_full_body recipe
+**Status:** ✅ adopted as product default (commit `5e60e78`, 2026-08-27)
+
+Selected from an 8-pair x 5-arm sweep as the only arm worth keeping. Restore
+ALL FIVE items below to revert to T4 — the four values alone are not enough.
+
+### Sampling (configs/krea2_identity_edit.yaml)
+- `ref_boost: 5.5` — between CHECKPOINT-06's rejected 7.0 (overcooked,
+  synthetic skin) and its defensible 4.0; tested better than both here
+- `denoise: 0.85` — meaningful only because sampling seeds from the SOURCE
+  latent (see below); at 1.0 the img2img branch is unreachable
+- `cfg: 1.8` — at 1.0 there is NO classifier-free guidance, so the prompt
+  carries zero weight and every prompt edit is inert
+- `seed: 46`
+
+### Latent seeding
+`_sample_edit` must reach the `elif denoise < 0.999 and scene_lat is not None`
+branch BEFORE the `EmptySD3LatentImage` branch. Starting from empty noise
+regenerates the whole frame: a black robe returned as a bare torso, a lace
+dress as a top plus skirt, a chain appeared on an athlete wearing none.
+Confirm with `[krea2 img2img] starting from the SOURCE latent at denoise=0.85`.
+
+### Prompt (part of the recipe, not incidental)
+The `run_simple_full_body` default prompt must be byte-identical to the A/B
+text — 564 chars, logged as `[krea2 prompt] source=built-in default chars=564`.
+
+**Measured:** adding an expression-preservation block plus an absolute clothing
+prohibition, with sampling and seed unchanged, moved the generated face from
+**38.7% -> 45.0%** of the frame (visibly tighter, worse) while leaving the
+expression unchanged. On this route the prompt is a framing control as well as
+a content control.
+
+### Rule for future prompt work
+A/B every prompt edit on the same seed and compare the `face is N% of frame`
+value from `[krea2 body_restore] SKIPPED - bust shot (face is N% of frame)`
+before landing it. Prefer replacing prompt text over adding to it, and test
+new prompts via the `simple_full_body_prompt` config override so the default
+recipe is never disturbed by an experiment.
+
+### Known-unfixed at this checkpoint
+- A robed subject can still come back shirtless (garment removed outright)
+- Some subjects get no skin-tone change at all
+- Expression still follows the donor portrait, not the body photo
