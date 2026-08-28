@@ -75,7 +75,10 @@ verbose: false
 # ("overcooks face, synthetic/uncanny look") and 4.0 as the most defensible
 # stable value -- but 7.0 was what production actually ran, which is the waxy
 # plastic skin visible across the whole 8-pair sweep.
-ref_boost: 4.0
+# 5.5. Chosen from the 5-pair img2img sweep: of the five arms tested, only
+# ref_boost 5.5 + denoise 0.85 produced usable results across pairs (the
+# runners' skin blend was rated good). 4.0 and 7.0 both lost on the same set.
+ref_boost: 5.5
 ref_boost_a: 1.6
 grounding_px: 768
 fit_mode: fit

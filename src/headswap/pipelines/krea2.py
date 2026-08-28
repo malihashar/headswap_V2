@@ -4285,7 +4285,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # The prohibitions exist for real reasons -- naming body parts as
         # "bare skin" once made the model strip a robe -- so they are kept,
         # but demoted to a short tail after the two things that must happen.
-        prompt = (
+        # Overridable so A/B arms can differ by wording alone. The prompt was
+        # hardcoded, so every attempt to test a different phrasing required a
+        # code edit and a push.
+        _prompt_override = str(self.cfg.get("simple_full_body_prompt", "") or "").strip()
+        prompt = _prompt_override or (
             "Two changes. First: replace the head from the first image with "
             "the head from the second image completely -- the face, the hair "
             "and anything worn on the head, exactly as they appear in the "
