@@ -29,13 +29,21 @@ from headswap.pipelines.krea2 import Krea2IdentityEditPipeline
 KREA2 = (ROOT / "src" / "headswap" / "pipelines" / "krea2.py").read_text()
 
 
-def test_gate_exists_and_is_configurable():
-    assert 'self.cfg.get("simple_full_body_refine_max_face_frac", 0.25)' in KREA2
+def test_gate_is_unreachable_by_default():
+    """T4 includes refine ON, so the default must never skip it.
+
+    The gate was added on an A/B that read as "visually indistinguishable" in
+    a small side-by-side grid. At full size that judgement did not hold -- the
+    refined result was preferred and the skip rejected. The 30% saving is real
+    but not free, so it is opt-in.
+    """
+    assert 'self.cfg.get("simple_full_body_refine_max_face_frac", 1.01)' in KREA2
 
 
-def test_threshold_matches_the_existing_bust_shot_gate():
-    """Reuses restore's definition of a bust shot rather than inventing one."""
+def test_opt_in_value_matches_the_existing_bust_shot_gate():
+    """0.25 is the documented opt-in, matching restore's bust-shot threshold."""
     assert 'self.cfg.get("simple_full_body_restore_max_face_frac", 0.25)' in KREA2
+    assert "Set simple_full_body_refine_max_face_frac to" in KREA2
 
 
 def test_detection_failure_returns_none_not_a_plausible_number():

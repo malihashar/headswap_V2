@@ -4534,8 +4534,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
         _refine_enabled = bool(self.cfg.get("simple_full_body_face_refine", True))
         if _refine_enabled:
             _rf_frac = self._face_frac_of_frame(body_full, face_crop, self.cache_dir)
+            # DEFAULT 1.01 = unreachable, so the refine ALWAYS runs.
+            #
+            # The gate was added on a measured A/B that showed refine ON (76s)
+            # and OFF (53s) producing "visually indistinguishable" output on a
+            # bust shot. That judgement was made from a small side-by-side
+            # grid and it was wrong: viewed full size, Ali preferred the
+            # refined result and rejected the skip.
+            #
+            # T4 is the approved recipe (CHECKPOINT-10) and refine ON is part
+            # of it. The 30% saving is real but it is not free, so it is not
+            # taken by default. Set simple_full_body_refine_max_face_frac to
+            # 0.25 to opt back into skipping on bust shots.
             _rf_max = float(
-                self.cfg.get("simple_full_body_refine_max_face_frac", 0.25)
+                self.cfg.get("simple_full_body_refine_max_face_frac", 1.01)
             )
             if _rf_frac is not None and _rf_frac > _rf_max:
                 _refine_enabled = False

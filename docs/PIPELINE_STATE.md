@@ -276,10 +276,19 @@ resolution. At 42% of frame the main pass already rendered the face at high
 resolution, so there is nothing to recover. It was not gated on face size at
 all; it ran unconditionally.
 
-Now skipped above `simple_full_body_refine_max_face_frac` (0.25, matching
+**REJECTED as a default (2026-08-27).** "Visually indistinguishable" was
+judged from a small side-by-side grid; at full size the refined result was
+clearly preferred and the skip was rejected. refine ON is part of T4
+(CHECKPOINT-10) and stays on. The 30% saving is real but not free.
+
+The gate remains as opt-in: `simple_full_body_refine_max_face_frac` defaults
+to **1.01** (unreachable). Set it to 0.25 to skip on bust shots, matching
 `simple_full_body_restore_max_face_frac`, which already encodes "is this a
-bust shot?"). Full-body frames (face ~8%) keep the refine, which is where it
-earns its cost. Skipping also removes a composite — and so a boundary — from
+bust shot?".
+
+Lesson: a small comparison grid is not enough to judge "no visible
+difference". Full-size review is required before any quality/speed trade is
+taken by default. Skipping also removes a composite — and so a boundary — from
 exactly the frames where the face is large enough for misalignment to show,
 which is the class of the Iron Man helmet/face offset.
 
