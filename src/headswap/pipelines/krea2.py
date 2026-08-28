@@ -1395,7 +1395,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         )
 
     def _measure_expression_hint(
-        self, body_full: Image.Image, selected_face: FaceBox | None
+        self, body_full: Image.Image, selected_face: FaceBox | None = None
     ) -> tuple[str, dict[str, Any]]:
         """Measure the BODY's expression and state it as fact for the prompt.
 
@@ -1426,13 +1426,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if not bool(self.cfg.get("expression_prompt_hint", True)):
             diag["reason"] = "disabled"
             return "", diag
-        if selected_face is None:
-            diag["reason"] = "no_selected_face"
-            return "", diag
         try:
             import numpy as _np  # noqa: PLC0415
 
             rgb = pil_to_rgb_np(body_full)
+            # Detect here rather than taking the caller's box. The prompt is
+            # assembled BEFORE run_simple_full_body computes selected_face,
+            # and because that name is assigned later in the same function
+            # Python treats it as local for the whole scope -- so reading it
+            # early raised UnboundLocalError and killed the render. This file
+            # already carries the same warning about np/cv2 hoisting. Owning
+            # the detection makes the ordering irrelevant.
+            if selected_face is None:
+                selected_face = detect_best_face(rgb, self.cache_dir)
+            if selected_face is None:
+                diag["reason"] = "no_face_detected"
+                return "", diag
             landmarks, backend, note = get_face_landmarks5(
                 rgb, self.cache_dir, prefer_box=selected_face
             )
@@ -4431,9 +4440,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # Measured expression hint, appended AFTER the prompt is assembled so
         # the T4 base text stays byte-identical and a prompt override still
         # benefits. Off with expression_prompt_hint=false.
-        _expr_hint, expression_diag = self._measure_expression_hint(
-            body_full, selected_face
-        )
+        _expr_hint, expression_diag = self._measure_expression_hint(body_full)
         if _expr_hint:
             prompt = f"{prompt} {_expr_hint}"
             print(

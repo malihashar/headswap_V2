@@ -84,3 +84,39 @@ def test_failure_never_raises():
     text, diag = pipe._measure_expression_hint(_Bad(), _Box())
     assert text == ""
     assert "reason" in diag
+
+
+def test_hint_does_not_read_selected_face_before_it_is_assigned():
+    """Regression: the hint call crashed every render with UnboundLocalError.
+
+    The prompt is assembled near the top of run_simple_full_body, but
+    `selected_face` is not assigned until well below it. Because that name IS
+    assigned somewhere in the function, Python treats it as local for the
+    entire scope, so reading it early raises UnboundLocalError immediately --
+    it is not a None check that can save you. The same trap is already
+    documented in this file for the np/cv2 imports.
+
+    The fix is that _measure_expression_hint detects its own face box, so the
+    call site passes nothing and the ordering cannot matter.
+    """
+    src = KREA2
+    i_call = src.find("self._measure_expression_hint(body_full)")
+    assert i_call > 0, (
+        "the hint call must pass only body_full; passing selected_face "
+        "reintroduces the UnboundLocalError crash"
+    )
+    # The call must not name selected_face at all.
+    call_line_end = src.find("\n", i_call)
+    assert "selected_face" not in src[i_call:call_line_end]
+    # And the assignment must genuinely still be below the call. Search from
+    # the call onward: the same text also appears earlier as the hint method's
+    # own default argument, which is not the binding that caused the crash.
+    i_assign = src.find("selected_face: FaceBox | None = None", i_call)
+    assert i_assign > i_call, (
+        "selected_face is now assigned before the hint call; this test's "
+        "premise changed and it should be re-examined rather than deleted"
+    )
+
+
+def test_hint_detects_its_own_face():
+    assert "selected_face = detect_best_face(rgb, self.cache_dir)" in KREA2
