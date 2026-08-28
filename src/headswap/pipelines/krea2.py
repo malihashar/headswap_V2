@@ -4422,11 +4422,54 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # hardcoded, so every attempt to test a different phrasing required a
         # code edit and a push.
         _prompt_override = str(self.cfg.get("simple_full_body_prompt", "") or "").strip()
+        # Measured, INLINE variant of the expression hint. CHECKPOINT-13's
+        # hint used the same measurement (mouth width/openness from
+        # landmarks) but only tested it APPENDED after the whole prompt; that
+        # position was never isolated as its own variable. This computes the
+        # SAME dynamic, per-image fact -- so it generalises to any donor/body
+        # pair rather than a phrase hand-picked for one test case -- but
+        # splices it into the middle of the head-swap sentence instead, right
+        # where the untested P3 arm placed it. Off unless
+        # expression_hint_position="inline"; the appended path from
+        # CHECKPOINT-13 is untouched and still the default when the hint is
+        # enabled at all.
+        _expr_inline = ""
+        _expr_inline_diag: dict[str, Any] | None = None
+        if (
+            not _prompt_override
+            and str(self.cfg.get("expression_hint_position", "append")).strip().lower()
+            == "inline"
+        ):
+            _hint_text, _expr_inline_diag = self._measure_expression_hint(body_full)
+            if _hint_text:
+                # Strip the leading "The person is " / trailing period so it
+                # reads as a clause fragment inside the surrounding sentence
+                # rather than as two sentences stapled together.
+                _clause = _hint_text.strip()
+                if _clause.startswith("The person is "):
+                    _clause = _clause[len("The person is "):]
+                _clause = _clause.rstrip(".")
+                _expr_inline = f", keeping their {_clause}"
+                print(
+                    f"[krea2 expression] inline: body measured as "
+                    f"\"{_expr_inline_diag['label']}\" "
+                    f"(smile_ratio={_expr_inline_diag['smile_ratio']} "
+                    f"open_ratio={_expr_inline_diag['open_ratio']}); spliced "
+                    "into the head clause rather than appended after the "
+                    "whole prompt",
+                    flush=True,
+                )
+            elif _expr_inline_diag.get("reason"):
+                print(
+                    f"[krea2 expression] inline: no hint - "
+                    f"{_expr_inline_diag['reason']}",
+                    flush=True,
+                )
         prompt = _prompt_override or (
             "Two changes. First: replace the head from the first image with "
             "the head from the second image completely -- the face, the hair "
             "and anything worn on the head, exactly as they appear in the "
-            "second image, with none of the first person's head remaining. "
+            f"second image, with none of the first person's head remaining{_expr_inline}. "
             "Second: change the skin colour of the body -- the neck, arms, "
             "hands and legs that are already bare -- to the skin colour of "
             "the person in the second image"
@@ -4479,8 +4522,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
         print(f"[krea2 prompt] {prompt}", flush=True)
         # Measured expression hint, appended AFTER the prompt is assembled so
         # the T4 base text stays byte-identical and a prompt override still
-        # benefits. Off with expression_prompt_hint=false.
-        _expr_hint, expression_diag = self._measure_expression_hint(body_full)
+        # benefits. Off with expression_prompt_hint=false. Skipped when the
+        # inline variant above already ran, so the two modes cannot stack.
+        if _expr_inline_diag is not None:
+            _expr_hint, expression_diag = "", _expr_inline_diag
+        else:
+            _expr_hint, expression_diag = self._measure_expression_hint(body_full)
         if _expr_hint:
             prompt = f"{prompt} {_expr_hint}"
             print(
