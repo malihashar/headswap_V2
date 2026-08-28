@@ -213,3 +213,39 @@ recipe is never disturbed by an experiment.
 - A robed subject can still come back shirtless (garment removed outright)
 - Some subjects get no skin-tone change at all
 - Expression still follows the donor portrait, not the body photo
+
+---
+
+## CHECKPOINT-11 — Expression is NOT reachable from the prompt
+**Status:** ❌ closed as a dead end (two attempts, both measured)
+
+Goal was: keep the BODY photo's expression, take only identity from the donor.
+
+| attempt | prompt delta | face fraction | expression changed? |
+|---|---|---|---|
+| meta-instruction ("identity from image 2, expression from image 1") | +~400 chars | 38.7% -> **45.0%** | no |
+| measured hint ("The person is not smiling, with the mouth closed") | +1 sentence | 40.3% -> **42.0%** | no |
+
+Same seed and sampling in both cases. Two conclusions, both measured rather
+than argued:
+
+1. **Any prompt addition moves framing on this route.** Even one sentence cost
+   1.7 points of face fraction and visibly degraded head position, size and
+   realism. Prompt length is a framing control here, not just content.
+2. **Expression is not prompt-governed at all.** The measurement was correct
+   (`smile_ratio=0.808 open_ratio=0.25` -> "not smiling, with the mouth
+   closed", which matched the body photo), and the output smiled regardless.
+   The donor's expression arrives as IMAGE conditioning at `ref_boost=5.5`,
+   which no prompt text touches.
+
+`_measure_expression_hint` is kept behind `expression_prompt_hint` (default
+**false**) because the measurement is sound and reusable — only the lever was
+wrong.
+
+### Where to look instead
+Not the prompt. Expression enters with the donor pixels, so the candidates are
+the image-conditioning side: the `face_refine` pass (re-renders the face from
+the donor crop and is the most likely single source), `ref_boost` / `ref_boost_a`,
+and the donor crop geometry itself (`crop_face_reference`). Any attempt must be
+A/B'd on one seed with the `face is N% of frame` value compared, which is what
+caught both failures above.

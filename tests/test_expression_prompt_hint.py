@@ -54,8 +54,17 @@ def test_hint_states_a_fact_not_an_instruction():
         assert banned not in KREA2, f"reverted meta-instruction is back: {banned}"
 
 
-def test_hint_can_be_disabled():
-    assert 'self.cfg.get("expression_prompt_hint", True)' in KREA2
+def test_hint_is_off_by_default():
+    """Two prompt attempts, both rejected on the same measurement.
+
+    A 400-char block moved the face 38.7% -> 45.0% of the frame; a single
+    measured sentence moved it 40.3% -> 42.0%. Neither changed the expression.
+    The hint stays available behind the flag because the MEASUREMENT is sound
+    (it read "not smiling, with the mouth closed" correctly), but the prompt
+    is the wrong lever: the donor's expression arrives as image conditioning
+    at ref_boost=5.5, which no prompt text governs.
+    """
+    assert 'self.cfg.get("expression_prompt_hint", False)' in KREA2
 
 
 def test_disabled_returns_no_hint():
@@ -66,7 +75,7 @@ def test_disabled_returns_no_hint():
 
 
 def test_missing_face_returns_no_hint():
-    pipe = _Pipe({})
+    pipe = _Pipe({"expression_prompt_hint": True})
     text, diag = pipe._measure_expression_hint(None, None)
     assert text == ""
     assert diag["applied"] is False
@@ -80,7 +89,7 @@ def test_failure_never_raises():
 
     class _Box:
         height = 100
-    pipe = _Pipe({})
+    pipe = _Pipe({"expression_prompt_hint": True})
     text, diag = pipe._measure_expression_hint(_Bad(), _Box())
     assert text == ""
     assert "reason" in diag

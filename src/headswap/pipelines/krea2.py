@@ -1423,7 +1423,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
         width for smile, nose-to-mouth drop against face height for openness.
         """
         diag: dict[str, Any] = {"applied": False}
-        if not bool(self.cfg.get("expression_prompt_hint", True)):
+        # DEFAULT OFF. Measured on the athlete pair, same seed and sampling:
+        # the hint read the body correctly ("not smiling, with the mouth
+        # closed", smile_ratio=0.808 open_ratio=0.25) and the output smiled
+        # anyway, while the face went 40.3% -> 42.0% of the frame with head
+        # position, size and realism visibly worse.
+        #
+        # That is the second failed attempt at expression via the prompt, and
+        # together they settle it: on this route ANY prompt addition moves
+        # framing -- a 400-char block took 38.7% -> 45.0%, one sentence took
+        # 40.3% -> 42.0% -- and neither changed the expression at all. The
+        # donor's expression arrives as IMAGE conditioning at ref_boost=5.5,
+        # which no prompt text governs. The measurement itself is sound and
+        # kept behind the flag; the lever is wrong.
+        if not bool(self.cfg.get("expression_prompt_hint", False)):
             diag["reason"] = "disabled"
             return "", diag
         try:
