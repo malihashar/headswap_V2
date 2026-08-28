@@ -78,7 +78,11 @@ verbose: false
 # 5.5. Chosen from the 5-pair img2img sweep: of the five arms tested, only
 # ref_boost 5.5 + denoise 0.85 produced usable results across pairs (the
 # runners' skin blend was rated good). 4.0 and 7.0 both lost on the same set.
-ref_boost: 5.5
+# Back to 4.0. 5.5 came from A/B arm "T4", which was the only arm of five worth
+# keeping -- but one preferred arm across five pairs is not enough to adopt as
+# the product default, and doing so would bake a half-tested value into every
+# render. T4 stays an explicit arm in the comparison instead.
+ref_boost: 4.0
 ref_boost_a: 1.6
 grounding_px: 768
 fit_mode: fit
