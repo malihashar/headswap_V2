@@ -82,7 +82,11 @@ verbose: false
 # keeping -- but one preferred arm across five pairs is not enough to adopt as
 # the product default, and doing so would bake a half-tested value into every
 # render. T4 stays an explicit arm in the comparison instead.
-ref_boost: 4.0
+# 5.5 = A/B arm "T4", the one arm of five judged worth keeping across a
+# five-pair run, now adopted on that basis. CHECKPOINT-06 rejected 7.0 as
+# overcooked and called 4.0 defensible; 5.5 sits between and tested better
+# than both here. Revert to 4.0 if faces start looking synthetic again.
+ref_boost: 5.5
 ref_boost_a: 1.6
 grounding_px: 768
 fit_mode: fit

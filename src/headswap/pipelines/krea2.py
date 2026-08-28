@@ -4307,8 +4307,36 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 else ""
             )
             + ", so the head and body are one person. "
-            "Keep the clothing, pose, body shape, background and lighting "
-            "exactly as they are. Do not turn any clothed area into skin."
+            # Expression comes from the BODY photo, identity from the donor.
+            #
+            # The second image is a portrait, so its expression, gaze and head
+            # angle come along with the identity unless told otherwise -- a
+            # sprinting athlete inherited a studio smile, and subjects ended up
+            # looking at the camera instead of where the original was looking.
+            # preserve_expression / _apply_expression_policy already exist for
+            # exactly this, but they only touch _prompt_for_edit, which this
+            # route does not call, so they were dead here.
+            #
+            # Kept to the four things that actually read as "expression"
+            # (mouth, eyes, gaze, head angle) rather than the long enumerated
+            # list this idea came from. At cfg=1.8 the prompt now has real
+            # guidance weight, and long prompts have already been observed to
+            # bury their own instructions.
+            "Take ONLY the identity from the second image -- the face shape, "
+            "features, hair and headwear. The expression stays exactly as it "
+            "is in the first image: the same mouth, the same smile or lack of "
+            "one, the same eyes and where they look, and the same head angle. "
+            "Do not copy the expression, gaze or head angle of the second "
+            "image. "
+            # Clothing stated as an absolute, not a preference. On a robed
+            # subject the garment was removed outright and the torso came back
+            # bare -- the strongest remaining failure in the T4 arm.
+            "Every garment stays on and unchanged: same colour, same shape, "
+            "covering exactly the skin it already covers. Never remove, open "
+            "or shorten any clothing, and never expose a chest, torso or "
+            "shoulder that is covered in the first image. "
+            "Keep the pose, body shape, background and lighting exactly as "
+            "they are. Do not turn any clothed area into skin."
         )
 
         with _stage(timings, "sampling"):

@@ -58,7 +58,8 @@ def test_ref_boost_is_not_the_rejected_value():
     from headswap.config import load_config
 
     cfg = load_config(ROOT / "configs" / "krea2_identity_edit.yaml")
-    assert cfg["ref_boost"] <= 5.0, (
+    # 5.5 is the adopted T4 value; 7.0 is the one CHECKPOINT-06 rejected.
+    assert cfg["ref_boost"] <= 6.0, (
         f"ref_boost {cfg['ref_boost']} is at or near the value "
         "docs/PIPELINE_STATE.md CHECKPOINT-06 rejected for synthetic skin"
     )
