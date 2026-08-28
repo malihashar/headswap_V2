@@ -1394,6 +1394,90 @@ class Krea2IdentityEditPipeline(BasePipeline):
             + f" CRITICAL — measured head/eye alignment in the first image: {hint}."
         )
 
+    def _measure_expression_hint(
+        self, body_full: Image.Image, selected_face: FaceBox | None
+    ) -> tuple[str, dict[str, Any]]:
+        """Measure the BODY's expression and state it as fact for the prompt.
+
+        Direct sibling of _measure_head_direction_hint, and built for the same
+        reason its docstring gives: a measured text hint cannot corrupt pixels
+        the way a warp or a composite can.
+
+        Why measurement rather than instruction. An earlier attempt told the
+        model to source identity from image 2 while holding the expression to
+        image 1. It did nothing: the donor smile came through unchanged, and
+        the added text moved the generated face from 38.7% to 45.0% of the
+        frame. That phrasing is a meta-instruction about which input to obey
+        -- the model cannot check it against anything, and it competes with
+        the donor portrait arriving as image conditioning at ref_boost=5.5,
+        which the prompt does not govern at all.
+
+        A measured hint is different in kind: "their mouth is closed and they
+        are not smiling" is a concrete statement about the content of the
+        picture being made, the same sort of claim as "wearing a blue shirt".
+        That is exactly why the head-direction hint works, and it is the only
+        expression lever in this repo with a working precedent.
+
+        Reuses the landmark maths already proven in
+        prompting/scene_describe._expression_guess: mouth width against eye
+        width for smile, nose-to-mouth drop against face height for openness.
+        """
+        diag: dict[str, Any] = {"applied": False}
+        if not bool(self.cfg.get("expression_prompt_hint", True)):
+            diag["reason"] = "disabled"
+            return "", diag
+        if selected_face is None:
+            diag["reason"] = "no_selected_face"
+            return "", diag
+        try:
+            import numpy as _np  # noqa: PLC0415
+
+            rgb = pil_to_rgb_np(body_full)
+            landmarks, backend, note = get_face_landmarks5(
+                rgb, self.cache_dir, prefer_box=selected_face
+            )
+            diag["landmarks_backend"] = backend
+            if landmarks is None or backend != "insightface":
+                diag["reason"] = note or "landmarks_unavailable"
+                return "", diag
+            lm = _np.asarray(landmarks, dtype=_np.float32)
+            # landmarks5: left_eye, right_eye, nose, left_mouth, right_mouth
+            mouth_w = float(_np.linalg.norm(lm[3] - lm[4]))
+            eye_w = float(_np.linalg.norm(lm[0] - lm[1]))
+            smile_ratio = mouth_w / max(eye_w, 1e-3)
+            nose_y = float(lm[2][1])
+            mouth_y = float(0.5 * (lm[3][1] + lm[4][1]))
+            open_ratio = abs(mouth_y - nose_y) / max(1.0, float(selected_face.height))
+
+            smiling = smile_ratio > float(
+                self.cfg.get("expression_smile_ratio_thresh", 1.05)
+            )
+            mouth_open = open_ratio > float(
+                self.cfg.get("expression_mouth_open_thresh", 0.42)
+            )
+            if smiling and mouth_open:
+                label = "smiling with the mouth open"
+            elif smiling:
+                label = "smiling with the mouth closed"
+            elif mouth_open:
+                label = "not smiling, with the mouth slightly open"
+            else:
+                label = "not smiling, with the mouth closed"
+
+            diag.update(
+                applied=True,
+                smile_ratio=round(smile_ratio, 3),
+                open_ratio=round(open_ratio, 3),
+                label=label,
+            )
+            # One short sentence. Kept deliberately brief: on this route the
+            # prompt is a framing control as well as a content control (see
+            # docs/PIPELINE_STATE.md CHECKPOINT-10), so length is a risk.
+            return f"The person is {label}.", diag
+        except Exception as exc:  # noqa: BLE001 -- a hint must never break a render
+            diag["reason"] = f"{type(exc).__name__}: {exc}"
+            return "", diag
+
     def _measure_head_direction_hint(
         self, body_full: Image.Image, selected_face: FaceBox | None
     ) -> tuple[str, dict[str, Any]]:
@@ -4344,6 +4428,27 @@ class Krea2IdentityEditPipeline(BasePipeline):
             flush=True,
         )
         print(f"[krea2 prompt] {prompt}", flush=True)
+        # Measured expression hint, appended AFTER the prompt is assembled so
+        # the T4 base text stays byte-identical and a prompt override still
+        # benefits. Off with expression_prompt_hint=false.
+        _expr_hint, expression_diag = self._measure_expression_hint(
+            body_full, selected_face
+        )
+        if _expr_hint:
+            prompt = f"{prompt} {_expr_hint}"
+            print(
+                f"[krea2 expression] body measured as \"{expression_diag['label']}\" "
+                f"(smile_ratio={expression_diag['smile_ratio']} "
+                f"open_ratio={expression_diag['open_ratio']}); stated as fact in "
+                "the prompt rather than instructing the model which image to obey",
+                flush=True,
+            )
+        elif expression_diag.get("reason"):
+            print(
+                f"[krea2 expression] no hint - {expression_diag['reason']}",
+                flush=True,
+            )
+
         with _stage(timings, "sampling"):
             sample_meta = self._sample_edit(
                 rt,
@@ -5401,6 +5506,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "ref_boost": sample_meta.get("ref_boost"),
             "face_refine": refine_diag,
             "body_restore": body_restore_diag,
+            "expression_hint": expression_diag,
             "tone_check": tone_diag,
             "skin_repaint": _repaint_diag,
             "raw_model": _raw_model,
