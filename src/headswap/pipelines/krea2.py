@@ -4348,6 +4348,165 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 except OSError:
                     pass
 
+    def edit_single_image(
+        self,
+        image: Image.Image,
+        instruction: str,
+        out_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        """Upstream's SINGLE-image Krea2 edit graph: one image + one instruction.
+
+        Ported from the Krea 2 production script (the reference Colab for the
+        comfyui-krea2edit node pack), because comparing it against this file
+        exposed a shape error in everything CHECKPOINT-14 tried.
+
+        That checkpoint's donor pre-edit ran the TWO-image head-swap graph
+        with the same photo in both slots -- source_image AND source_image_b,
+        plus ref_boost. Upstream's edit path passes ONE image and no
+        ref_boost at all. "Change this person's expression" is a single-image
+        instruction edit, so the canonical graph for it was never actually
+        run; what was measured was a two-reference head-transplant graph
+        contorted into approximating it.
+
+        Four further differences from T4, all upstream's edit-mode values:
+          - sampler/scheduler er_sde/simple, not euler/simple
+          - 4 steps, not 8
+          - cfg 1.0, not 1.8
+          - denoise 1.0, not 0.85 -- preservation comes from
+            Krea2EditModelPatch, NOT from img2img latent seeding. This file
+            reaches content preservation the opposite way, so the two are
+            genuinely different mechanisms rather than different numbers.
+
+        No ModelSamplingFlux timestep shift either: upstream does not apply
+        one, and the point of this method is to reproduce their working
+        configuration rather than blend it with ours.
+
+        Upstream documents its own limit, worth reading before judging output:
+        "structure-preserving i2i -- can't guarantee 1:1 content
+        preservation, confirmed not solved by us or the wider community".
+        Some drift is expected and known, not a bug to chase.
+        """
+        import torch  # noqa: PLC0415
+
+        timings: dict[str, float] = {}
+        t0 = time.perf_counter()
+        rt = self._ensure_runtime(timings)
+        from headswap.comfy.krea2_edit_fast import (  # noqa: PLC0415
+            clear_krea2_edit_static_cache,
+            install_krea2_edit_static_cache,
+        )
+
+        install_krea2_edit_static_cache()
+        clear_krea2_edit_static_cache()
+        bundle = self._load_models(rt, timings)
+
+        div_by = int(self.cfg.get("div_by", 16))
+        max_dim = int(self.cfg.get("single_edit_max_dim", 1024))
+        src = resize_max_keep_ar(image.convert("RGB"), max_dim, div_by=div_by)
+
+        steps = int(self.cfg.get("single_edit_steps", 4))
+        cfg_val = float(self.cfg.get("single_edit_cfg", 1.0))
+        denoise = float(self.cfg.get("single_edit_denoise", 1.0))
+        sampler = str(self.cfg.get("single_edit_sampler", "er_sde"))
+        scheduler = str(self.cfg.get("single_edit_scheduler", "simple"))
+        grounding_px = int(self.cfg.get("single_edit_grounding_px", 768))
+        seed_i = int(self.cfg.get("seed", 46))
+
+        print(
+            f"[krea2 single_edit] UPSTREAM graph: 1 image, NO ref_boost | "
+            f"sampler={sampler}/{scheduler} steps={steps} cfg={cfg_val} "
+            f"denoise={denoise} grounding_px={grounding_px} seed={seed_i} "
+            f"size={list(src.size)}",
+            flush=True,
+        )
+        print(f"[krea2 single_edit] instruction: {instruction}", flush=True)
+
+        with torch.no_grad():
+            src_t = pil_to_comfy_tensor(src, torch)
+            with _stage(timings, "vae_encode"):
+                src_lat = rt.call("VAEEncode", pixels=src_t, vae=bundle["vae"])
+            latent = get_value_at_index(src_lat, 0)
+
+            with _stage(timings, "model_patch"):
+                # Deliberately WITHOUT source_latent_b / source_image_b /
+                # ref_boost -- that is the whole point of this arm.
+                patched = rt.call(
+                    "Krea2EditModelPatch",
+                    model=bundle["model"],
+                    source_latent=latent,
+                    vae=bundle["vae"],
+                    source_image=src_t,
+                    fit_mode=str(self.cfg.get("fit_mode", "fit")),
+                )
+                model = get_value_at_index(patched, 0)
+
+            with _stage(timings, "grounded_encode"):
+                # Single-image grounding: no image_b.
+                pos = rt.call(
+                    "Krea2EditGroundedEncode",
+                    clip=bundle["clip"],
+                    prompt=instruction,
+                    image=src_t,
+                    grounding_px=grounding_px,
+                )
+                neg = rt.call(
+                    "Krea2EditGroundedEncode",
+                    clip=bundle["clip"],
+                    prompt="",
+                    image=src_t,
+                    grounding_px=grounding_px,
+                )
+
+            with _stage(timings, "diffusion_sampling"):
+                with force_sampling_full_load(
+                    models=(model,),
+                    enabled=bool(self.cfg.get("force_full_load", True)),
+                ):
+                    with _silence_krea2edit_step_prints():
+                        samples = rt.call(
+                            "KSampler",
+                            model=model,
+                            seed=seed_i,
+                            steps=steps,
+                            cfg=cfg_val,
+                            sampler_name=sampler,
+                            scheduler=scheduler,
+                            positive=get_value_at_index(pos, 0),
+                            negative=get_value_at_index(neg, 0),
+                            latent_image=latent,
+                            denoise=denoise,
+                        )
+
+            with _stage(timings, "vae_decode"):
+                decoded = rt.call(
+                    "VAEDecode",
+                    samples=get_value_at_index(samples, 0),
+                    vae=bundle["vae"],
+                )
+                edited = comfy_tensor_to_pil(get_value_at_index(decoded, 0))
+
+        paths: dict[str, str] = {}
+        if out_dir is not None:
+            d = Path(out_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            edited.save(d / "single_edit_output.png")
+            paths["output"] = str(d / "single_edit_output.png")
+
+        return {
+            "image": edited,
+            "instruction": instruction,
+            "sampler": sampler,
+            "scheduler": scheduler,
+            "steps": steps,
+            "cfg": cfg_val,
+            "denoise": denoise,
+            "grounding_px": grounding_px,
+            "seed": seed_i,
+            "latency_s": round(time.perf_counter() - t0, 2),
+            "timings": timings,
+            "paths": paths,
+        }
+
     def probe_expression_transfer(
         self,
         identity_img: Image.Image,
