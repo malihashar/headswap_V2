@@ -4414,15 +4414,46 @@ class Krea2IdentityEditPipeline(BasePipeline):
             expression_img.convert("RGB"), max_dim, div_by=div_by
         )
 
+        # Prompt shape matters more than its content here, and this file
+        # already paid for that lesson twice.
+        #
+        # The first version of this probe said "change their expression to
+        # MATCH the person in the second image". That is a meta-instruction
+        # about which input to obey -- the exact phrasing CHECKPOINT-11
+        # measured as inert, twice, because the model cannot check its own
+        # output against it. Measured on GPU here too: identity held
+        # perfectly, expression did not move at all.
+        #
+        # The pattern with a working precedent in this repo is stating the
+        # wanted expression as a FACT about the picture being made ("The
+        # person is X"), the same way _measure_expression_hint and
+        # _measure_head_direction_hint do. probe_expression_text supplies
+        # that fact directly, which also sidesteps the broken openness
+        # measurement recorded in CHECKPOINT-14 -- the caller knows the
+        # expression they want; nothing needs to infer it.
+        #
+        # Kept SHORT deliberately: CHECKPOINT-10 measured that every prompt
+        # addition on this model moves framing, so length is itself a risk.
+        _expr_text = str(self.cfg.get("probe_expression_text", "") or "").strip()
         prompt = prompt or str(
             self.cfg.get("probe_expression_prompt", "") or ""
         ).strip() or (
-            "Keep the person in the first image exactly as they are -- the "
-            "same face, the same identity, the same hair, the same head "
-            "angle, the same pose, the same lighting and the same "
-            "background. Change ONLY their facial expression, so that their "
-            "mouth and expression match the expression of the person in the "
-            "second image. Do not change who the person is."
+            (
+                f"The person in the first image is {_expr_text}. "
+                "Their eyes, eyebrows, eyelids and gaze are exactly "
+                "unchanged. Same face, same identity, same hair, same head "
+                "angle, same pose, same lighting, same background."
+            )
+            if _expr_text
+            else (
+                "Keep the person in the first image exactly as they are -- "
+                "the same face, the same identity, the same hair, the same "
+                "head angle, the same pose, the same lighting and the same "
+                "background. Change ONLY their facial expression, so that "
+                "their mouth and expression match the expression of the "
+                "person in the second image. Do not change who the person "
+                "is."
+            )
         )
 
         denoise = float(self.cfg.get("probe_expression_denoise", 0.5))
