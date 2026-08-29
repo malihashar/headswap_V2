@@ -339,12 +339,10 @@ three channels, seven arms, zero movement is enough evidence to stop.
 ---
 
 ## CHECKPOINT-14 — Pre-editing the DONOR's expression: closed as a dead end
-**Status:** ❌ closed on STRUCTURAL grounds (see the two defects below).
-⚠️ **The tuning axis was never cleanly tested** — every round below ran at a
-stale `denoise=0.35`, not the intended value (see the Colab trap at the end).
-`denoise` is the knob that governs whether a structural change like a mouth
-can happen at all, so "sampling knobs were swept" is NOT a supported claim
-here. The structural defects are independent of denoise and do stand.
+**Status:** ❌ closed on CLEAN data — four GPU rounds, zero expression
+movement, plus two structural defects. Round 4 was verified unconfounded
+(`knobs: using code defaults`, no override warnings), so both the tuning
+axis and the structural argument are now supported.
 **Default:** `pre_edit_donor_expression: false` — T4's own render is unaffected.
 
 CHECKPOINTs 11–13 all edited the TARGET side or the conditioning strength.
@@ -362,6 +360,18 @@ donor's expression and it should carry through.
 | 1 | on | 2.0 | 1.8 | 0.35 | donor came back with **no visible change at all** |
 | 2 | on | 0.5 | 3.0 | 0.35 | **identity drifted** (head shape/angle); expression unchanged |
 | 3 | **off** | 2.0 | 4.0 | 0.35 | identity drifted **worse**; expression still unchanged |
+| 4 | **off** | 2.0 | 4.0 | **0.45** | ✅ clean/unconfounded. Smile **got WIDER**; identity drifted again |
+
+Round 4 is the decisive one: it is the only round verified free of the
+stale-form confound below. The prediction going in was that the measured
+label's correct half ("not smiling" — the target genuinely is not) would at
+least partially land and reduce the donor's smile. **It did the opposite.**
+Raising denoise from 0.35 to 0.45 gave the sampler more room and it spent
+all of it on identity, none on expression.
+
+Across four rounds the sweep covers lora on/off, cfg 1.8→4.0,
+denoise 0.35→0.45 and ref_boost 0.5→2.0, with zero expression movement in
+any arm. There is no remaining confound to attribute that to.
 
 Round 3 was the decisive one. The hypothesis was that
 `krea2_identity_edit_v1_2_r64` — trained to make image A's head look like
