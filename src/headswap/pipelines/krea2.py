@@ -4402,7 +4402,33 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
         div_by = int(self.cfg.get("div_by", 16))
         max_dim = int(self.cfg.get("single_edit_max_dim", 1024))
-        src = resize_max_keep_ar(image.convert("RGB"), max_dim, div_by=div_by)
+        # UPSCALE small inputs -- this is upstream's upload_and_prep, and
+        # porting the graph without it is what made the first GPU run
+        # meaningless.
+        #
+        # Upstream: `if max(W, H) < min_side: scale = min_side / max(W, H)`,
+        # i.e. every edit runs at >=1024 on the long side. resize_max_keep_ar
+        # here is `min(1.0, ...)` -- a CAP that never upscales -- so a small
+        # donor went into the sampler at native size. Measured: a donor
+        # edited at 192x176, a thumbnail with nowhere near enough pixels to
+        # carry a likeness, which on its own explains the mush that got
+        # blamed on denoise. _fit_body_dim already does this for the body
+        # image and documents the same trap.
+        min_long = int(self.cfg.get("single_edit_min_long_side", 1024))
+        _native = image.size
+        if max(_native) < min_long:
+            src = fit_long_side_keep_ar(
+                image.convert("RGB"), min_long, div_by=div_by
+            )
+            print(
+                f"[krea2 single_edit] upscaled small donor "
+                f"{list(_native)} -> {list(src.size)} "
+                f"(single_edit_min_long_side={min_long}); editing a "
+                "thumbnail cannot preserve identity",
+                flush=True,
+            )
+        else:
+            src = resize_max_keep_ar(image.convert("RGB"), max_dim, div_by=div_by)
 
         steps = int(self.cfg.get("single_edit_steps", 4))
         cfg_val = float(self.cfg.get("single_edit_cfg", 1.0))
