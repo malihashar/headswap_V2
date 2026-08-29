@@ -339,7 +339,12 @@ three channels, seven arms, zero movement is enough evidence to stop.
 ---
 
 ## CHECKPOINT-14 — Pre-editing the DONOR's expression: closed as a dead end
-**Status:** ❌ three measured GPU rounds, zero expression movement
+**Status:** ❌ closed on STRUCTURAL grounds (see the two defects below).
+⚠️ **The tuning axis was never cleanly tested** — every round below ran at a
+stale `denoise=0.35`, not the intended value (see the Colab trap at the end).
+`denoise` is the knob that governs whether a structural change like a mouth
+can happen at all, so "sampling knobs were swept" is NOT a supported claim
+here. The structural defects are independent of denoise and do stand.
 **Default:** `pre_edit_donor_expression: false` — T4's own render is unaffected.
 
 CHECKPOINTs 11–13 all edited the TARGET side or the conditioning strength.

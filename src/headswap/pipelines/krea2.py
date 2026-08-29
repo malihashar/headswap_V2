@@ -4465,6 +4465,42 @@ class Krea2IdentityEditPipeline(BasePipeline):
         cfg_val = float(self.cfg.get("pre_edit_donor_expression_cfg", 4.0))
         steps = int(self.cfg.get("pre_edit_donor_expression_steps", 8))
 
+        # Stale-caller guard. Four consecutive GPU rounds silently ran at
+        # denoise=0.35 instead of the intended default, because Colab #@param
+        # values live in the browser TAB, not on disk -- the setup cell's
+        # `git reset --hard` updates the code but cannot touch them. Newly
+        # added params picked up fresh code defaults while the pre-existing
+        # one kept an old value, producing a mixed config that matched no
+        # intended arm, and three of those rounds were written up as evidence
+        # (docs/PIPELINE_STATE.md CHECKPOINT-14) before the confound was
+        # spotted. An override is legitimate when deliberate, so this warns
+        # rather than refuses -- but it must never again be invisible.
+        _defaults = {
+            "pre_edit_donor_expression_denoise": 0.45,
+            "pre_edit_donor_expression_ref_boost": 2.0,
+            "pre_edit_donor_expression_cfg": 4.0,
+            "pre_edit_donor_expression_steps": 8,
+        }
+        _overrides = {
+            k: self.cfg[k]
+            for k, d in _defaults.items()
+            if k in self.cfg and abs(float(self.cfg[k]) - float(d)) > 1e-9
+        }
+        if _overrides:
+            for k, v in _overrides.items():
+                print(
+                    f"[krea2 pre_edit_expression] OVERRIDE {k}={v} "
+                    f"(code default {_defaults[k]})",
+                    flush=True,
+                )
+            print(
+                "[krea2 pre_edit_expression] ^ if you did not set these "
+                "deliberately, the caller is STALE -- a Colab tab keeps its "
+                "own #@param values across a git sync; close the tab and "
+                "re-open the notebook link to pick up current defaults",
+                flush=True,
+            )
+
         old = {k: self.cfg.get(k) for k in ("denoise", "ref_boost", "cfg", "steps")}
         self.cfg["denoise"] = denoise
         self.cfg["ref_boost"] = ref_boost
