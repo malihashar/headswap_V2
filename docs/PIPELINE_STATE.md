@@ -438,3 +438,109 @@ picked up fresh code defaults, producing mixed configs that matched no
 intended arm. `notebooks/pre_edit_expression_test.ipynb` now defaults
 `USE_CODE_DEFAULTS=True` so code defaults win unless deliberately overridden;
 the tab must still be RELOADED for notebook changes to appear.
+
+---
+
+## CHECKPOINT-15 — Expression IS controllable: upstream's single-image edit graph
+**Status:** ✅ first working expression change in this investigation.
+🟡 identity retention is a known, measured gap — not yet solved.
+**Selected for now:** `single_edit_denoise = 0.65` (chosen visually by Ali;
+see the caveat about the metric below).
+
+### What unblocked it
+CHECKPOINT-11..14 spent five sessions and nine levers failing to move
+expression. All of them ran the **two-image head-swap graph**. Comparing this
+repo against the **Krea 2 production Colab** (the reference notebook for the
+`comfyui-krea2edit` nodes) showed its `edit_workflow()` calls
+`Krea2EditModelPatch` with **one** image:
+
+    model, source_latent, vae, source_image, fit_mode
+
+No `source_image_b`, no `source_latent_b`, **no `ref_boost`**.
+
+"Change this person's expression" is a single-image instruction edit, so the
+canonical graph for it had never been run. Every prior null result was a
+head-transplant graph contorted into imitating an editor. Implemented as
+`Krea2IdentityEditPipeline.edit_single_image()`.
+
+Upstream edit-mode values, adopted verbatim rather than blended with ours:
+`er_sde`/`simple` (not `euler`), 4 steps (not 8), cfg 1.0 (not 1.8), and
+denoise 1.0 where preservation comes from `Krea2EditModelPatch` rather than
+from img2img latent seeding — a different MECHANISM, not a different number.
+No `ModelSamplingFlux` shift; upstream applies none.
+
+**The LoRA is not the suppressor.** The identity LoRA was loaded at
+strength 1.0 in the run that finally changed the expression, and was fully
+OFF in two earlier runs that did not. Graph shape was the variable
+throughout. Do not spend another round on LoRA strength for this.
+
+### Resolution bug found on the way (cost one full GPU round)
+Upstream's `upload_and_prep` upscales every edit input to >=1024 on the long
+side. The first port brought the workflow but not the prep, and this repo's
+`resize_max_keep_ar` is `min(1.0, ...)` — a CAP that never upscales — so a
+small donor reached the sampler at **192x176**, a thumbnail that cannot hold
+a likeness. `_fit_body_dim` documents the identical trap for the body image.
+Fixed via `single_edit_min_long_side` (default 1024) and logged.
+
+### Denoise sweep (athlete pair, seed 46, `scripts/sweep_expression_denoise.py`)
+
+| denoise | ArcFace identity vs donor |
+|---|---|
+| 1.0 | 0.471 |
+| 0.8 | **0.402** |
+| 0.65 | 0.427 |
+| 0.5 | **0.574** |
+
+**Not monotonic**, and the spread (0.40-0.57) is narrow enough that the
+ordering may not be meaningful at n=1 pair / 1 seed. `0.5` scored highest but
+`0.65` was preferred visually. Treat the number as a tripwire for gross
+identity loss, not as a ranking to optimise — that is why 0.65 was selected
+over the metric winner.
+
+End to end on the chosen arm:
+`id_donor_vs_final = 0.408`, `id_edited_vs_final = 0.697`.
+Read that as: **step 1 loses the identity; T4 then transfers the edited face
+faithfully.** Any further identity work belongs in the expression edit, not
+in the swap.
+
+### Known-unfixed
+Identity retention through step 1 is the open problem. Upstream's own README
+disclaims it: *"structure-preserving i2i — can't guarantee 1:1 content
+preservation, confirmed not solved by us or the wider community."* So a
+ceiling here is expected. If it proves unacceptable, LivePortrait
+(`src/headswap/expression_transfer.py`, Cell 5) preserves identity
+structurally rather than by tuning and has still never had a valid run.
+
+### Revert recipe
+T4 is untouched by all of this — `pre_edit_donor_expression` defaults to
+`false` and nothing in `run_simple_full_body` changed. To drop the expression
+work entirely, simply do not call `edit_single_image()`; T4 behaves exactly
+as CHECKPOINT-10 describes.
+
+---
+
+## Colab workflow — READ THIS BEFORE DEBUGGING ANY COLAB RESULT
+**Roughly ten GPU runs in this investigation executed STALE CODE while their
+logs showed a fresh commit.** Two independent causes stack:
+
+1. Colab caches notebook `#@param` form values in the **browser tab**.
+   `git reset --hard` in a setup cell updates the repo on disk but **cannot**
+   touch them. A stale tab silently re-sends old numbers, and newly-added
+   params pick up fresh code defaults — producing mixed configs that match no
+   intended arm. Symptoms seen: `denoise` pinned at 0.35 for four rounds, then
+   at 1.0 for three more, while `ref_boost`/`cfg` moved.
+2. A notebook **saved to Drive stops re-fetching from GitHub entirely**, so
+   even reloading the page does not update it. Confirmed when a traceback
+   failed inside `if RUN_THE_SWAP:` — a variable that did not exist in the
+   pushed cell.
+
+**Therefore: put logic in `scripts/`, not in notebook cells.** A script is
+pulled by `git pull` like any other file, so what runs is what is in the repo.
+The Colab cell should be one line that never changes:
+
+    !cd /content/headswap_V2 && git pull -q && python scripts/<name>.py
+
+`scripts/sweep_expression_denoise.py` is the worked example. Verify any
+surprising result by checking the values the run actually PRINTED before
+concluding anything about the model — several conclusions in
+CHECKPOINT-14 had to be softened afterwards for exactly this reason.
