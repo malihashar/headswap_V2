@@ -4389,20 +4389,32 @@ class Krea2IdentityEditPipeline(BasePipeline):
         donor_img = resize_max_keep_ar(face.convert("RGB"), max_dim, div_by=div_by)
 
         prompt = (
-            f"Change this person's facial expression so they are {clause}. "
-            "Keep the identity, face shape, skin tone, hairstyle, head "
-            "angle, pose, camera framing, lighting and background exactly "
-            "the same. Do not change anything else about the image."
+            f"Change ONLY this person's mouth and smile, so they are "
+            f"{clause}. Do not change the eyes, eyebrows, eyelids, gaze "
+            "direction or eye shape at all -- everything above the nose "
+            "must stay pixel-identical. Keep the identity, face shape, "
+            "skin tone, hairstyle, head angle, pose, camera framing, "
+            "lighting and background exactly the same too. Do not change "
+            "anything else about the image."
         )
 
         # Own, independent sampling knobs -- deliberately NOT inherited from
         # T4's ref_boost=5.5/denoise=0.85/cfg=1.8, which are tuned for a
         # scene != person head transplant, not a same-image expression
-        # nudge. Low denoise keeps this a texture-level move (same idea as
-        # _two_pass_refine's two_pass_b_denoise=0.2), not a restructuring.
-        denoise = float(self.cfg.get("pre_edit_donor_expression_denoise", 0.35))
-        ref_boost = float(self.cfg.get("pre_edit_donor_expression_ref_boost", 2.0))
-        cfg_val = float(self.cfg.get("pre_edit_donor_expression_cfg", 1.8))
+        # nudge.
+        #
+        # ref_boost boosts fidelity to the "person" reference -- here scene
+        # and person are the SAME photo, so a high value tells the model to
+        # stay faithful to exactly what's already there, fighting the very
+        # change the prompt asks for. First measured attempt (ref_boost=2.0,
+        # denoise=0.35, cfg=1.8) produced a pixel-identical output: no
+        # visible change at all. Lower ref_boost, higher denoise (more room
+        # to actually move) and higher cfg (this repo's own history: Krea2
+        # Turbo does not reliably obey prompt text until cfg is pushed well
+        # past its 1.0 default) are the next things to try.
+        denoise = float(self.cfg.get("pre_edit_donor_expression_denoise", 0.55))
+        ref_boost = float(self.cfg.get("pre_edit_donor_expression_ref_boost", 0.5))
+        cfg_val = float(self.cfg.get("pre_edit_donor_expression_cfg", 3.0))
         steps = int(self.cfg.get("pre_edit_donor_expression_steps", 8))
 
         old = {k: self.cfg.get(k) for k in ("denoise", "ref_boost", "cfg", "steps")}
