@@ -335,3 +335,91 @@ identity by configuration. The honest options then are: accept the donor
 expression, choose donor photos whose expression suits the target scene, or
 change the identity model. Further sampling-parameter sweeps would be waste --
 three channels, seven arms, zero movement is enough evidence to stop.
+
+---
+
+## CHECKPOINT-14 — Pre-editing the DONOR's expression: closed as a dead end
+**Status:** ❌ three measured GPU rounds, zero expression movement
+**Default:** `pre_edit_donor_expression: false` — T4's own render is unaffected.
+
+CHECKPOINTs 11–13 all edited the TARGET side or the conditioning strength.
+This was the first attempt at the OTHER side: edit the DONOR photo's
+expression to match the target's BEFORE T4 ever sees it, via a Krea2
+self-edit (`scene == person ==` the donor photo, no mask), then hand the
+edited donor to T4's existing two-step pass unchanged.
+
+Rationale at the time: CHECKPOINT-13 established that the donor's expression
+transfers reliably and unstoppably. That was read as a feature — fix the
+donor's expression and it should carry through.
+
+| round | lora | ref_boost | cfg | denoise | result |
+|---|---|---|---|---|---|
+| 1 | on | 2.0 | 1.8 | 0.35 | donor came back with **no visible change at all** |
+| 2 | on | 0.5 | 3.0 | 0.35 | **identity drifted** (head shape/angle); expression unchanged |
+| 3 | **off** | 2.0 | 4.0 | 0.35 | identity drifted **worse**; expression still unchanged |
+
+Round 3 was the decisive one. The hypothesis was that
+`krea2_identity_edit_v1_2_r64` — trained to make image A's head look like
+image B's — collapses to "reproduce this exact head" when A and B are the
+same photo, and that this attractor was overpowering the prompt. Confirmed
+loaded-out via `[krea2 sampling] ... lora=[]`. **Removing it did not unlock
+the expression; it only cost identity.** The hypothesis was wrong.
+
+### Why no knob on this route can work
+`ref_boost` anchors fidelity to the "person" reference — and that reference
+CONTAINS the donor's smile. It therefore preserves identity and expression
+*together* and cannot separate them: raising it stops the identity drift but
+re-pins the expression, lowering it frees both. The same is true of img2img
+seeding and of low denoise. Every purely SPATIAL preservation mechanism on
+this route has this property, because identity and expression live in the
+same pixels.
+
+### Two defects found while measuring, both independent of the tuning
+
+**1. `_measure_expression_hint`'s openness measurement is broken by
+construction.** It computes
+
+```python
+mouth_y = 0.5 * (lm[3][1] + lm[4][1])          # landmarks5: mouth CORNERS
+open_ratio = abs(mouth_y - nose_y) / face.height
+```
+
+`lm[3]`/`lm[4]` are the mouth **corners**, which barely move vertically when
+a jaw drops — the lower lip and chin do. landmarks5 has no lower-lip or jaw
+point, so `open_ratio` **cannot detect an open mouth at all**; it measures a
+nose-to-mouth face proportion. Measured on the athlete pair: the target's
+mouth is visibly OPEN and it returned `open_ratio=0.25` (< 0.42 threshold)
+→ `"not smiling, with the mouth closed"`. CHECKPOINT-11 recorded this
+measurement as "sound"; that is correct for smile width and **wrong for
+openness**. Fixing it needs `landmark_2d_106` (already loaded by
+insightface, used inline in `preprocess.py` for a head bbox but with no
+reusable accessor) and a verified inner-lip index map. NOT fixed here —
+a wrong index map would be worse than a documented known-bad measurement.
+
+**2. The text channel is too narrow to carry an expression.** Even with a
+correct measurement and a working editor, this design compresses the
+target's expression into two scalars → one of four canned phrases. The
+athlete's actual expression is *mouth open, head tilted up, mid-exertion*;
+no sentence in that fixed set represents it. This is a ceiling of the
+architecture, not of the tuning.
+
+### Where to look instead
+Not any text-conditioned path. Expression should be driven from the target
+image's own dense keypoints, which is what face-reenactment models
+(LivePortrait class) do. Recommended placement is a POST-step, not a
+pre-step: T4's output already has the right identity, pose, head scale,
+lighting and framing — only the expression is wrong — so use T4's output as
+the source and the ORIGINAL target photo as the driving frame, in
+relative-motion mode. It runs last, so nothing can revert it, and T4 stays
+untouched. Known risk: it re-introduces a crop/paste boundary, which is the
+exact failure class CHECKPOINT-07 and `simple_full_body_raw_model` exist to
+avoid. Not yet tested.
+
+### Trap worth recording (cost three runs)
+Colab `#@param` form values live in the browser TAB, not on disk, so
+`git reset --hard` in the setup cell does NOT update them. All three rounds
+above ran at `denoise=0.35` — a stale form value — while newly-added params
+picked up fresh code defaults, producing mixed configs that matched no
+intended arm. `notebooks/pre_edit_expression_test.ipynb` now defaults
+`USE_CODE_DEFAULTS=True` so code defaults win unless deliberately overridden;
+the tab must still be RELOADED for notebook changes to appear.

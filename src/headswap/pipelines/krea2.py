@@ -1502,6 +1502,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
             eye_w = float(_np.linalg.norm(lm[0] - lm[1]))
             smile_ratio = mouth_w / max(eye_w, 1e-3)
             nose_y = float(lm[2][1])
+            # KNOWN BROKEN -- see docs/PIPELINE_STATE.md CHECKPOINT-14.
+            # lm[3]/lm[4] are the mouth CORNERS. Corners barely move
+            # vertically when a jaw drops (the lower lip and chin do), and
+            # landmarks5 carries no lower-lip or jaw point, so this cannot
+            # detect an open mouth at all -- it measures a nose-to-mouth face
+            # PROPORTION. Measured on the athlete pair: mouth visibly open,
+            # open_ratio=0.25, classified "mouth closed".
+            #
+            # smile_ratio (mouth width / eye width, above) is sound; only
+            # openness is wrong. Fixing needs landmark_2d_106 (insightface
+            # already loads it; used inline in preprocess.py for a head bbox,
+            # with no reusable accessor) plus a VERIFIED inner-lip index map.
             mouth_y = float(0.5 * (lm[3][1] + lm[4][1]))
             open_ratio = abs(mouth_y - nose_y) / max(1.0, float(selected_face.height))
 
