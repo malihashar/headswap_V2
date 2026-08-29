@@ -4348,6 +4348,137 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 except OSError:
                     pass
 
+    def probe_expression_transfer(
+        self,
+        identity_img: Image.Image,
+        expression_img: Image.Image,
+        out_dir: Path | None = None,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """Standalone probe: use Krea2's image2 -> image1 transfer to move an
+        EXPRESSION instead of an identity. One sample. No T4, no post-steps.
+
+        Everything in CHECKPOINTs 11-14 tried to STOP the donor's expression
+        from riding along with its identity, and failed on seven levers across
+        four sessions -- the image2 -> image1 transfer is the most reliable
+        behaviour this model has. This inverts it rather than fighting it:
+        image 1 (``scene``) is the face whose identity we want to KEEP, and
+        image 2 (``person``) supplies the expression we want to take. If it
+        works, the output is the donor wearing the target's expression, which
+        is exactly the input T4 wants.
+
+        The risk is that the same channel carries identity too, so the output
+        is simply the expression image's face. That is precisely what the
+        identity LoRA is trained to do, which is why it defaults OFF here --
+        the base edit model's dual-image conditioning is what we want to test,
+        without a head-transplant LoRA on top of it.
+
+        Note the argument order is by ROLE, not by the body/face names used
+        elsewhere: callers pass the DONOR as ``identity_img`` and the TARGET
+        as ``expression_img``, and this method puts them in the right slots.
+        Swapping the uploads by hand instead is how a probe like this gets
+        silently confounded.
+        """
+        import time as _time  # noqa: PLC0415
+
+        timings: dict[str, float] = {}
+        t0 = _time.perf_counter()
+        rt = self._ensure_runtime(timings)
+        from headswap.comfy.krea2_edit_fast import (  # noqa: PLC0415
+            clear_krea2_edit_static_cache,
+            install_krea2_edit_static_cache,
+        )
+
+        edit_cache_info = install_krea2_edit_static_cache()
+        clear_krea2_edit_static_cache()
+
+        lora_strength = float(
+            self.cfg.get("probe_expression_lora_strength", 0.0)
+        )
+        _ls_before = self.cfg.get("identity_lora_strength")
+        self.cfg["identity_lora_strength"] = lora_strength
+        try:
+            bundle = self._load_models(rt, timings)
+        finally:
+            if _ls_before is None:
+                self.cfg.pop("identity_lora_strength", None)
+            else:
+                self.cfg["identity_lora_strength"] = _ls_before
+
+        div_by = int(self.cfg.get("div_by", 16))
+        max_dim = int(self.cfg.get("probe_expression_max_dim", 768))
+        scene = resize_max_keep_ar(
+            identity_img.convert("RGB"), max_dim, div_by=div_by
+        )
+        person = resize_max_keep_ar(
+            expression_img.convert("RGB"), max_dim, div_by=div_by
+        )
+
+        prompt = prompt or str(
+            self.cfg.get("probe_expression_prompt", "") or ""
+        ).strip() or (
+            "Keep the person in the first image exactly as they are -- the "
+            "same face, the same identity, the same hair, the same head "
+            "angle, the same pose, the same lighting and the same "
+            "background. Change ONLY their facial expression, so that their "
+            "mouth and expression match the expression of the person in the "
+            "second image. Do not change who the person is."
+        )
+
+        denoise = float(self.cfg.get("probe_expression_denoise", 0.5))
+        ref_boost = float(self.cfg.get("probe_expression_ref_boost", 2.0))
+        cfg_val = float(self.cfg.get("probe_expression_cfg", 4.0))
+        steps = int(self.cfg.get("probe_expression_steps", 8))
+
+        old = {k: self.cfg.get(k) for k in ("denoise", "ref_boost", "cfg", "steps")}
+        self.cfg["denoise"] = denoise
+        self.cfg["ref_boost"] = ref_boost
+        self.cfg["cfg"] = cfg_val
+        self.cfg["steps"] = steps
+        print(
+            f"[krea2 expr_probe] image1=IDENTITY(keep) image2=EXPRESSION(take) "
+            f"denoise={denoise} ref_boost={ref_boost} cfg={cfg_val} "
+            f"steps={steps} lora_strength={lora_strength}",
+            flush=True,
+        )
+        try:
+            clear_krea2_edit_static_cache()
+            sample_meta = self._sample_edit(
+                rt,
+                bundle,
+                scene,
+                person,
+                timings,
+                prompt=prompt,
+                edit_cache_info=edit_cache_info,
+            )
+        finally:
+            for key, val in old.items():
+                if val is None:
+                    self.cfg.pop(key, None)
+                else:
+                    self.cfg[key] = val
+
+        edited = sample_meta["edited"]
+        paths: dict[str, str] = {}
+        if out_dir is not None:
+            d = Path(out_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            edited.save(d / "expr_probe_output.png")
+            paths["output"] = str(d / "expr_probe_output.png")
+
+        return {
+            "image": edited,
+            "prompt": prompt,
+            "denoise": denoise,
+            "ref_boost": ref_boost,
+            "cfg": cfg_val,
+            "steps": steps,
+            "lora_strength": lora_strength,
+            "latency_s": round(_time.perf_counter() - t0, 2),
+            "paths": paths,
+        }
+
     def _edit_donor_expression(
         self,
         rt: NodeRuntime,
