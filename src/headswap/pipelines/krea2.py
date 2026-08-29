@@ -1422,7 +1422,11 @@ class Krea2IdentityEditPipeline(BasePipeline):
             return None
 
     def _measure_expression_hint(
-        self, body_full: Image.Image, selected_face: FaceBox | None = None
+        self,
+        body_full: Image.Image,
+        selected_face: FaceBox | None = None,
+        *,
+        force: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         """Measure the BODY's expression and state it as fact for the prompt.
 
@@ -1463,7 +1467,10 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # donor's expression arrives as IMAGE conditioning at ref_boost=5.5,
         # which no prompt text governs. The measurement itself is sound and
         # kept behind the flag; the lever is wrong.
-        if not bool(self.cfg.get("expression_prompt_hint", False)):
+        # `force` is used by `_edit_donor_expression` (pre_edit_donor_expression),
+        # a different feature with its own gate -- it needs this measurement
+        # regardless of whether the T4-prompt-hint feature below is enabled.
+        if not force and not bool(self.cfg.get("expression_prompt_hint", False)):
             diag["reason"] = "disabled"
             return "", diag
         try:
@@ -4329,6 +4336,123 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 except OSError:
                     pass
 
+    def _edit_donor_expression(
+        self,
+        rt: NodeRuntime,
+        bundle: dict,
+        face: Image.Image,
+        body_full: Image.Image,
+        timings: dict[str, float],
+        edit_cache_info: dict,
+        div_by: int,
+    ) -> tuple[Image.Image, dict[str, Any]]:
+        """Pre-edit the DONOR photo's expression to match the TARGET's,
+        before T4's head-transplant pass ever sees it. OFF by default.
+
+        CHECKPOINT-11/12/13 (docs/PIPELINE_STATE.md) measured that the
+        donor's expression survives T4's main pass regardless of prompt
+        text, face_refine, or ref_boost -- the identity LoRA transplants
+        "the head" (identity + expression together) from the donor image,
+        and none of those levers touch that. Those attempts all edited the
+        TARGET side or the conditioning strength; this instead edits the
+        DONOR image itself, on the theory that the channel actually
+        carrying expression is the one worth changing.
+
+        Pure Krea2 generation, no mask: a single self-edit call (this
+        pipeline's own `_sample_edit`, scene=person=the donor photo) using
+        the SAME bundle already loaded for T4, so no new model/LoRA is
+        introduced. T4's own prompt, sampling knobs and post-steps
+        (`run_simple_full_body`) are untouched either way -- this only
+        replaces the `face` image handed to them.
+        """
+        diag: dict[str, Any] = {"applied": False}
+        if not bool(self.cfg.get("pre_edit_donor_expression", False)):
+            diag["reason"] = "disabled"
+            return face, diag
+
+        hint_text, expr_diag = self._measure_expression_hint(body_full, force=True)
+        if not hint_text:
+            diag["reason"] = expr_diag.get("reason", "no_target_expression_hint")
+            print(
+                f"[krea2 pre_edit_expression] SKIPPED - {diag['reason']}",
+                flush=True,
+            )
+            return face, diag
+
+        # "The person is X." -> bare clause for splicing into an instruction.
+        clause = hint_text.strip()
+        if clause.startswith("The person is "):
+            clause = clause[len("The person is "):]
+        clause = clause.rstrip(".")
+
+        max_dim = int(self.cfg.get("pre_edit_donor_expression_max_dim", 768))
+        donor_img = resize_max_keep_ar(face.convert("RGB"), max_dim, div_by=div_by)
+
+        prompt = (
+            f"Change this person's facial expression so they are {clause}. "
+            "Keep the identity, face shape, skin tone, hairstyle, head "
+            "angle, pose, camera framing, lighting and background exactly "
+            "the same. Do not change anything else about the image."
+        )
+
+        # Own, independent sampling knobs -- deliberately NOT inherited from
+        # T4's ref_boost=5.5/denoise=0.85/cfg=1.8, which are tuned for a
+        # scene != person head transplant, not a same-image expression
+        # nudge. Low denoise keeps this a texture-level move (same idea as
+        # _two_pass_refine's two_pass_b_denoise=0.2), not a restructuring.
+        denoise = float(self.cfg.get("pre_edit_donor_expression_denoise", 0.35))
+        ref_boost = float(self.cfg.get("pre_edit_donor_expression_ref_boost", 2.0))
+        cfg_val = float(self.cfg.get("pre_edit_donor_expression_cfg", 1.8))
+        steps = int(self.cfg.get("pre_edit_donor_expression_steps", 8))
+
+        old = {k: self.cfg.get(k) for k in ("denoise", "ref_boost", "cfg", "steps")}
+        self.cfg["denoise"] = denoise
+        self.cfg["ref_boost"] = ref_boost
+        self.cfg["cfg"] = cfg_val
+        self.cfg["steps"] = steps
+        try:
+            from headswap.comfy.krea2_edit_fast import clear_krea2_edit_static_cache
+
+            clear_krea2_edit_static_cache()
+            sample_meta = self._sample_edit(
+                rt,
+                bundle,
+                donor_img,
+                donor_img,
+                timings,
+                prompt=prompt,
+                edit_cache_info=edit_cache_info,
+            )
+        finally:
+            for key, val in old.items():
+                if val is None:
+                    self.cfg.pop(key, None)
+                else:
+                    self.cfg[key] = val
+
+        edited = sample_meta["edited"]
+        if edited.size != face.size:
+            edited = edited.resize(face.size, Image.Resampling.LANCZOS)
+
+        print(
+            "[krea2 pre_edit_expression] donor edited to match target "
+            f"expression \"{expr_diag.get('label')}\" "
+            f"(smile_ratio={expr_diag.get('smile_ratio')} "
+            f"open_ratio={expr_diag.get('open_ratio')}) "
+            f"denoise={denoise} ref_boost={ref_boost} cfg={cfg_val} steps={steps}",
+            flush=True,
+        )
+        diag = {
+            "applied": True,
+            "prompt": prompt,
+            "denoise": denoise,
+            "ref_boost": ref_boost,
+            "cfg": cfg_val,
+            "steps": steps,
+            "target_expression": expr_diag,
+        }
+        return edited, diag
+
     def run_simple_full_body(
         self, body: Image.Image, face: Image.Image, out_dir: Path | None = None
     ) -> PipelineResult:
@@ -4375,6 +4499,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
         div_by = int(self.cfg.get("div_by", 16))
         max_dim = int(self.cfg.get("max_dim", 768))
         body_full = self._fit_body_dim(body, max_dim, div_by)
+
+        face, pre_edit_expr_diag = self._edit_donor_expression(
+            rt, bundle, face, body_full, timings, edit_cache_info, div_by
+        )
+        if out_dir is not None and pre_edit_expr_diag.get("applied"):
+            _dbg_dir = Path(out_dir)
+            _dbg_dir.mkdir(parents=True, exist_ok=True)
+            face.save(_dbg_dir / "debug_pre_edit_donor_face.png")
+
         face_crop = crop_face_reference(
             face,
             self.cache_dir,
@@ -5683,6 +5816,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "body_size": list(body_full.size),
             "loras_loaded": sample_meta.get("loras_loaded"),
             "ref_boost": sample_meta.get("ref_boost"),
+            "pre_edit_donor_expression": pre_edit_expr_diag,
             "face_refine": refine_diag,
             "body_restore": body_restore_diag,
             "expression_hint": expression_diag,
