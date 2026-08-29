@@ -11,6 +11,7 @@ unless explicitly enabled.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -74,15 +75,58 @@ def test_call_site_runs_before_crop_face_reference():
 def test_own_sampling_knobs_are_independent_of_t4s():
     """Must not silently inherit T4's ref_boost=5.5/denoise=0.85/cfg=1.8 --
     those are tuned for a scene != person head transplant, not a same-image
-    expression nudge, and must be restorable independently of the main
-    pass."""
-    for key, default in (
-        ("pre_edit_donor_expression_denoise", "0.35"),
-        ("pre_edit_donor_expression_ref_boost", "2.0"),
-        ("pre_edit_donor_expression_cfg", "1.8"),
-        ("pre_edit_donor_expression_steps", "8"),
+    expression nudge, and must be restorable independently of the main pass.
+
+    Asserts the INTENT (each knob reads its own config key, with a default
+    that differs from T4's) rather than pinning exact numbers. Pinning them
+    is what broke this test on the first legitimate retune: these values are
+    expected to move every GPU round, while "independent of T4" is the
+    property that must actually hold.
+    """
+    t4_value = {
+        "pre_edit_donor_expression_denoise": 0.85,
+        "pre_edit_donor_expression_ref_boost": 5.5,
+        "pre_edit_donor_expression_cfg": 1.8,
+    }
+    for key in (
+        "pre_edit_donor_expression_denoise",
+        "pre_edit_donor_expression_ref_boost",
+        "pre_edit_donor_expression_cfg",
+        "pre_edit_donor_expression_steps",
     ):
-        assert f'self.cfg.get("{key}", {default})' in KREA2
+        m = re.search(rf'self\.cfg\.get\("{key}", ([0-9.]+)\)', KREA2)
+        assert m, f"{key} must be read from cfg with its own default"
+        if key in t4_value:
+            assert float(m.group(1)) != t4_value[key], (
+                f"{key} defaults to T4's own value ({t4_value[key]}); this "
+                "pass must not silently inherit the head-transplant tuning"
+            )
+
+
+def test_identity_lora_is_disabled_for_this_pass_by_default():
+    """The identity LoRA is trained to make image A's head look like image
+    B's. With scene == person == the donor photo that collapses to
+    "reproduce this exact head", which pins the output to the input and
+    overpowers the prompt -- measured twice on GPU (no change at
+    ref_boost=2.0; identity drift but still no expression change at 0.5).
+
+    It is baked into the loaded weights, so it has to be dropped at LOAD
+    time, not tuned away per call.
+    """
+    assert 'self.cfg.get("pre_edit_donor_expression_disable_lora", True)' in KREA2
+
+
+def test_lora_free_bundle_does_not_disturb_t4s_own_bundle():
+    """Dropping the LoRA must be scoped to this pass: identity_lora_strength
+    is restored in a finally, so T4's main pass and face_refine still load
+    (and cache-hit) their own LoRA-loaded bundle."""
+    i_method = KREA2.find("def _edit_donor_expression(")
+    i_next = KREA2.find("\n    def run_simple_full_body(")
+    body = KREA2[i_method:i_next]
+    i_zero = body.find('self.cfg["identity_lora_strength"] = 0.0')
+    assert i_zero > 0, "the LoRA must be dropped by zeroing its strength"
+    assert "_ls_before" in body[i_zero:], "the previous strength must be restored"
+    assert 'self.cfg["identity_lora_strength"] = _ls_before' in body
 
 
 def test_original_cfg_values_are_restored_after_the_self_edit():

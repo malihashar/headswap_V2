@@ -4398,23 +4398,59 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "anything else about the image."
         )
 
+        # LoRA-FREE bundle for THIS pass only.
+        #
+        # The identity LoRA is trained for one job: make image A's head look
+        # like image B's head. Here A and B are the SAME donor photo, so its
+        # learned objective collapses to "reproduce this exact head" -- an
+        # attractor that pins the output to the input and overpowers the
+        # prompt. That is baked into the loaded weights, so no per-call knob
+        # removes it, which is what two GPU rounds measured: at ref_boost=2.0
+        # the donor came back with no visible change at all, and dropping
+        # ref_boost to 0.5 drifted the IDENTITY (head shape/angle) while
+        # STILL leaving the expression untouched.
+        #
+        # _load_models' cache key includes identity_lora_strength (see the
+        # `key = f"krea2::..."` line), so setting it to 0 here yields a
+        # SEPARATE cached bundle. T4's own LoRA-loaded bundle is untouched and
+        # still drives the main pass and face_refine.
+        disable_lora = bool(
+            self.cfg.get("pre_edit_donor_expression_disable_lora", True)
+        )
+        if disable_lora:
+            _ls_before = self.cfg.get("identity_lora_strength")
+            self.cfg["identity_lora_strength"] = 0.0
+            try:
+                bundle = self._load_models(rt, timings)
+            finally:
+                if _ls_before is None:
+                    self.cfg.pop("identity_lora_strength", None)
+                else:
+                    self.cfg["identity_lora_strength"] = _ls_before
+            print(
+                "[krea2 pre_edit_expression] LoRA-FREE bundle for this pass -- "
+                "the identity LoRA's copy-the-head attractor cannot overpower "
+                "the prompt here; T4's own bundle is unchanged",
+                flush=True,
+            )
+
         # Own, independent sampling knobs -- deliberately NOT inherited from
         # T4's ref_boost=5.5/denoise=0.85/cfg=1.8, which are tuned for a
-        # scene != person head transplant, not a same-image expression
-        # nudge.
+        # scene != person head transplant, not a same-image expression nudge.
         #
-        # ref_boost boosts fidelity to the "person" reference -- here scene
-        # and person are the SAME photo, so a high value tells the model to
-        # stay faithful to exactly what's already there, fighting the very
-        # change the prompt asks for. First measured attempt (ref_boost=2.0,
-        # denoise=0.35, cfg=1.8) produced a pixel-identical output: no
-        # visible change at all. Lower ref_boost, higher denoise (more room
-        # to actually move) and higher cfg (this repo's own history: Krea2
-        # Turbo does not reliably obey prompt text until cfg is pushed well
-        # past its 1.0 default) are the next things to try.
-        denoise = float(self.cfg.get("pre_edit_donor_expression_denoise", 0.55))
-        ref_boost = float(self.cfg.get("pre_edit_donor_expression_ref_boost", 0.5))
-        cfg_val = float(self.cfg.get("pre_edit_donor_expression_cfg", 3.0))
+        # NOTE on ref_boost: it anchors fidelity to the "person" reference,
+        # and that reference CONTAINS the smile -- so it preserves identity
+        # and expression together and cannot separate them. Raising it stops
+        # identity drift but re-pins the expression; lowering it frees both.
+        # Same trap as the LoRA. It is therefore a compromise value here, and
+        # the actual separation has to come from the PROMPT, which is the only
+        # channel that distinguishes "the face" from "the mouth" semantically
+        # -- hence disable_lora above (so nothing competes with it) plus a cfg
+        # well above T4's, since Krea2 Turbo needs real cfg headroom before it
+        # obeys prompt text at all.
+        denoise = float(self.cfg.get("pre_edit_donor_expression_denoise", 0.45))
+        ref_boost = float(self.cfg.get("pre_edit_donor_expression_ref_boost", 2.0))
+        cfg_val = float(self.cfg.get("pre_edit_donor_expression_cfg", 4.0))
         steps = int(self.cfg.get("pre_edit_donor_expression_steps", 8))
 
         old = {k: self.cfg.get(k) for k in ("denoise", "ref_boost", "cfg", "steps")}
@@ -4451,7 +4487,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
             f"expression \"{expr_diag.get('label')}\" "
             f"(smile_ratio={expr_diag.get('smile_ratio')} "
             f"open_ratio={expr_diag.get('open_ratio')}) "
-            f"denoise={denoise} ref_boost={ref_boost} cfg={cfg_val} steps={steps}",
+            f"denoise={denoise} ref_boost={ref_boost} cfg={cfg_val} "
+            f"steps={steps} lora={'OFF' if disable_lora else 'ON'}",
             flush=True,
         )
         diag = {
@@ -4461,6 +4498,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "ref_boost": ref_boost,
             "cfg": cfg_val,
             "steps": steps,
+            "identity_lora_disabled": disable_lora,
             "target_expression": expr_diag,
         }
         return edited, diag
