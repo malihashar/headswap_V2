@@ -200,13 +200,22 @@ def run_chain(
                     erase_info.update(reason="no headwear detected",
                                       coverage=round(_cov, 5))
                 else:
-                    body_im, _einfo = _erase(body_im, _mask)
-                    erase_info = {"applied": True, "coverage": round(_cov, 5),
-                                  **(_einfo or {})}
-                    body_im.save(out / "body_headwear_erased.png")
-                    print(f"[chain] headwear erased from the target "
-                          f"(coverage={_cov:.3%}) -> body_headwear_erased.png",
-                          flush=True)
+                    _plate, _einfo = _erase(body_im, _mask)
+                    _einfo = _einfo or {}
+                    # Trust the callee's own verdict. erase_headwear falls
+                    # back and returns the image UNCHANGED when its backend
+                    # is missing, so assuming success here printed "headwear
+                    # erased (coverage=10.098%)" immediately followed by
+                    # "NOT applied: simple_lama_missing" -- two contradictory
+                    # lines about the same call, because {"applied": True}
+                    # was then overwritten by the spread.
+                    erase_info = {**_einfo, "coverage": round(_cov, 5)}
+                    erase_info.setdefault("applied", False)
+                    if erase_info["applied"]:
+                        body_im = _plate
+                        body_im.save(out / "body_headwear_erased.png")
+                        print(f"[chain] headwear ERASED (coverage={_cov:.3%})"
+                              " -> body_headwear_erased.png", flush=True)
         except Exception as exc:  # noqa: BLE001
             erase_info = {"applied": False,
                           "reason": f"{type(exc).__name__}: {exc}"}
