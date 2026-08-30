@@ -5141,7 +5141,28 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "the head from the second image completely -- the face, the hair "
             "and anything worn on the head, exactly as they appear in the "
             f"second image, with none of the first person's head remaining{_expr_inline}. "
-            "Second: change the skin colour of the body -- the neck, arms, "
+            # Headwear goes HERE, inside the head sentence -- not appended
+            # after the prohibitions at the end.
+            #
+            # CHECKPOINT-10 records exactly this failure mode: the
+            # skin-colour instruction sat third, after two clauses of
+            # prohibitions, and "the model simply did not act on a buried
+            # clause". Moving it up is what made it work. The headwear
+            # removal was appended DEAD LAST and was ignored across three
+            # wordings while the log confirmed it was in the prompt.
+            #
+            # Phrased as a FACT about the picture being made ("it is gone ...
+            # instead") rather than a CRITICAL instruction to obey, which is
+            # the pattern with precedent in this file -- see
+            # _measure_expression_hint's docstring on why measured facts
+            # outperform meta-instructions here.
+            + (
+                "The first person's hat, cap or head covering is gone, and "
+                "the second person's hair is there instead. "
+                if bool(self.cfg.get("simple_full_body_remove_headwear", False))
+                else ""
+            )
+            + "Second: change the skin colour of the body -- the neck, arms, "
             "hands and legs that are already bare -- to the skin colour of "
             "the person in the second image"
             # Naming the measured tone in words turns "match the other image"
@@ -5193,24 +5214,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # This is the REMOVAL half only (not the dead helper's default
         # PRESERVE branch) -- Ali asked specifically that a hat on the
         # original person be replaced by the donor's hair, not kept.
-        if not _prompt_override and bool(
-            self.cfg.get("simple_full_body_remove_headwear", False)
-        ):
-            prompt += (
-                " CRITICAL: if the person in the first image is wearing a "
-                "hat, cap, headscarf or any other head covering, REMOVE it "
-                "completely and replace it with the second person's hair. "
-                "No part of the original headwear -- including flaps, brim, "
-                "straps or its outline -- may remain or show through. "
-                "Reconstruct whatever background the headwear was covering "
-                "so nothing of its silhouette is left."
-            )
-            print(
-                "[krea2 headwear] remove-and-replace clause appended -- "
-                f"chars={len(prompt)}",
-                flush=True,
-            )
-
         # Print the prompt that will actually be used, and where it came
         # from. Two runs of this route can differ ONLY by prompt -- every
         # other knob (ref_boost, denoise, cfg, seed, route, dims) is already

@@ -31,7 +31,11 @@ DEFAULTS = {
     "animation_region": "lip",
     "skip_refine": True,
     "remove_headwear": True,
-    "erase_headwear": True,
+    # OFF. The LaMa/Telea inpaint did remove the hat, but Telea smears
+    # rather than reconstructs and the plate's artifacts survived into the
+    # final image -- rejected on looks. Headwear is a PROMPT concern on this
+    # route now; see the clause inside sentence one of run_simple_full_body.
+    "erase_headwear": False,
     # Telea is cruder than LaMa: it smears inward from the mask edge instead
     # of reconstructing, so a mask that merely covers the hat leaves a dark
     # rim of un-erased brim to smear FROM. Both values are more generous

@@ -1,18 +1,24 @@
-"""Explicit headwear-removal clause for run_simple_full_body. Off by default.
+"""Headwear removal is a prompt clause INSIDE sentence one, not an appendix.
 
-_append_headwear_policy already documents the underlying bug: a hat on the
-ORIGINAL person survived a swap as a translucent oval with "wings" at ear
-level, because "replace the head... with none of the first person's head
-remaining" never named headwear specifically -- a hat is not obviously part
-of "the head" to the model. That helper is only wired into the
-_prompt_for_edit/crop_stitch route; run_simple_full_body builds its own
-prompt and never calls it, same dead-code pattern already found this session
-for the hair-force and expression clauses.
+History, all measured on GPU:
+  1. base "anything worn on the head"      -> cap survived
+  2. CRITICAL clause appended last (943)   -> cap survived
+  3. same + "keep clothing" scoped to
+     below the neck (958)                  -> cap AND durag survived
+  4. LaMa/Telea inpaint of the target      -> cap removed, but Telea smears
+                                              and the artifacts survived into
+                                              the final image. Rejected.
 
-This wires the REMOVAL half (Ali asked that an original hat be replaced by
-the donor's hair, not preserved) directly into T4's prompt, gated off by
-default per this file's own rule: every prompt addition must be A/B'd on
-face_fraction before landing.
+Attempts 2 and 3 appended the clause DEAD LAST, after the prohibitions.
+CHECKPOINT-10 records that exact failure mode for a different instruction:
+the skin-colour clause sat third, after two clauses of prohibitions, and
+"the model simply did not act on a buried clause" -- moving it up is what
+made it work. So the clause now sits inside the head sentence, before
+"Second:", and is phrased as a fact rather than a CRITICAL order.
+
+It is also ~300 chars shorter than the appended version, which matters
+independently: CHECKPOINT-10/11 measured that prompt LENGTH alone moves
+face fraction on this route.
 """
 from __future__ import annotations
 
@@ -22,40 +28,54 @@ ROOT = Path(__file__).resolve().parents[1]
 KREA2 = (ROOT / "src" / "headswap" / "pipelines" / "krea2.py").read_text()
 
 
-def test_off_by_default():
-    assert 'self.cfg.get("simple_full_body_remove_headwear", False)' in KREA2
+def _assemble(remove_headwear: bool) -> str:
+    """Build the prompt exactly as run_simple_full_body does."""
+    i = KREA2.find("prompt = _prompt_override or (")
+    j = KREA2.find("\n        # Print the prompt that will actually be used", i)
+    assert 0 < i < j
+    ns = {
+        "_prompt_override": "",
+        "_expr_inline": "",
+        "self": type("C", (), {
+            "cfg": {"simple_full_body_remove_headwear": remove_headwear}
+        })(),
+    }
+    exec(KREA2[i:j], {}, ns)  # noqa: S102
+    return ns["prompt"]
 
 
-def test_disabled_when_prompt_is_overridden():
-    """A caller-supplied prompt must win outright, same rule as the inline
-    expression hint -- this must not silently append onto an override."""
-    i = KREA2.find('if not _prompt_override and bool(')
-    # Search FROM the guard, not from the top of the file. The flag is now
-    # read in two places -- once to scope the clothing-preservation clause
-    # (which would otherwise instruct the model to keep the hat) and once
-    # here -- so a plain find() returns the earlier one and this assertion
-    # measured the distance to the wrong occurrence.
-    j = KREA2.find('self.cfg.get("simple_full_body_remove_headwear"', i)
-    assert i > 0 and 0 < j - i < 80
+def test_default_prompt_is_byte_identical_to_t4():
+    """CHECKPOINT-10 records the approved text as 564 chars and treats it as
+    part of the recipe, not incidental."""
+    assert len(_assemble(False)) == 564
 
 
-def test_clause_targets_removal_not_preservation():
-    # Scoped to just the appended clause block, not the surrounding comment
-    # that legitimately discusses the dead helper's PRESERVE branch by name.
-    i = KREA2.find('CRITICAL: if the person in the first image is wearing a')
-    j = KREA2.find('[krea2 headwear] remove-and-replace', i)
-    block = KREA2[i:j]
-    assert i > 0
-    assert "REMOVE it" in block
-    assert "completely and replace it with the second person's hair" in block
-    # The dead helper's PRESERVE branch text is a different clause entirely
-    # ("hair MUST be transferred, not hidden") and must not be what landed.
-    assert "not hidden" not in block
+def test_clause_lands_inside_sentence_one():
+    p = _assemble(True)
+    i_clause = p.find("hat, cap or head covering is gone")
+    i_second = p.find("Second:")
+    assert 0 < i_clause < i_second, "the clause must not be buried after the prohibitions"
 
 
-def test_applied_after_the_base_t4_sentence_not_inside_it():
-    """Appended, not spliced -- keeps the base T4 sentence byte-identical
-    when this flag is off, same discipline as the inline expression hint."""
-    i_base_end = KREA2.find("Do not turn any clothed area into skin.")
-    i_flag = KREA2.find('simple_full_body_remove_headwear')
-    assert 0 < i_base_end < i_flag
+def test_clause_is_a_fact_not_a_shouted_order():
+    """"CRITICAL: ... REMOVE it completely" was tried twice and ignored.
+    Measured facts are the pattern with precedent here."""
+    p = _assemble(True)
+    assert "CRITICAL" not in p
+    assert "is gone" in p and "is there instead" in p
+
+
+def test_clause_is_shorter_than_the_appended_version():
+    """The appended block took the prompt to 958 chars. Length alone moves
+    face fraction on this route."""
+    assert len(_assemble(True)) < 800
+
+
+def test_absent_when_disabled():
+    assert "head covering" not in _assemble(False)
+
+
+def test_override_still_wins():
+    """A caller-supplied prompt must not get the clause spliced into it."""
+    i = KREA2.find("prompt = _prompt_override or (")
+    assert i > 0, "the override must short-circuit the whole assembled prompt"
