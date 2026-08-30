@@ -88,7 +88,11 @@ def main() -> int:
     from headswap.pipelines import create_pipeline
     from headswap.pipelines.krea2 import get_shared_krea2_runtime
 
+    # Absolute before the runtime is built -- ComfyUI's init chdirs into its
+    # own tree, so a relative path silently resolves elsewhere afterwards.
     pair = Path(args.pair_dir)
+    if not pair.is_absolute():
+        pair = (REPO / pair).resolve()
     body_path, face_path = pair / "body.png", pair / "face.png"
     for f in (body_path, face_path):
         if not f.exists():
@@ -98,6 +102,8 @@ def main() -> int:
     face_im = Image.open(face_path).convert("RGB")
 
     out_dir = Path(args.out_dir)
+    if not out_dir.is_absolute():
+        out_dir = (REPO / out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     runtime = get_shared_krea2_runtime(init_custom_nodes=True)

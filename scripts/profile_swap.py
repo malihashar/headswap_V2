@@ -57,7 +57,12 @@ def main() -> int:
     from headswap.pipelines import create_pipeline
     from headswap.pipelines.krea2 import get_shared_krea2_runtime
 
+    # ABSOLUTE, resolved before the runtime is built. ComfyUI's init chdirs
+    # into its own tree, so a relative --pair-dir passes the existence check
+    # here and then fails to open a few lines later, under a different cwd.
     pair = Path(args.pair_dir)
+    if not pair.is_absolute():
+        pair = (REPO / pair).resolve()
     body_p, face_p = pair / "body.png", pair / "face.png"
     for f in (body_p, face_p):
         if not f.exists():
@@ -76,6 +81,8 @@ def main() -> int:
     pipe = create_pipeline(cfg, runtime=get_shared_krea2_runtime(init_custom_nodes=True))
 
     out = Path(args.out_dir)
+    if not out.is_absolute():
+        out = (REPO / out).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
     print("\n=== WARMUP (loads models; excluded from the measured run) ===\n")
