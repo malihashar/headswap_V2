@@ -2807,11 +2807,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     f"{cuda_mid.get('reserved_mb')} free_mb={cuda_mid.get('free_mb')}"
                 )
             sample_t0 = time.perf_counter()
+            # NOTE the nesting. force_sampling_full_load evicts every model
+            # from the GPU on enter and again on exit (~13GB shuffled, twice
+            # per swap), and it sits INSIDE this stage -- so a naive
+            # "diffusion_sampling" number silently bundles memory churn in
+            # with real sampling. That matters: sampling can only be cut by
+            # trading quality (steps/cfg/face_refine), while residency churn
+            # is free to remove. `ksampler_only` isolates the actual denoise
+            # loop, so `diffusion_sampling - ksampler_only` is the churn.
             with _stage(timings, "diffusion_sampling"):
                 with force_sampling_full_load(
                     models=(model,), enabled=use_full_load
                 ):
-                    with _silence_krea2edit_step_prints():
+                    with _stage(timings, "ksampler_only"), \
+                            _silence_krea2edit_step_prints():
                         samples = rt.call(
                             "KSampler",
                             model=model,

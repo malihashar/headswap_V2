@@ -97,16 +97,38 @@ def main() -> int:
         print("no timing_s in meta -- is the build current?")
         return 1
 
-    sampling = sum(v for k, v in timings.items() if "sampling" in k)
-    loading = sum(v for k, v in timings.items() if "load" in k)
+    # ksampler_only is the real denoise loop. force_sampling_full_load evicts
+    # and reloads ~13GB on enter/exit and sits INSIDE diffusion_sampling, so
+    # the difference between them is pure memory churn -- free to remove,
+    # unlike the sampling it was previously lumped in with.
+    ksampler = timings.get("ksampler_only", 0.0)
+    diffusion = sum(v for k, v in timings.items() if k == "diffusion_sampling")
+    refine = sum(v for k, v in timings.items() if "face_refine_sampling" in k)
+    churn = max(0.0, diffusion - ksampler)
+    loading = sum(v for k, v in timings.items() if "model_loading" in k)
     vae = sum(v for k, v in timings.items() if "vae" in k)
-    print(f"  sampling      {sampling:7.2f}s  {100*sampling/total:5.1f}%  <- costs QUALITY to cut")
-    print(f"  model loading {loading:7.2f}s  {100*loading/total:5.1f}%  <- FREE to cut (residency)")
-    print(f"  vae           {vae:7.2f}s  {100*vae/total:5.1f}%")
-    other = total - sampling - loading - vae
-    print(f"  everything else {other:5.2f}s  {100*other/total:5.1f}%  <- detection/rembg/composite")
-    print("\nIf sampling is well under half, the 25s target is mostly an")
-    print("infrastructure problem and quality does not have to be traded.")
+    other = max(0.0, total - diffusion - refine - loading - vae)
+
+    def _row(label, secs, note=""):
+        print(f"  {label:<22}{secs:7.2f}s  {100 * secs / total:5.1f}%  {note}")
+
+    _row("KSampler (denoise)", ksampler, "<- QUALITY cost to cut (steps/cfg)")
+    _row("GPU residency churn", churn, "<- FREE (full_load evict/reload)")
+    _row("face_refine sampling", refine, "<- a whole 2nd pass; CHECKPOINT-12")
+    _row("model loading", loading, "<- FREE after warmup")
+    _row("vae", vae)
+    _row("everything else", other, "<- detection / rembg / composite")
+
+    print()
+    free = churn + loading + other
+    print(f"  Free-to-cut (no quality change):  ~{free:.0f}s")
+    print(f"  Quality-costing (sampling):       ~{ksampler + refine:.0f}s")
+    print(f"  Target is 25s from {total:.0f}s -> need to remove {total - 25:.0f}s.")
+    if free >= total - 25:
+        print("  => Reachable on INFRASTRUCTURE alone. Do not trade quality yet.")
+    else:
+        print(f"  => Infra alone is not enough (short by ~{(total - 25) - free:.0f}s);")
+        print("     cfg 1.8->1.0 halves the denoise cost and is the cheapest trade.")
     return 0
 
 
