@@ -56,6 +56,13 @@ def main() -> int:
     ap.add_argument("--lp-dir", default="/content/LivePortrait")
     ap.add_argument("--animation-region", default="lip")
     ap.add_argument(
+        "--lp-order", choices=["before", "after"], default="after",
+        help="'before': LP edits the donor, then T4 swaps (T4 REGENERATES the "
+             "face and normalises the expression away -- measured). 'after': "
+             "T4 swaps, then LP drives the final image, so nothing downstream "
+             "can override it and LP works at full resolution.")
+    ap.add_argument("--driving-multiplier", type=float, default=1.0)
+    ap.add_argument(
         "--skip-refine", action="store_true",
         help="skip face_refine on bust shots (the ~20s second sampling pass). "
              "Uses the EXISTING simple_full_body_refine_max_face_frac gate, "
@@ -136,7 +143,7 @@ def main() -> int:
         row = {"label": label}
 
         donor_for_swap = face_p
-        if use_lp:
+        if use_lp and args.lp_order == "before":
             from headswap.expression_transfer import run_expression_transfer
             t0 = time.perf_counter()
             lp = run_expression_transfer(
@@ -171,7 +178,8 @@ def main() -> int:
         else:
             row["lp_total"] = row["lp_load"] = row["lp_exec"] = 0.0
             row["lp_used"] = False
-            row["lp_note"] = "LivePortrait disabled"
+            row["lp_note"] = ("LivePortrait runs AFTER the swap"
+                              if use_lp else "LivePortrait disabled")
 
         donor_im = Image.open(donor_for_swap).convert("RGB")
         t0 = time.perf_counter()
@@ -184,8 +192,46 @@ def main() -> int:
         row["t4_refine"] = float(tim.get("face_refine_sampling") or 0.0)
         row["refine_applied"] = bool((meta.get("face_refine") or {}).get("applied"))
         row["chain"] = row["lp_total"] + row["t4_total"]
+        swap_png = out / f"swap_only_{label.lower()}.png"
+        res.image.save(swap_png)
+        final_img = swap_png
+
+        if use_lp and args.lp_order == "after":
+            # POST-step: drive T4's finished frame with the ORIGINAL target
+            # photo. Running LP before the swap does not survive -- T4
+            # regenerates the head from the donor crop and normalises the
+            # expression back to something plausible, measured directly:
+            # LivePortrait produced an open mouth and the final frame came
+            # back with an ordinary closed smile.
+            #
+            # Running last also gives LP the full-resolution result to work
+            # on instead of a ~205x186 donor thumbnail.
+            from headswap.expression_transfer import run_expression_transfer
+            t0 = time.perf_counter()
+            lp = run_expression_transfer(
+                source_path=swap_png,   # identity to KEEP: T4's own output
+                driving_path=body_p,    # expression to TAKE: the target
+                out_dir=out / f"lp_{label.lower()}",
+                animation_region=args.animation_region,
+                driving_multiplier=args.driving_multiplier,
+                live_portrait_dir=args.lp_dir,
+            )
+            row["lp_total"] = time.perf_counter() - t0
+            row["lp_load"] = float(lp.get("model_load_s") or 0.0)
+            row["lp_exec"] = float(lp.get("latency_s") or 0.0)
+            row["lp_placement"] = lp.get("placement")
+            row["lp_used"] = False
+            if lp.get("primary") and Path(lp["primary"]).suffix.lower() != ".mp4":
+                final_img = Path(lp["primary"])
+                row["lp_used"] = True
+            else:
+                row["lp_note"] = "LP produced no usable image; final is swap-only"
+            row["chain"] = row["lp_total"] + row["t4_total"]
+            print(f"[chain] post-step LP applied: {row['lp_used']}", flush=True)
+
+        from PIL import Image as _I
+        _I.open(final_img).convert("RGB").save(out / f"final_{label.lower()}.png")
         rows.append(row)
-        res.image.save(out / f"final_{label.lower()}.png")
 
     # Buffer the summary AND write it to a file. The run emits thousands of
     # ComfyUI/path_proof lines, so the table at the end is unreachable by
