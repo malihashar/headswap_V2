@@ -185,7 +185,17 @@ def run_expression_transfer(
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    before = {f for f in out_dir.glob("**/*") if f.is_file()}
+    # Timestamp, not a set difference.
+    #
+    # Detecting output as `after - before` only finds NEW paths, and
+    # LivePortrait overwrites the same filenames every run. So on the second
+    # call the diff was empty, primary came back None, and the caller
+    # silently fell back to the unmodified swap -- discarding a perfectly
+    # good result and reporting lp_applied=False while the log showed
+    # "Animated image: ...". Measured exactly that on a re-run.
+    #
+    # A small negative margin absorbs filesystem timestamp granularity.
+    _t_start = time.time() - 1.0
 
     cwd_before = Path.cwd()
     os.chdir(lp_dir)
@@ -286,9 +296,18 @@ def run_expression_transfer(
     # Glob rather than assume a filename: LivePortrait names outputs from the
     # input stems and emits an extra `_concat` comparison image, and returns
     # a video instead of a jpg for some input shapes.
-    after = {f for f in out_dir.glob("**/*") if f.is_file()}
-    produced = sorted(after - before, key=lambda f: f.stat().st_mtime)
+    produced = sorted(
+        (f for f in out_dir.glob("**/*")
+         if f.is_file() and f.stat().st_mtime >= _t_start),
+        key=lambda f: f.stat().st_mtime,
+    )
     primary = [f for f in produced if "concat" not in f.name.lower()]
+    if not primary:
+        print(
+            f"[liveportrait] WARNING: no output written under {out_dir} during "
+            "this call -- the caller will fall back to its unmodified input",
+            flush=True,
+        )
 
     return {
         "produced": [str(f) for f in produced],

@@ -93,3 +93,28 @@ def test_sys_modules_purge_only_on_cache_miss():
     src = (ROOT / "src" / "headswap" / "expression_transfer.py").read_text()
     assert "_will_build = _LP_PIPELINE[\"pipeline\"] is None" in src
     assert "if _will_build:" in src
+
+
+def test_output_detection_uses_mtime_not_a_set_difference():
+    """LivePortrait overwrites the same filenames on every call.
+
+    Detecting output as `after - before` therefore found nothing on the
+    SECOND run: the paths already existed, so the diff was empty, primary
+    came back None, and the caller silently fell back to its unmodified
+    input -- reporting lp_applied=False while the log showed "Animated
+    image: ...". A good result was discarded and the failure looked like
+    LivePortrait not working.
+    """
+    src = (ROOT / "src" / "headswap" / "expression_transfer.py").read_text()
+    assert "_t_start" in src
+    assert "st_mtime >= _t_start" in src
+    assert "after - before" not in src, (
+        "set-difference detection cannot see overwritten files"
+    )
+
+
+def test_missing_output_is_warned_not_silent():
+    """The fallback is legitimate, but it must be visible: a silent fallback
+    is what made a working LivePortrait pass look like a broken one."""
+    src = (ROOT / "src" / "headswap" / "expression_transfer.py").read_text()
+    assert "no output written under" in src
