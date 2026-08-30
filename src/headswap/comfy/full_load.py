@@ -409,7 +409,21 @@ def force_sampling_full_load(
         try:
             yield info
         finally:
-            after = offload_gpu_models(reason="after_sample", patchers=patchers)
+            # Same gate as before_sample. Gating only the entry side was a
+            # half fix: churn went 6.3s -> 4.8s because this eviction in the
+            # finally block still ran, dropping ~13GB that the next sample
+            # immediately reloads. If there was headroom on the way in there
+            # is headroom on the way out.
+            if _ample:
+                print(
+                    "[full_load] post-sample offload SKIPPED (ample VRAM)",
+                    flush=True,
+                )
+                after = {"ok": True, "skipped": "ample_vram"}
+            else:
+                after = offload_gpu_models(
+                    reason="after_sample", patchers=patchers
+                )
             info["freed_after_sample"] = bool(after.get("ok"))
             info["offload_after"] = after
             if after.get("error") and not info.get("error"):

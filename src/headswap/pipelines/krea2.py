@@ -3962,7 +3962,15 @@ class Krea2IdentityEditPipeline(BasePipeline):
             try:
                 from headswap.segmentation import _try_birefnet_mask
 
-                # Segment a DOWNSCALED copy. The matte is used only for row
+                # NOTE: downscaling the input here does NOT help. Measured
+                # 12.9s -> 16.1s at 384px: bria-rmbg-2.0 has a FIXED input
+                # resolution, so rembg resizes whatever it is given to the
+                # model's native size and the extra resize is pure cost.
+                # The real levers are a working CUDA provider (ORT
+                # silently falls back to CPU) or body_route_use_segmentation
+                # = false, since the routing decision below_face_frac >= 0.38
+                # never reads this matte -- only person_height_frac does.
+                # The matte is used only for row
                 # extents -> person_height_frac, a RATIO taken against the
                 # matte's own height, so it is scale-invariant; nothing
                 # here reaches the output image. (below_face_frac comes
@@ -3977,11 +3985,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 # Fixing the CUDA/cuDNN mismatch would help every ONNX user
                 # here and is worth doing, but this cost should not exist
                 # even on a GPU: it is a routing heuristic, not a mask.
-                _mp = int(self.cfg.get("body_route_matte_max_dim", 384))
-                _probe = body
-                if max(body.size) > _mp:
-                    _probe = resize_max_keep_ar(body, _mp, div_by=8)
-                mask, skip_reason = _try_birefnet_mask(_probe, None, blur_px=0)
+                mask, skip_reason = _try_birefnet_mask(body, None, blur_px=0)
             except Exception as exc:  # pragma: no cover - defensive
                 mask, skip_reason = None, f"import_failed:{exc}"
             if mask is not None:

@@ -1,14 +1,25 @@
-"""The routing matte must be computed on a downscaled probe.
+"""Downscaling the routing matte's input does NOT speed it up. Do not retry.
 
-Measured: body_route took 12.9s of a 13.4s pre-dispatch stage, running the
-~1GB rembg matte model at full 1024px -- on CPU, because onnxruntime
-advertises CUDAExecutionProvider and then silently falls back to CPU at
-session creation (requested=[CUDA, CPU] -> ACTUAL=[CPU]).
+Reasoning that looked sound: the matte feeds only row extents ->
+person_height_frac, a scale-invariant ratio that never reaches the output
+image, so segmenting a 384px probe instead of 1024px should cost ~7x less.
 
-The matte here feeds ONLY row extents -> person_height_frac /
-below_face_frac. Those are ratios, so they are scale-invariant, and none of
-it reaches the output image. Segmenting at full resolution to compute a
-fraction is pure waste even on a GPU.
+Measured on GPU: body_route went 12.9s -> 16.1s. SLOWER. bria-rmbg-2.0 has a
+FIXED input resolution, so rembg resizes whatever it is handed to the
+model's native size -- input size does not drive its cost, and the extra
+resize is pure overhead. Reverted.
+
+The real levers for this stage, both untested:
+  1. A working CUDA provider. onnxruntime advertises CUDAExecutionProvider
+     and then silently falls back to CPU at session creation
+     (requested=[CUDA, CPU] -> ACTUAL=[CPU]), and the install is fragile:
+     a later pip install replaced onnxruntime-gpu with the CPU build and
+     the requested list collapsed to ['CPUExecutionProvider'].
+  2. body_route_use_segmentation=false. The routing decision that actually
+     fires here is `below_face_frac >= 0.38`, computed from the face box and
+     the full-size frame -- it never reads the matte. Only person_height_frac
+     does, and the code's own comment notes that metric rates a bust crop
+     (~0.99) as MORE full-body than a real full-body shot.
 """
 from __future__ import annotations
 
@@ -24,36 +35,34 @@ def _detect_full_body_src() -> str:
     return KREA2[i:i + 6000]
 
 
-def test_matte_is_computed_on_a_downscaled_probe():
+def test_matte_gets_the_full_image_not_a_downscaled_probe():
+    """The downscale is reverted; this fails if someone reintroduces it."""
     body = _detect_full_body_src()
-    assert "body_route_matte_max_dim" in body
-    assert "_try_birefnet_mask(_probe" in body, (
-        "the full-resolution image must not be handed to the matte model"
+    assert "_try_birefnet_mask(body, None, blur_px=0)" in body
+    assert "body_route_matte_max_dim" not in body, (
+        "downscaling was measured SLOWER (12.9s -> 16.1s); see this "
+        "module's docstring before trying it again"
     )
 
 
-def test_downscale_is_conditional():
-    """An already-small input must not be upscaled into extra work."""
-    assert "if max(body.size) > _mp:" in _detect_full_body_src()
-
-
-def test_ratio_divides_by_the_matte_height_not_the_full_frame():
-    """The bug this pins was introduced BY the downscale and nearly shipped.
-
-    person_h_frac measures matte rows, so dividing by the full-frame h would
-    shrink it by the probe scale factor (~2.7x at 384 from 1024) and bias
-    every routing decision toward "not a full body". Both terms must come
-    from the same frame.
-    """
+def test_the_negative_result_is_recorded_at_the_call_site():
+    """A future reader must hit the finding before re-deriving the idea."""
     body = _detect_full_body_src()
-    assert "person_h_frac = float(rows.max() - rows.min()) / _mask_h" in body
+    assert "FIXED input" in body and "16.1s" in body
+
+
+def test_ratio_still_divides_by_the_matte_frame():
+    """Kept from the reverted change: it is correct either way, and it makes
+    person_h_frac robust if the matte's frame ever diverges from the body's
+    again."""
+    body = _detect_full_body_src()
     assert "_mask_h = float(alpha.shape[0])" in body
-    assert "rows.min()) / float(h)" not in body
+    assert "person_h_frac = float(rows.max() - rows.min()) / _mask_h" in body
 
 
 def test_below_face_frac_is_independent_of_the_matte():
-    """below_face_frac comes from the face box and the full-size frame, so
-    the downscale must not touch it -- pinned so a later refactor does not
-    quietly route it through the probe."""
+    """This is the value that actually routes. It comes from the face box and
+    the full-size frame, which is why disabling the matte entirely is the
+    promising lever."""
     body = _detect_full_body_src()
     assert "below_face_frac = max(0.0, h - selected_face.y1) / float(h)" in body
