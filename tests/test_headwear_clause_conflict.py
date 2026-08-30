@@ -37,8 +37,12 @@ def test_the_below_the_neck_variant_is_gone():
     the code still being present. This repo already documents that exact
     false positive elsewhere.
     """
-    import re
-    assert not re.search(r'"Keep the clothing below the neck', KREA2), (
+    # Discriminate on text only the CODE had. The comment quotes the phrase
+    # as '"Keep the clothing below the neck ..."', so both a substring check
+    # and a regex anchored on the opening quote match it -- I got this wrong
+    # twice. The real literal continued ", pose, body shape, "; the comment
+    # elides that with an ellipsis.
+    assert '"Keep the clothing below the neck, pose' not in KREA2, (
         "the qualified variant is still in the prompt"
     )
 
