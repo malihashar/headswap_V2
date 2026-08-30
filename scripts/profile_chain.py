@@ -150,12 +150,28 @@ def main() -> int:
             row["lp_load"] = float(lp.get("model_load_s") or 0.0)
             row["lp_exec"] = float(lp.get("latency_s") or 0.0)
             row["lp_placement"] = lp.get("placement")
+            # Record WHETHER LivePortrait's output actually became the donor.
+            # The fallback below is silent: if LP produced nothing, or an
+            # .mp4, T4 runs on the ORIGINAL donor and the chain timing looks
+            # identical -- a 21.8s "chain" could be a swap-only number with
+            # LP contributing nothing but overhead. That must be a reported
+            # value, not an assumption.
+            row["lp_used"] = False
             if lp.get("primary"):
-                p = Path(lp["primary"])
-                if p.suffix.lower() != ".mp4":
-                    donor_for_swap = p
+                _p = Path(lp["primary"])
+                if _p.suffix.lower() != ".mp4":
+                    donor_for_swap = _p
+                    row["lp_used"] = True
+                else:
+                    row["lp_note"] = f"output was {_p.suffix}, not an image"
+            else:
+                row["lp_note"] = "LivePortrait produced no output file"
+            print(f"[chain] LP output fed to T4: {row['lp_used']} "
+                  f"({row.get('lp_note', donor_for_swap.name)})", flush=True)
         else:
             row["lp_total"] = row["lp_load"] = row["lp_exec"] = 0.0
+            row["lp_used"] = False
+            row["lp_note"] = "LivePortrait disabled"
 
         donor_im = Image.open(donor_for_swap).convert("RGB")
         t0 = time.perf_counter()
@@ -202,6 +218,11 @@ def main() -> int:
              f"   (pre {w['t4_pre']:.1f}s, KSampler {w['t4_ks']:.1f}s, "
              f"face_refine {w.get('t4_refine', 0.0):.1f}s "
              f"applied={w.get('refine_applied')})")
+        emit(f"  LP OUTPUT USED BY T4: {w.get('lp_used')}"
+             + (f"   <-- {w['lp_note']}" if w.get("lp_note") else ""))
+        if not w.get("lp_used"):
+            emit("      WARNING: T4 ran on the ORIGINAL donor. This CHAIN "
+                 "number is swap-only; LivePortrait changed nothing.")
         if w.get("lp_placement"):
             emit(f"  LP placement  {w['lp_placement']}")
         gap = best - 30.0
