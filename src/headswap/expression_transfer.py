@@ -26,6 +26,20 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+# Cached LivePortraitPipeline, keyed by the InferenceConfig/CropConfig fields
+# we actually vary. Construction loads five .pth models
+# (appearance_feature_extractor, motion_extractor, warping_module,
+# spade_generator, stitching_retargeting_module) plus an InsightFace
+# FaceAnalysisDIY and a LandmarkRunner -- every call rebuilt all of it, which
+# is visible as the full "Load ... done." block in every run log.
+#
+# Keyed rather than a bare singleton because animation_region and
+# flag_relative_motion live in InferenceConfig, not in the per-call args, so
+# a plain singleton would silently serve a pipeline configured for the
+# PREVIOUS call's region. That is the same class of bug as the stale Colab
+# form values that cost this investigation ten runs.
+_LP_PIPELINE: dict = {"key": None, "pipeline": None}
+
 # Still-image suffixes. A single still cannot express relative motion (see
 # resolve_relative_motion), so this list is load-bearing, not cosmetic.
 _STILL_SUFFIXES = frozenset(
@@ -120,8 +134,16 @@ def run_expression_transfer(
     # LivePortrait's package is literally named `src`, which collides with
     # anything else importing a top-level `src`. Drop stale entries so a
     # second call in the same kernel does not reuse another project's module.
-    for mod in [m for m in sys.modules if m == "src" or m.startswith("src.")]:
-        del sys.modules[mod]
+    #
+    # Only when we are about to BUILD, though. Purging on a cache hit would
+    # re-import these modules underneath a live pipeline, leaving its
+    # instances bound to class objects that no longer match the freshly
+    # imported ones -- the classic stale-isinstance trap. On a hit the
+    # already-imported LivePortrait modules are exactly what we want.
+    _will_build = _LP_PIPELINE["pipeline"] is None
+    if _will_build:
+        for mod in [m for m in sys.modules if m == "src" or m.startswith("src.")]:
+            del sys.modules[mod]
     try:
         from src.config.argument_config import ArgumentConfig  # noqa: PLC0415
         from src.config.crop_config import CropConfig  # noqa: PLC0415
@@ -144,10 +166,27 @@ def run_expression_transfer(
         def _partial(cls):
             return cls(**{k: v for k, v in args.__dict__.items() if hasattr(cls, k)})
 
-        pipeline = LivePortraitPipeline(
-            inference_cfg=_partial(InferenceConfig),
-            crop_cfg=_partial(CropConfig),
+        cache_key = (
+            str(lp_dir), str(animation_region), bool(rel), bool(stitching),
+            float(driving_multiplier),
         )
+        load_s = 0.0
+        if _LP_PIPELINE["key"] == cache_key and _LP_PIPELINE["pipeline"] is not None:
+            pipeline = _LP_PIPELINE["pipeline"]
+            print("[liveportrait] reusing cached pipeline (models resident)",
+                  flush=True)
+        else:
+            _lt0 = time.perf_counter()
+            pipeline = LivePortraitPipeline(
+                inference_cfg=_partial(InferenceConfig),
+                crop_cfg=_partial(CropConfig),
+            )
+            load_s = round(time.perf_counter() - _lt0, 2)
+            _LP_PIPELINE["key"] = cache_key
+            _LP_PIPELINE["pipeline"] = pipeline
+            print(f"[liveportrait] pipeline built + cached in {load_s}s",
+                  flush=True)
+
         t0 = time.perf_counter()
         pipeline.execute(args)
         latency_s = round(time.perf_counter() - t0, 2)
@@ -165,6 +204,7 @@ def run_expression_transfer(
         "produced": [str(f) for f in produced],
         "primary": str(primary[-1]) if primary else None,
         "latency_s": latency_s,
+        "model_load_s": load_s,
         "animation_region": animation_region,
         "relative_motion": rel,
         "relative_motion_reason": rel_reason,

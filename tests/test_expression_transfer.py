@@ -68,3 +68,28 @@ def test_reason_is_returned_for_logging():
     for driving, requested in (("body.png", True), ("drive.mp4", None)):
         _, reason = resolve_relative_motion(driving, requested)
         assert isinstance(reason, str) and reason.strip()
+
+
+def test_pipeline_is_cached_and_keyed_not_a_bare_singleton():
+    """Rebuilding LivePortraitPipeline per call reloads five .pth models plus
+    InsightFace and a landmark runner -- visible as the full "Load ... done."
+    block in every run log.
+
+    Keyed, because animation_region and flag_relative_motion live in
+    InferenceConfig rather than the per-call args: a bare singleton would
+    serve a pipeline configured for the PREVIOUS call's region, silently.
+    """
+    src = (ROOT / "src" / "headswap" / "expression_transfer.py").read_text()
+    assert "_LP_PIPELINE" in src
+    assert 'cache_key = (' in src
+    assert 'str(animation_region)' in src, "region must be part of the key"
+    assert '_LP_PIPELINE["key"] == cache_key' in src
+
+
+def test_sys_modules_purge_only_on_cache_miss():
+    """Purging LivePortrait's `src` modules on a cache HIT would re-import
+    them underneath a live pipeline, leaving instances bound to stale class
+    objects."""
+    src = (ROOT / "src" / "headswap" / "expression_transfer.py").read_text()
+    assert "_will_build = _LP_PIPELINE[\"pipeline\"] is None" in src
+    assert "if _will_build:" in src
