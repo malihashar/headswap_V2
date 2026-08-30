@@ -6358,31 +6358,47 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # large constant that no sampling change can touch.
             _pre_t0 = time.perf_counter()
             magic_hour_meta = self._maybe_run_magic_hour_face_detection(body, out_dir)
+            _t_mh = time.perf_counter()
 
             # Lighting route must run BEFORE model load so full_frame LoRA/rb
             # overrides are picked up when multi+dark.
             lighting_route_meta = self._resolve_lighting_route(body)
+            _t_light = time.perf_counter()
 
             # Body route runs AFTER lighting so it has the final say: it only
             # ever upgrades crop_stitch -> full_frame when a full body is
             # detected, and otherwise leaves whatever the lighting route (or
             # the default) already decided untouched.
             body_route_meta = self._resolve_body_route(body)
+            _t_body = time.perf_counter()
 
             # Single-person full-body resolves to the simple full-body path.
             # It loads its own runtime/bundle, so dispatch before the
             # crop_stitch/full_frame model-load below.
-            _pre_dispatch_s = time.perf_counter() - _pre_t0
+            _pre_dispatch_s = _t_body - _pre_t0
+            # Broken out per sub-stage. Moving InsightFace to CUDA barely
+            # moved the aggregate (24.6s -> 23.0s), which proves detection was
+            # never the cost -- so an aggregate number is not actionable. Each
+            # sub-stage is timed separately rather than guessed at again.
+            _pre_parts = {
+                "magic_hour": _t_mh - _pre_t0,
+                "lighting_route(insightface)": _t_light - _t_mh,
+                "body_route(insightface+rembg)": _t_body - _t_light,
+            }
             print(
-                f"[krea2 pre_dispatch] {_pre_dispatch_s:.1f}s of CPU-side "
-                "detection/segmentation before any GPU work "
-                "(insightface + rembg; steps/cfg cannot reduce this)",
+                f"[krea2 pre_dispatch] {_pre_dispatch_s:.1f}s total before any "
+                "GPU work:",
                 flush=True,
             )
+            for _pk, _pv in sorted(_pre_parts.items(), key=lambda kv: -kv[1]):
+                print(f"    {_pv:6.1f}s  {_pk}", flush=True)
 
             if body_route_meta.get("route") == "simple_full_body":
                 result = self.run_simple_full_body(body, face, out_dir)
                 result.meta["pre_dispatch_s"] = round(_pre_dispatch_s, 3)
+                result.meta["pre_dispatch_parts_s"] = {
+                    k: round(v, 3) for k, v in _pre_parts.items()
+                }
                 result.meta["onnx_providers"] = _onnx_providers()
                 result.meta["body_route"] = body_route_meta
                 result.meta["lighting_route"] = lighting_route_meta
