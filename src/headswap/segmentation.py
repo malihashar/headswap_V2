@@ -98,7 +98,7 @@ def _try_birefnet_mask(
         return None, "birefnet_transformers_not_auto_loaded"
 
     try:
-        rgba = rembg_remove(body_pil.convert("RGB"))
+        rgba = _rembg_remove_cached(body_pil.convert("RGB"))
         if not isinstance(rgba, Image.Image):
             rgba = Image.fromarray(np.asarray(rgba))
         alpha = np.asarray(rgba.convert("RGBA"))[:, :, 3]
@@ -145,6 +145,58 @@ def matte_backend_available() -> bool:
     return _MATTE_AVAILABLE
 
 
+
+_REMBG_SESSION = None
+_REMBG_SESSION_TRIED = False
+
+
+def _rembg_session():
+    """Cached rembg session, built once with the best ONNX providers.
+
+    rembg's remove() builds a NEW session when none is passed, which reloads
+    its ~1GB ONNX weights on every call and ignores our provider preference.
+    That is not a micro-optimisation: _resolve_body_route measured 23.6s of a
+    23.8s pre-dispatch stage, while lighting_route -- which runs InsightFace
+    on the same image -- took 0.3s. The matte is also computed more than once
+    per swap, so the reload is paid repeatedly.
+
+    Returns None when a session cannot be built, in which case callers fall
+    back to plain remove(). rembg being absent or unhappy must never fail a
+    swap (see tests/test_head_matte_mask.py).
+    """
+    global _REMBG_SESSION, _REMBG_SESSION_TRIED
+    if _REMBG_SESSION is not None or _REMBG_SESSION_TRIED:
+        return _REMBG_SESSION
+    _REMBG_SESSION_TRIED = True
+    try:
+        from rembg import new_session  # type: ignore
+
+        from headswap.preprocess import preferred_onnx_providers
+
+        providers = preferred_onnx_providers()
+        try:
+            _REMBG_SESSION = new_session(providers=providers)
+        except TypeError:
+            # Older rembg builds the session without a providers kwarg.
+            _REMBG_SESSION = new_session()
+        print(f"[rembg] session cached providers={providers}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rembg] session cache unavailable ({exc}); using remove() "
+              "per call", flush=True)
+        _REMBG_SESSION = None
+    return _REMBG_SESSION
+
+
+def _rembg_remove_cached(img):
+    """remove() through the cached session when one is available."""
+    from rembg import remove as rembg_remove  # type: ignore
+
+    sess = _rembg_session()
+    if sess is not None:
+        return rembg_remove(img, session=sess)
+    return rembg_remove(img)
+
+
 def _person_matte(body_pil: Image.Image) -> tuple[np.ndarray | None, str | None]:
     """Raw, UNGATED foreground/person alpha matte (rembg / BiRefNet)."""
     try:
@@ -152,7 +204,7 @@ def _person_matte(body_pil: Image.Image) -> tuple[np.ndarray | None, str | None]
     except Exception as exc:
         return None, f"rembg_missing:{exc}"
     try:
-        rgba = rembg_remove(body_pil.convert("RGB"))
+        rgba = _rembg_remove_cached(body_pil.convert("RGB"))
         if not isinstance(rgba, Image.Image):
             rgba = Image.fromarray(np.asarray(rgba))
         return np.asarray(rgba.convert("RGBA"))[:, :, 3], None
