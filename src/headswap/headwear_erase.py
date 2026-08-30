@@ -72,7 +72,8 @@ def headwear_mask(
 
 
 def erase_headwear(
-    body: Image.Image, mask: np.ndarray, *, feather_px: int = 3
+    body: Image.Image, mask: np.ndarray, *, feather_px: int = 3,
+    fallback: str = "none",
 ) -> tuple[Image.Image, dict[str, Any]]:
     """Inpaint ``mask`` out of ``body``. Returns ``(plate, info)``.
 
@@ -93,15 +94,36 @@ def erase_headwear(
     if info["mask_px"] < 16:
         info["reason"] = "empty_headwear_mask"
         return body, info
+    plate = None
     try:
         from simple_lama_inpainting import SimpleLama  # type: ignore
-    except Exception as exc:
-        info["reason"] = f"simple_lama_missing:{exc}"
-        return body, info
-    try:
+
         plate = SimpleLama()(body.convert("RGB"), Image.fromarray(mask))
+        info["backend"] = "lama"
     except Exception as exc:
-        info["reason"] = f"lama_failed:{exc}"
+        info["reason"] = f"simple_lama_missing_or_failed:{exc}"
+
+    if plate is None and fallback == "telea":
+        # OpenCV Telea, opt-in. Far cruder than LaMa on a region this size
+        # and it will smear rather than reconstruct -- but for THIS use the
+        # plate is not the product. It is an INPUT to the swap, and its only
+        # job is to stop a large high-contrast hat dominating the img2img
+        # source latent; the head is regenerated from the donor afterwards.
+        #
+        # Opt-in rather than default so the existing "degrade to the
+        # untouched image" contract, and the test asserting it, are unchanged
+        # for callers that did not ask for this.
+        try:
+            _bgr = cv2.cvtColor(np.asarray(body.convert("RGB")), cv2.COLOR_RGB2BGR)
+            _filled = cv2.inpaint(_bgr, (mask > 0).astype(np.uint8), 7,
+                                  cv2.INPAINT_TELEA)
+            plate = Image.fromarray(cv2.cvtColor(_filled, cv2.COLOR_BGR2RGB))
+            info["backend"] = "cv2_telea"
+            info.pop("reason", None)
+        except Exception as exc:  # noqa: BLE001
+            info["reason"] = f"{info.get('reason', '')}|telea_failed:{exc}"
+
+    if plate is None:
         return body, info
     if plate.size != body.size:
         plate = plate.resize(body.size, Image.Resampling.LANCZOS)

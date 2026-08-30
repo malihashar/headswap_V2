@@ -43,4 +43,25 @@ def test_pin_repair_accompanies_the_install():
 
 
 def test_failure_is_reported_not_silent():
-    assert "headwear erase will skip and the hat will remain" in SRC
+    """A missing backend must announce itself and say what happens next.
+
+    Asserts the behaviour, not one sentence: pinning the exact wording made
+    this test fail the moment the consequence changed from "skip" to "fall
+    back to Telea", which is a rewording rather than a regression.
+    """
+    assert "WARN: simple-lama still unavailable" in SRC
+
+
+def test_pip_failure_output_is_surfaced():
+    """Installing with -q and check=False hid the real cause twice: the
+    install "ran" and the import still failed, indistinguishable from the
+    package being absent for no reason."""
+    assert "pip install simple-lama-inpainting FAILED" in SRC
+    assert "capture_output=True" in SRC
+
+
+def test_a_fallback_exists_so_one_package_cannot_block_this():
+    """simple-lama may have no compatible build on this Python. The erase is
+    an INPUT to the swap, not the product, so a cruder fill still removes the
+    hat from the source latent."""
+    assert 'fallback="telea"' in SRC

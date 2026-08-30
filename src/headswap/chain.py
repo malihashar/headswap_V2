@@ -126,7 +126,18 @@ def ensure_simple_lama() -> dict[str, Any]:
     print("[chain] simple-lama missing -- installing it (+ pin repair) so "
           "headwear erase can run ...", flush=True)
     pip = [sys.executable, "-m", "pip", "install", "-q"]
-    subprocess.run([*pip, "simple-lama-inpainting"], check=False)
+    # Capture this one. Installing with -q and check=False hid the real
+    # reason twice: the install "ran" and the import still failed, which
+    # looked identical to the package being absent for no reason. On Python
+    # 3.13 there may simply be no compatible build, and that is worth seeing
+    # rather than inferring.
+    _r = subprocess.run([sys.executable, "-m", "pip", "install",
+                         "simple-lama-inpainting"],
+                        check=False, capture_output=True, text=True)
+    if _r.returncode != 0:
+        print("[chain] pip install simple-lama-inpainting FAILED:", flush=True)
+        print((_r.stdout or "")[-800:], flush=True)
+        print((_r.stderr or "")[-1500:], flush=True)
     subprocess.run([*pip, "--force-reinstall", "--no-deps", "pillow==11.3.0"],
                    check=False)
     subprocess.run([*pip, "--no-cache-dir", "--force-reinstall", "--no-deps",
@@ -138,7 +149,8 @@ def ensure_simple_lama() -> dict[str, Any]:
         return {"available": True, "installed_now": True}
     except ImportError as exc:
         print(f"[chain] WARN: simple-lama still unavailable ({exc}); "
-              "headwear erase will skip and the hat will remain", flush=True)
+              "falling back to OpenCV Telea inpainting for headwear erase",
+              flush=True)
         return {"available": False, "error": str(exc)}
 
 
@@ -249,7 +261,7 @@ def run_chain(
                     erase_info.update(reason="no headwear detected",
                                       coverage=round(_cov, 5))
                 else:
-                    _plate, _einfo = _erase(body_im, _mask)
+                    _plate, _einfo = _erase(body_im, _mask, fallback="telea")
                     _einfo = _einfo or {}
                     # Trust the callee's own verdict. erase_headwear falls
                     # back and returns the image UNCHANGED when its backend
