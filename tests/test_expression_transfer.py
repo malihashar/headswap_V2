@@ -108,7 +108,13 @@ def test_output_detection_uses_mtime_not_a_set_difference():
     src = (ROOT / "src" / "headswap" / "expression_transfer.py").read_text()
     assert "_t_start" in src
     assert "st_mtime >= _t_start" in src
-    assert "after - before" not in src, (
+    # Match the CODE, not prose: "after - before" also appears in the
+    # comment explaining why it was removed, which is exactly the kind of
+    # false positive that made an earlier gate-counting test report three
+    # gates for two call sites.
+    import re
+    assert not re.search(r"^\s*produced\s*=\s*sorted\(after\s*-\s*before",
+                         src, re.M), (
         "set-difference detection cannot see overwritten files"
     )
 
