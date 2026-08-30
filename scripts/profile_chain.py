@@ -171,40 +171,53 @@ def main() -> int:
         rows.append(row)
         res.image.save(out / f"final_{label.lower()}.png")
 
-    print("\n" + "=" * 78)
-    print(f"{'':8}{'LP load':>9}{'LP exec':>9}{'LP tot':>9}"
-          f"{'T4 pre':>9}{'T4 KSamp':>10}{'T4 tot':>9}{'CHAIN':>9}")
-    print("-" * 78)
+    # Buffer the summary AND write it to a file. The run emits thousands of
+    # ComfyUI/path_proof lines, so the table at the end is unreachable by
+    # scrolling in a Colab cell -- three attempts to read these numbers came
+    # back truncated to the first 20 lines.
+    out_lines: list[str] = []
+
+    def emit(line: str = "") -> None:
+        out_lines.append(line)
+        print(line, flush=True)
+
+    emit("\n" + "=" * 78)
+    emit(f"{'':8}{'LP load':>9}{'LP exec':>9}{'LP tot':>9}"
+         f"{'T4 pre':>9}{'T4 KSamp':>10}{'T4 tot':>9}{'CHAIN':>9}")
+    emit("-" * 78)
     for r in rows:
-        print(f"{r['label']:8}{r['lp_load']:>8.1f}s{r['lp_exec']:>8.1f}s"
-              f"{r['lp_total']:>8.1f}s{r['t4_pre']:>8.1f}s{r['t4_ks']:>9.1f}s"
-              f"{r['t4_total']:>8.1f}s{r['chain']:>8.1f}s")
-    print("=" * 78)
+        emit(f"{r['label']:8}{r['lp_load']:>8.1f}s{r['lp_exec']:>8.1f}s"
+             f"{r['lp_total']:>8.1f}s{r['t4_pre']:>8.1f}s{r['t4_ks']:>9.1f}s"
+             f"{r['t4_total']:>8.1f}s{r['chain']:>8.1f}s")
+    emit("=" * 78)
 
     warm = [r for r in rows if r["label"] != "COLD"]
     if warm:
         best = min(r["chain"] for r in warm)
-        print(f"\nWARM CHAIN: {best:.1f}s   (target 30s)")
+        emit(f"\nWARM CHAIN: {best:.1f}s   (target 30s)")
         w = min(warm, key=lambda r: r["chain"])
-        print(f"  LivePortrait  {w['lp_total']:6.1f}s"
-              f"   (exec {w['lp_exec']:.1f}s, load {w['lp_load']:.1f}s)")
-        print(f"  T4 swap       {w['t4_total']:6.1f}s"
-              f"   (pre {w['t4_pre']:.1f}s, KSampler {w['t4_ks']:.1f}s, "
-              f"face_refine {w.get('t4_refine', 0.0):.1f}s "
-              f"applied={w.get('refine_applied')})")
+        emit(f"  LivePortrait  {w['lp_total']:6.1f}s"
+             f"   (exec {w['lp_exec']:.1f}s, load {w['lp_load']:.1f}s)")
+        emit(f"  T4 swap       {w['t4_total']:6.1f}s"
+             f"   (pre {w['t4_pre']:.1f}s, KSampler {w['t4_ks']:.1f}s, "
+             f"face_refine {w.get('t4_refine', 0.0):.1f}s "
+             f"applied={w.get('refine_applied')})")
         if w.get("lp_placement"):
-            print(f"  LP placement  {w['lp_placement']}")
+            emit(f"  LP placement  {w['lp_placement']}")
         gap = best - 30.0
         if gap > 0:
-            print(f"\n  {gap:.1f}s over. face_refine is ~half of T4's KSampler")
-            print("  time and is the only remaining lever that does not touch")
-            print("  steps/cfg/denoise/ref_boost/resolution.")
+            emit(f"\n  {gap:.1f}s over target.")
         else:
-            print("\n  UNDER TARGET.")
+            emit("\n  UNDER TARGET.")
     if rows:
         c = rows[0]
-        print(f"\nCOLD start cost: {c['chain'] - (warm[0]['chain'] if warm else 0):.1f}s "
-              "extra on the first request (weights, CUDA context, warmups).")
+        emit(f"\nCOLD start cost: "
+             f"{c['chain'] - (warm[0]['chain'] if warm else 0):.1f}s extra on "
+             "the first request (weights, CUDA context, warmups).")
+    summary_path = out / "SUMMARY.txt"
+    summary_path.write_text("\n".join(out_lines) + "\n")
+    print(f"\n>>> SUMMARY WRITTEN: {summary_path}")
+    print(f">>> Read it with:  !cat {summary_path}")
     return 0
 
 
