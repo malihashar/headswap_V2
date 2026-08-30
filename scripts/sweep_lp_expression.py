@@ -53,6 +53,16 @@ def main() -> int:
     ap.add_argument("--lp-dir", default="/content/LivePortrait")
     ap.add_argument("--animation-region", default="lip")
     ap.add_argument("--seed", type=int, default=46)
+    ap.add_argument(
+        "--mults", default=None,
+        help="comma-separated driving_multiplier values, e.g. 0.5,0.4,0.3. "
+             "The mouth interior is SYNTHESISED, so how far the mouth opens "
+             "is the only real control over how much gets invented.")
+    ap.add_argument(
+        "--regions", default=None,
+        help="comma-separated animation_region values, e.g. lip,exp")
+    ap.add_argument("--normalize-lip", action="store_true")
+    ap.add_argument("--lip-retargeting", action="store_true")
     args = ap.parse_args()
 
     import importlib.util
@@ -105,16 +115,30 @@ def main() -> int:
         res.image.save(swap_png)
         print(f"swap done in {time.perf_counter() - t0:.1f}s -> {swap_png}", flush=True)
 
+    arms = DEFAULT_ARMS
+    if args.mults or args.regions:
+        mults = [float(x) for x in (args.mults or "1.0").split(",") if x.strip()]
+        regions = [r.strip() for r in (args.regions or args.animation_region).split(",") if r.strip()]
+        arms = [
+            (f"{r}/m{mu}", mu, bool(args.normalize_lip), bool(args.lip_retargeting), r)
+            for r in regions for mu in mults
+        ]
+
     tiles = [("T4 only (no LP)", Image.open(swap_png).convert("RGB"))]
     print("\n=== LivePortrait arms ===", flush=True)
-    for label, mult, norm, retarg in DEFAULT_ARMS:
+    for arm in arms:
+        if len(arm) == 5:
+            label, mult, norm, retarg, region = arm
+        else:
+            label, mult, norm, retarg = arm
+            region = args.animation_region
         t0 = time.perf_counter()
         try:
             lp = run_expression_transfer(
                 source_path=swap_png,
                 driving_path=body_p,
                 out_dir=out / f"arm_{label}",
-                animation_region=args.animation_region,
+                animation_region=region,
                 driving_multiplier=mult,
                 normalize_lip=norm,
                 lip_retargeting=retarg,
