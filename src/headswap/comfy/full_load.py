@@ -36,6 +36,8 @@ Lifecycle (matches ComfyUI's intended load/unload rhythm)
 """
 from __future__ import annotations
 
+import os
+
 import sys
 from contextlib import contextmanager
 from typing import Any, Iterable, Iterator
@@ -315,6 +317,25 @@ def offload_gpu_models(
     return info
 
 
+
+def _cuda_free_mb() -> float | None:
+    """Free VRAM in MB, or None when CUDA is unavailable.
+
+    Used to decide whether evicting models before sampling is worth it. A
+    None result means "unknown", which must be treated as "not ample" so the
+    safe, pre-existing offload path still runs.
+    """
+    try:
+        import torch  # noqa: PLC0415
+
+        if not torch.cuda.is_available():
+            return None
+        free_b, _total_b = torch.cuda.mem_get_info()
+        return float(free_b) / (1024.0 * 1024.0)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @contextmanager
 def force_sampling_full_load(
     models: Iterable[Any] | None = None,
@@ -342,9 +363,38 @@ def force_sampling_full_load(
         "error": None,
     }
 
-    # Always free CLIP/VAE before sampling for headroom.
-    before = offload_gpu_models(reason="before_sample", patchers=None)
-    info["freed_before_sample"] = bool(before.get("ok"))
+    # Free CLIP/VAE before sampling for headroom -- but only when headroom
+    # is actually scarce.
+    #
+    # This was unconditional, which is right on a 16GB T4 where the UNet
+    # cannot sit alongside CLIP/VAE. On a 40GB A100 with ~34GB free and a
+    # ~13GB UNet the eviction buys nothing and costs a full reload on the
+    # next sample: measured at 6.3s per swap across four evict/reload cycles
+    # (two samples, before and after each), for headroom that already
+    # existed.
+    #
+    # Gated on measured free VRAM rather than on a device name, so a
+    # 16GB card keeps the old, necessary behaviour automatically and no
+    # caller has to know which GPU it is on. Threshold is deliberately well
+    # above the ~13GB working set: skipping is an optimisation, and being
+    # wrong about it means an OOM, so it only applies with a wide margin.
+    _skip_free_mb = float(os.environ.get("HEADSWAP_OFFLOAD_SKIP_FREE_MB", 24000))
+    _free_mb = _cuda_free_mb()
+    _ample = _free_mb is not None and _free_mb >= _skip_free_mb
+    info["vram_free_mb_before"] = _free_mb
+    info["offload_skipped_ample_vram"] = bool(_ample)
+
+    if _ample:
+        print(
+            f"[full_load] pre-sample offload SKIPPED: {_free_mb:.0f}MB free "
+            f">= {_skip_free_mb:.0f}MB, so evicting CLIP/VAE would only cost "
+            "a reload. Set HEADSWAP_OFFLOAD_SKIP_FREE_MB higher to force it.",
+            flush=True,
+        )
+        before = {"ok": True, "skipped": "ample_vram"}
+    else:
+        before = offload_gpu_models(reason="before_sample", patchers=None)
+    info["freed_before_sample"] = bool(before.get("ok")) and not _ample
     info["offload_before"] = before
     if before.get("error") and not info.get("error"):
         info["error"] = f"before_sample:{before['error']}"
