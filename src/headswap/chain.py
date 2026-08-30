@@ -31,6 +31,7 @@ DEFAULTS = {
     "animation_region": "lip",
     "skip_refine": True,
     "remove_headwear": True,
+    "erase_headwear": True,
     "seed": 46,
 }
 
@@ -137,6 +138,7 @@ def run_chain(
     driving_multiplier: float | None = None,
     animation_region: str | None = None,
     use_liveportrait: bool = True,
+    erase_headwear_first: bool | None = None,
     **_ignored: Any,
 ) -> dict[str, Any]:
     """One request: T4 swap, then LivePortrait on its output.
@@ -147,13 +149,73 @@ def run_chain(
     from PIL import Image  # noqa: PLC0415
 
     pipe = load_models()
+    if erase_headwear_first is None:
+        erase_headwear_first = bool(DEFAULTS["erase_headwear"])
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     body_path, face_path = Path(body_path), Path(face_path)
 
+    body_im = Image.open(body_path).convert("RGB")
+
+    # ERASE the target's headwear BEFORE the swap, rather than asking the
+    # model to remove it.
+    #
+    # Three prompt variants failed on GPU: the base "anything worn on the
+    # head" wording, an explicit CRITICAL remove-and-replace clause
+    # (chars=943), and that clause with the contradicting "keep the clothing"
+    # sentence scoped below the neck (chars=958). A Nike cap and a durag both
+    # survived all three. At denoise=0.85 the sampler starts from a source
+    # latent that already contains a large, high-contrast object, and text
+    # does not outweigh it.
+    #
+    # So take it out of the latent instead. erase_headwear() is LaMa
+    # inpainting and already exists here for exactly this. Failures are
+    # non-fatal: the swap still runs on the original body, because a missing
+    # inpainting backend must degrade rather than break the request.
+    erase_info: dict[str, Any] = {"applied": False}
+    if erase_headwear_first:
+        try:
+            import numpy as _np  # noqa: PLC0415
+
+            from headswap.headwear_erase import (  # noqa: PLC0415
+                erase_headwear as _erase,
+                headwear_mask as _hw_mask,
+            )
+            from headswap.preprocess import (  # noqa: PLC0415
+                detect_best_face, pil_to_rgb_np,
+            )
+            from headswap.segmentation import _person_matte  # noqa: PLC0415
+
+            _rgb = pil_to_rgb_np(body_im)
+            _fb = detect_best_face(_rgb, _repo() / ".cache" / "headswap_v2")
+            _matte, _mreason = _person_matte(body_im)
+            if _fb is None:
+                erase_info["reason"] = "no_face_detected"
+            elif _matte is None:
+                erase_info["reason"] = f"no_person_matte: {_mreason}"
+            else:
+                _mask = _hw_mask(body_im, _fb, _matte)
+                _cov = float((_np.asarray(_mask) > 127).mean())
+                if _cov <= 0.0005:
+                    erase_info.update(reason="no headwear detected",
+                                      coverage=round(_cov, 5))
+                else:
+                    body_im, _einfo = _erase(body_im, _mask)
+                    erase_info = {"applied": True, "coverage": round(_cov, 5),
+                                  **(_einfo or {})}
+                    body_im.save(out / "body_headwear_erased.png")
+                    print(f"[chain] headwear erased from the target "
+                          f"(coverage={_cov:.3%}) -> body_headwear_erased.png",
+                          flush=True)
+        except Exception as exc:  # noqa: BLE001
+            erase_info = {"applied": False,
+                          "reason": f"{type(exc).__name__}: {exc}"}
+        if not erase_info.get("applied"):
+            print(f"[chain] headwear erase NOT applied: "
+                  f"{erase_info.get('reason')}", flush=True)
+
     t_swap0 = time.perf_counter()
-    res = pipe.run(Image.open(body_path).convert("RGB"),
-                   Image.open(face_path).convert("RGB"), out_dir=out)
+    res = pipe.run(body_im, Image.open(face_path).convert("RGB"), out_dir=out)
     swap_s = time.perf_counter() - t_swap0
     swap_png = out / "swap_only.png"
     res.image.save(swap_png)
@@ -195,5 +257,6 @@ def run_chain(
         "final": final_png, "swap_only": swap_png,
         "swap_s": round(swap_s, 2), "lp_s": round(lp_s, 2),
         "total_s": round(total, 2), "lp_applied": lp_used,
+        "headwear_erased": erase_info,
         "was_warm": bool(_STATE["warm"]),
     }
