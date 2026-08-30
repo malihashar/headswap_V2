@@ -149,6 +149,9 @@ def run_expression_transfer(
     driving_multiplier: float = 1.0,
     stitching: bool = True,
     relative_motion: bool | None = None,
+    normalize_lip: bool = False,
+    lip_retargeting: bool = False,
+    eye_retargeting: bool = False,
     live_portrait_dir: str | Path = "/content/LivePortrait",
 ) -> dict[str, Any]:
     """Run one LivePortrait transfer. Returns paths + the effective config.
@@ -218,6 +221,22 @@ def run_expression_transfer(
             flag_stitching=bool(stitching),
             flag_pasteback=True,
             driving_multiplier=float(driving_multiplier),
+            # Mouth-interior controls. Opening a closed mouth forces the
+            # spade_generator to INVENT teeth and cavity, which is where the
+            # implausible bottom-teeth artifact comes from -- it is
+            # synthesis, not warping, so it does not improve with resolution.
+            #
+            # flag_normalize_lip normalises the source lip toward a
+            # canonical state before applying the driving delta, so the
+            # transfer starts from a consistent mouth rather than from
+            # whatever the donor happened to be doing.
+            #
+            # flag_lip_retargeting routes lip motion through the dedicated
+            # stitching_retargeting_module rather than the raw keypoint
+            # delta, which is the mechanism built for exactly this control.
+            flag_normalize_lip=bool(normalize_lip),
+            flag_lip_retargeting=bool(lip_retargeting),
+            flag_eye_retargeting=bool(eye_retargeting),
         )
 
         def _partial(cls):
@@ -225,7 +244,8 @@ def run_expression_transfer(
 
         cache_key = (
             str(lp_dir), str(animation_region), bool(rel), bool(stitching),
-            float(driving_multiplier),
+            float(driving_multiplier), bool(normalize_lip),
+            bool(lip_retargeting), bool(eye_retargeting),
         )
         load_s = 0.0
         if _LP_PIPELINE["key"] == cache_key and _LP_PIPELINE["pipeline"] is not None:
@@ -281,4 +301,7 @@ def run_expression_transfer(
         "relative_motion_reason": rel_reason,
         "driving_multiplier": driving_multiplier,
         "stitching": stitching,
+        "normalize_lip": normalize_lip,
+        "lip_retargeting": lip_retargeting,
+        "eye_retargeting": eye_retargeting,
     }
