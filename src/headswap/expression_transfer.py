@@ -83,6 +83,63 @@ def resolve_relative_motion(
     return bool(requested), f"{'on' if requested else 'off'}: caller-specified"
 
 
+
+def _describe_lp_placement(pipeline: Any) -> dict[str, Any]:
+    """Report which device LivePortrait's torch nets and ONNX sessions use.
+
+    Purely diagnostic and defensive: LivePortrait's internal attribute names
+    are not a stable API, so every lookup is best-effort and a failure here
+    must never break a render. Returns whatever it could determine.
+    """
+    out: dict[str, Any] = {}
+    try:
+        wrapper = getattr(pipeline, "live_portrait_wrapper", None)
+        for name in (
+            "appearance_feature_extractor",
+            "motion_extractor",
+            "warping_module",
+            "spade_generator",
+        ):
+            mod = getattr(wrapper, name, None)
+            if mod is None:
+                continue
+            try:
+                out[name] = str(next(mod.parameters()).device)
+            except Exception:  # noqa: BLE001
+                pass
+        cfg = getattr(wrapper, "inference_cfg", None)
+        if cfg is not None:
+            out["force_cpu"] = getattr(cfg, "flag_force_cpu", None)
+            out["half_precision"] = getattr(cfg, "flag_use_half_precision", None)
+            out["device_id"] = getattr(cfg, "device_id", None)
+    except Exception:  # noqa: BLE001
+        out["torch_probe"] = "failed"
+
+    # ONNX side: the cropper's face analysis and landmark runner.
+    try:
+        cropper = getattr(pipeline, "cropper", None)
+        for attr in ("face_analysis_wrapper", "landmark_runner"):
+            obj = getattr(cropper, attr, None)
+            if obj is None:
+                continue
+            sess = getattr(obj, "session", None) or getattr(
+                obj, "inner_session", None
+            )
+            if sess is not None and hasattr(sess, "get_providers"):
+                out[attr] = list(sess.get_providers())
+            elif hasattr(obj, "models"):
+                provs = set()
+                for m in getattr(obj, "models", {}).values():
+                    s2 = getattr(m, "session", None)
+                    if s2 is not None and hasattr(s2, "get_providers"):
+                        provs.update(s2.get_providers())
+                if provs:
+                    out[attr] = sorted(provs)
+    except Exception:  # noqa: BLE001
+        out["onnx_probe"] = "failed"
+    return out
+
+
 def run_expression_transfer(
     source_path: str | Path,
     driving_path: str | Path,
@@ -187,6 +244,19 @@ def run_expression_transfer(
             print(f"[liveportrait] pipeline built + cached in {load_s}s",
                   flush=True)
 
+        # Where is LivePortrait actually running?
+        #
+        # The measured 22s "Animating" for a SINGLE frame is not plausible
+        # for a model this small on an A100, and the same silent-CPU trap
+        # has now bitten this repo twice: onnxruntime advertises
+        # CUDAExecutionProvider and then falls back at session creation, and
+        # rembg's matte cost 16s that way. LivePortrait has BOTH a torch side
+        # (the warping/generator nets) and an onnxruntime side
+        # (FaceAnalysisDIY, LandmarkRunner), so either can be the culprit.
+        # Report both rather than infer from wall time.
+        diag = _describe_lp_placement(pipeline)
+        print(f"[liveportrait] placement: {diag}", flush=True)
+
         t0 = time.perf_counter()
         pipeline.execute(args)
         latency_s = round(time.perf_counter() - t0, 2)
@@ -205,6 +275,7 @@ def run_expression_transfer(
         "primary": str(primary[-1]) if primary else None,
         "latency_s": latency_s,
         "model_load_s": load_s,
+        "placement": diag,
         "animation_region": animation_region,
         "relative_motion": rel,
         "relative_motion_reason": rel_reason,

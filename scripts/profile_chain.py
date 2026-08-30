@@ -55,6 +55,11 @@ def main() -> int:
     ap.add_argument("--no-liveportrait", action="store_true")
     ap.add_argument("--lp-dir", default="/content/LivePortrait")
     ap.add_argument("--animation-region", default="lip")
+    ap.add_argument(
+        "--skip-refine", action="store_true",
+        help="skip face_refine on bust shots (the ~20s second sampling pass). "
+             "Uses the EXISTING simple_full_body_refine_max_face_frac gate, "
+             "so full-body frames still refine.")
     args = ap.parse_args()
 
     _bootstrap()
@@ -110,6 +115,17 @@ def main() -> int:
     cfg = load_config(REPO / "configs" / "krea2_identity_edit.yaml")
     cfg.update({"seed": int(args.seed), "verbose": False,
                 "pre_edit_donor_expression": False})
+    if args.skip_refine:
+        # 0.25 matches simple_full_body_restore_max_face_frac, which already
+        # encodes "is this a bust shot?". The default is 1.01 (unreachable),
+        # so refine always runs; CHECKPOINT-12 measured it at 76s vs 53s and
+        # "visually indistinguishable" on a 42% bust shot, then rejected the
+        # skip at full size when speed was not a requirement. It is now.
+        cfg["simple_full_body_refine_max_face_frac"] = 0.25
+        print("NOTE: face_refine will SKIP on bust shots "
+              "(simple_full_body_refine_max_face_frac=0.25). Compare the "
+              "output against a run without --skip-refine before adopting.",
+              flush=True)
     pipe = create_pipeline(cfg, runtime=get_shared_krea2_runtime(init_custom_nodes=True))
 
     rows = []
@@ -133,6 +149,7 @@ def main() -> int:
             row["lp_total"] = time.perf_counter() - t0
             row["lp_load"] = float(lp.get("model_load_s") or 0.0)
             row["lp_exec"] = float(lp.get("latency_s") or 0.0)
+            row["lp_placement"] = lp.get("placement")
             if lp.get("primary"):
                 p = Path(lp["primary"])
                 if p.suffix.lower() != ".mp4":
@@ -148,6 +165,8 @@ def main() -> int:
         row["t4_pre"] = float(meta.get("pre_dispatch_s") or 0.0)
         tim = meta.get("timing_s") or {}
         row["t4_ks"] = float(tim.get("ksampler_only") or 0.0)
+        row["t4_refine"] = float(tim.get("face_refine_sampling") or 0.0)
+        row["refine_applied"] = bool((meta.get("face_refine") or {}).get("applied"))
         row["chain"] = row["lp_total"] + row["t4_total"]
         rows.append(row)
         res.image.save(out / f"final_{label.lower()}.png")
@@ -170,7 +189,11 @@ def main() -> int:
         print(f"  LivePortrait  {w['lp_total']:6.1f}s"
               f"   (exec {w['lp_exec']:.1f}s, load {w['lp_load']:.1f}s)")
         print(f"  T4 swap       {w['t4_total']:6.1f}s"
-              f"   (pre {w['t4_pre']:.1f}s, KSampler {w['t4_ks']:.1f}s)")
+              f"   (pre {w['t4_pre']:.1f}s, KSampler {w['t4_ks']:.1f}s, "
+              f"face_refine {w.get('t4_refine', 0.0):.1f}s "
+              f"applied={w.get('refine_applied')})")
+        if w.get("lp_placement"):
+            print(f"  LP placement  {w['lp_placement']}")
         gap = best - 30.0
         if gap > 0:
             print(f"\n  {gap:.1f}s over. face_refine is ~half of T4's KSampler")
