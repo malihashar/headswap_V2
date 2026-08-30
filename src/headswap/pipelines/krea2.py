@@ -3958,7 +3958,44 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "full_body_detected": bool(heuristic_full_body),
         }
 
-        if bool(self.cfg.get("body_route_use_segmentation", True)):
+        # SHORT-CIRCUIT: the matte cannot change the answer when the face is
+        # already too big.
+        #
+        # The segmentation branch below computes
+        #     full_body_detected = person_h_frac >= min AND face_h_frac <= max
+        # so once face_h_frac > face_h_frac_max the result is False no matter
+        # what the matte says -- and the non-segmentation default is
+        # bool(heuristic_full_body), which carries the same face_h_frac
+        # condition, so it is False too. Identical outcome, either path.
+        #
+        # That term cost 16.7s of a 16.9s pre-dispatch stage: the ~1GB rembg
+        # model, on CPU (onnxruntime advertises CUDAExecutionProvider then
+        # silently falls back). On the athlete bust shot face_h_frac=0.3958
+        # against a max of ~0.12, so the whole stage was computing a value
+        # that had already been overruled.
+        #
+        # This is a short-circuit, NOT the body_route_use_segmentation=false
+        # flag. Turning segmentation off wholesale would change real
+        # decisions: for multi-person photos full_body_detected gates the
+        # full_frame route and its LoRA/ref_boost overrides. Here the matte
+        # only runs when it can still matter.
+        _seg_can_matter = face_h_frac <= face_h_frac_max
+        if not _seg_can_matter:
+            result["segmentation_skip_reason"] = (
+                f"short_circuit:face_h_frac={face_h_frac:.4f}>"
+                f"{face_h_frac_max} (matte cannot change full_body_detected)"
+            )
+            print(
+                f"[krea2 body_route] matte SKIPPED - face is "
+                f"{face_h_frac:.1%} of frame (> {face_h_frac_max:.0%} max), "
+                "so full_body_detected is already False; segmenting would "
+                "not change the route",
+                flush=True,
+            )
+
+        if _seg_can_matter and bool(
+            self.cfg.get("body_route_use_segmentation", True)
+        ):
             try:
                 from headswap.segmentation import _try_birefnet_mask
 
