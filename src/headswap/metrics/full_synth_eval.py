@@ -136,7 +136,15 @@ def _arcface_emb(im: Image.Image, box: FaceBox | None = None):
         return None
     if not hasattr(_arcface_emb, "_app"):
         try:
-            app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+            from headswap.preprocess import (  # noqa: PLC0415
+                preferred_onnx_providers,
+            )
+
+            # Was hardcoded to CPU, which would have stayed on CPU even
+            # after installing onnxruntime-gpu.
+            app = FaceAnalysis(
+                name="buffalo_l", providers=preferred_onnx_providers()
+            )
             app.prepare(ctx_id=-1, det_size=(640, 640))
             _arcface_emb._app = app  # type: ignore[attr-defined]
         except Exception:

@@ -832,6 +832,34 @@ _INSIGHTFACE_APP = None
 _INSIGHTFACE_INIT_ERROR: str | None = None
 
 
+
+def preferred_onnx_providers() -> list[str]:
+    """Best-available onnxruntime providers, CUDA first when present.
+
+    InsightFace and rembg both run through onnxruntime, and they are a large
+    fixed cost per image: measured at ~25s of a ~76s swap, entirely on CPU,
+    because the installed onnxruntime had no CUDA provider. No sampling
+    parameter can reduce that, which is why it went unnoticed while steps and
+    cfg were being tuned.
+
+    Shared so call sites cannot silently diverge -- two of them previously
+    hardcoded ["CPUExecutionProvider"], which would have pinned them to CPU
+    even after onnxruntime-gpu was installed.
+    """
+    providers = ["CPUExecutionProvider"]
+    try:
+        import onnxruntime as ort  # type: ignore  # noqa: PLC0415
+
+        avail = set(ort.get_available_providers())
+        if "CUDAExecutionProvider" in avail:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        elif "CoreMLExecutionProvider" in avail:
+            providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    except Exception:  # noqa: BLE001
+        pass
+    return providers
+
+
 def ensure_insightface_app(cache_dir=None):
     """
     Lazily construct InsightFace FaceAnalysis (buffalo_l).
@@ -857,18 +885,8 @@ def ensure_insightface_app(cache_dir=None):
             root = Path(cache_dir) / "insightface"
             root.mkdir(parents=True, exist_ok=True)
             os.environ.setdefault("INSIGHTFACE_HOME", str(root))
-        # Prefer CUDA when available; otherwise CPU (avoid noisy provider warnings).
-        providers: list[str] = ["CPUExecutionProvider"]
-        try:
-            import onnxruntime as ort  # type: ignore
-
-            avail = set(ort.get_available_providers())
-            if "CUDAExecutionProvider" in avail:
-                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            elif "CoreMLExecutionProvider" in avail:
-                providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
-        except Exception:
-            pass
+        providers = preferred_onnx_providers()
+        print(f"[insightface] providers={providers}", flush=True)
         app = FaceAnalysis(name="buffalo_l", providers=providers)
         app.prepare(ctx_id=0, det_size=(640, 640))
         _INSIGHTFACE_APP = app
