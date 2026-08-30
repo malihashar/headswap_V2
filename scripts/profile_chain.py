@@ -82,7 +82,29 @@ def main() -> int:
 
     use_lp = not args.no_liveportrait
     if use_lp and not (Path(args.lp_dir) / "inference.py").exists():
-        print(f"NOTE: LivePortrait not at {args.lp_dir}; running T4 only.")
+        # Auto-install rather than silently degrading to T4-only. A recycled
+        # Colab runtime wipes /content, and the previous behaviour printed
+        # one NOTE and produced a table of zeros for the half of the budget
+        # we were trying to measure.
+        print(f"LivePortrait missing at {args.lp_dir} - installing ...",
+              flush=True)
+        import subprocess
+        subprocess.run(["git", "clone", "--depth", "1",
+                        "https://github.com/KwaiVGI/LivePortrait",
+                        str(args.lp_dir)], check=True)
+        subprocess.run(["pip", "install", "-q", "--no-cache-dir", "tyro",
+                        "imageio", "imageio-ffmpeg", "rich", "pykalman",
+                        "ffmpeg-python"], check=False)
+        w = Path(args.lp_dir) / "pretrained_weights"
+        if not (w / "liveportrait").exists():
+            os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+            from huggingface_hub import snapshot_download
+            snapshot_download(repo_id="KwaiVGI/LivePortrait",
+                              local_dir=str(w), ignore_patterns=["*animal*"])
+        print("LivePortrait installed.", flush=True)
+
+    if use_lp and not (Path(args.lp_dir) / "inference.py").exists():
+        print(f"NOTE: LivePortrait still missing; running T4 only.")
         use_lp = False
 
     cfg = load_config(REPO / "configs" / "krea2_identity_edit.yaml")

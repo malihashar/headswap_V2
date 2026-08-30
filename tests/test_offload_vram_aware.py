@@ -32,13 +32,29 @@ def test_unknown_vram_is_treated_as_not_ample():
     assert "_free_mb is not None and _free_mb >= _skip_free_mb" in SRC
 
 
-def test_threshold_is_well_above_the_working_set():
-    """~13GB UNet + ~4GB CLIP. The default must leave a wide margin, because
-    being wrong about skipping is an OOM rather than a slow render."""
+def test_threshold_leaves_headroom_but_is_not_self_limiting():
+    """The first version of this test asserted >= 20000 on the reasoning
+    that the ~17GB working set must fit in free VRAM. That comparison was
+    wrong, and the 24GB default it justified was self-limiting: sample 1
+    skipped its offload, its ~13GB UNet stayed resident, free VRAM fell to
+    ~20GB, and sample 2 (face_refine) dropped back below the bar -- the
+    optimisation switched itself off on the second pass.
+
+    Skipping is safe precisely BECAUSE the model is already resident: no new
+    allocation occurs, so the question is "is it already there", not "does
+    it fit". The bar therefore has to sit BELOW the post-first-sample free
+    figure (~20GB) while still leaving room over a ~13GB UNet on a small
+    card.
+    """
     import re
     m = re.search(r'HEADSWAP_OFFLOAD_SKIP_FREE_MB", (\d+)', SRC)
     assert m, "threshold must be env-overridable"
-    assert int(m.group(1)) >= 20000, "margin too tight over a ~17GB working set"
+    val = int(m.group(1))
+    assert val >= 15000, "too tight over a ~13GB UNet"
+    assert val < 20000, (
+        "at or above ~20GB the gate disables itself on the second sample, "
+        "which is the bug this value was lowered to fix"
+    )
 
 
 def test_cuda_free_mb_returns_none_without_cuda():

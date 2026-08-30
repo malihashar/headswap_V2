@@ -378,7 +378,18 @@ def force_sampling_full_load(
     # caller has to know which GPU it is on. Threshold is deliberately well
     # above the ~13GB working set: skipping is an optimisation, and being
     # wrong about it means an OOM, so it only applies with a wide margin.
-    _skip_free_mb = float(os.environ.get("HEADSWAP_OFFLOAD_SKIP_FREE_MB", 24000))
+    # 18GB, not 24GB. The 24GB bar was self-limiting: sample 1 skipped its
+    # offload, so its ~13GB UNet stayed resident, which dropped free VRAM to
+    # ~20GB and pushed sample 2 (face_refine) back BELOW the threshold --
+    # the optimisation switched itself off on the second pass and ~4.7s of
+    # churn survived. Measured directly in the run log: sample 1
+    # "SKIPPED: 34163MB free", sample 2 "offloaded ... cuda_free_mb 20183".
+    #
+    # Skipping is safe precisely BECAUSE the model is already resident: no
+    # new allocation happens, so the relevant comparison is not "does the
+    # working set fit in free VRAM" but "is it already there". 18GB still
+    # leaves ~5GB over a ~13GB UNet for the small card case.
+    _skip_free_mb = float(os.environ.get("HEADSWAP_OFFLOAD_SKIP_FREE_MB", 18000))
     _free_mb = _cuda_free_mb()
     _ample = _free_mb is not None and _free_mb >= _skip_free_mb
     info["vram_free_mb_before"] = _free_mb
