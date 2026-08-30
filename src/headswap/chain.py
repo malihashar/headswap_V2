@@ -95,6 +95,53 @@ def load_models(
     return _STATE["pipe"]
 
 
+
+def ensure_simple_lama() -> dict[str, Any]:
+    """Make sure the LaMa inpainting backend for headwear erase is importable.
+
+    Lives HERE, not in a notebook cell, and that is the whole point. Only
+    setup_colab.sh installs simple-lama, and Cell 1 skips that script
+    whenever ComfyUI is already present, so a reconnected runtime silently
+    lacks it and erase_headwear() falls back with the hat still on. Putting
+    the install in the notebook did not fix it either: Colab caches cell
+    source in the browser tab, so a stale tab kept running the old cell while
+    the repo code was current. Repo code is what `git pull` actually reaches.
+
+    Installed WITH the pin repair: simple-lama-inpainting drags in pillow 9.5
+    and numpy 1.26 as transitive deps, which break rembg and
+    restore_background with no error at all -- they just start silently
+    falling back. setup_colab.sh documents that trap; this repeats the repair
+    rather than inheriting the damage.
+    """
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    try:
+        import simple_lama_inpainting  # noqa: F401,PLC0415
+
+        return {"available": True, "installed_now": False}
+    except ImportError:
+        pass
+
+    print("[chain] simple-lama missing -- installing it (+ pin repair) so "
+          "headwear erase can run ...", flush=True)
+    pip = [sys.executable, "-m", "pip", "install", "-q"]
+    subprocess.run([*pip, "simple-lama-inpainting"], check=False)
+    subprocess.run([*pip, "--force-reinstall", "--no-deps", "pillow==11.3.0"],
+                   check=False)
+    subprocess.run([*pip, "--no-cache-dir", "--force-reinstall", "--no-deps",
+                    "numpy==2.4.6"], check=False)
+    try:
+        import simple_lama_inpainting  # noqa: F401,PLC0415
+
+        print("[chain] simple-lama OK", flush=True)
+        return {"available": True, "installed_now": True}
+    except ImportError as exc:
+        print(f"[chain] WARN: simple-lama still unavailable ({exc}); "
+              "headwear erase will skip and the hat will remain", flush=True)
+        return {"available": False, "error": str(exc)}
+
+
 def warmup(
     body_path: str | Path,
     face_path: str | Path,
@@ -113,6 +160,8 @@ def warmup(
     would look non-deterministic.
     """
     t0 = time.perf_counter()
+    if bool(kw.get("erase_headwear", DEFAULTS["erase_headwear"])):
+        ensure_simple_lama()
     load_models(
         seed=int(kw.get("seed", DEFAULTS["seed"])),
         skip_refine=bool(kw.get("skip_refine", DEFAULTS["skip_refine"])),
