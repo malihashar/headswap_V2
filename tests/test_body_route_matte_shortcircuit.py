@@ -79,5 +79,6 @@ def test_small_face_still_consults_the_matte():
 def test_threshold_is_the_configured_one_not_a_literal():
     src = (ROOT / "src" / "headswap" / "pipelines" / "krea2.py").read_text()
     i = src.find("def _detect_full_body(")
-    body = src[i:i + 8000]
+    j = src.find("\n    def ", i + 1)
+    body = src[i:j if j > i else len(src)]
     assert "_seg_can_matter = face_h_frac <= face_h_frac_max" in body

@@ -30,9 +30,15 @@ KREA2 = (ROOT / "src" / "headswap" / "pipelines" / "krea2.py").read_text()
 
 
 def _detect_full_body_src() -> str:
+    """Source of _detect_full_body, bounded by the NEXT method definition.
+
+    Not a fixed character window: a 6000-char slice silently truncated when
+    a comment block was added, failing on code that was present and correct.
+    """
     i = KREA2.find("def _detect_full_body(")
     assert i > 0
-    return KREA2[i:i + 6000]
+    j = KREA2.find("\n    def ", i + 1)
+    return KREA2[i:j if j > i else len(KREA2)]
 
 
 def test_matte_gets_the_full_image_not_a_downscaled_probe():
