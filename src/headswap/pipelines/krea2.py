@@ -456,6 +456,23 @@ def _count_unet_forwards(model, enabled: bool = True):
         return counter, None
 
 
+
+def _onnx_providers() -> list[str]:
+    """Which execution providers onnxruntime can actually use.
+
+    InsightFace and rembg run through onnxruntime. If CUDAExecutionProvider
+    is absent the whole detection/segmentation stage runs on CPU, which is a
+    large fixed cost per image that no sampling parameter affects. Worth
+    reporting rather than inferring from a warning buried in the log.
+    """
+    try:
+        import onnxruntime  # noqa: PLC0415
+
+        return list(onnxruntime.get_available_providers())
+    except Exception:  # noqa: BLE001
+        return []
+
+
 class Krea2IdentityEditPipeline(BasePipeline):
     name = "krea2_identity_edit"
 
@@ -6328,6 +6345,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
         try:
             # Optional Magic Hour face-detection audit (geometry still current).
+            # Everything from here to the route dispatch is CPU-side ONNX:
+            # InsightFace (5 models) plus rembg's 1GB bria-rmbg segmentation,
+            # and onnxruntime is typically installed WITHOUT a CUDA provider
+            # ("Available providers: AzureExecutionProvider,
+            # CPUExecutionProvider" in the logs), so it all runs on CPU.
+            #
+            # It was invisible for a long time because run_simple_full_body
+            # starts its OWN clock after this block, so meta["total_s"] never
+            # counted it: the profiler reported 50.7s for a call that took
+            # 76.1s end to end. Measured separately now, because it is a
+            # large constant that no sampling change can touch.
+            _pre_t0 = time.perf_counter()
             magic_hour_meta = self._maybe_run_magic_hour_face_detection(body, out_dir)
 
             # Lighting route must run BEFORE model load so full_frame LoRA/rb
@@ -6343,8 +6372,18 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # Single-person full-body resolves to the simple full-body path.
             # It loads its own runtime/bundle, so dispatch before the
             # crop_stitch/full_frame model-load below.
+            _pre_dispatch_s = time.perf_counter() - _pre_t0
+            print(
+                f"[krea2 pre_dispatch] {_pre_dispatch_s:.1f}s of CPU-side "
+                "detection/segmentation before any GPU work "
+                "(insightface + rembg; steps/cfg cannot reduce this)",
+                flush=True,
+            )
+
             if body_route_meta.get("route") == "simple_full_body":
                 result = self.run_simple_full_body(body, face, out_dir)
+                result.meta["pre_dispatch_s"] = round(_pre_dispatch_s, 3)
+                result.meta["onnx_providers"] = _onnx_providers()
                 result.meta["body_route"] = body_route_meta
                 result.meta["lighting_route"] = lighting_route_meta
                 if magic_hour_meta:
