@@ -6269,7 +6269,27 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "skin_repaint": _repaint_diag,
             "raw_model": _raw_model,
             "skin_harmonize": skin_diag,
+            # Per-stage wall time. Every stage in this route is already
+            # wrapped in _stage(), which accumulates into `timings` -- the
+            # numbers existed all along and were simply never surfaced, so
+            # "where does the 140s go?" could only be guessed at from log
+            # fragments. Sampling is provably only part of it: the standalone
+            # single-image edit runs 4 UNet evals in ~21s including load,
+            # which does not extrapolate to 140s for 32 evals.
+            "timing_s": {k: round(v, 3) for k, v in sorted(timings.items())},
+            "total_s": round(total_s, 3),
         }
+        if bool(self.cfg.get("print_timing_breakdown", False)):
+            _tot = max(1e-9, total_s)
+            print("\n[krea2 timing] stage breakdown (total "
+                  f"{total_s:.1f}s)", flush=True)
+            for _k, _v in sorted(timings.items(), key=lambda kv: -kv[1]):
+                print(f"  {_v:7.2f}s  {100.0 * _v / _tot:5.1f}%  {_k}",
+                      flush=True)
+            _acct = sum(timings.values())
+            print(f"  {_tot - _acct:7.2f}s  "
+                  f"{100.0 * (_tot - _acct) / _tot:5.1f}%  "
+                  "(unaccounted: work outside any _stage block)", flush=True)
         dbg: dict[str, str] = {}
         if out_dir is not None:
             out_dir = Path(out_dir)
