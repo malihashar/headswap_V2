@@ -174,12 +174,40 @@ def _rembg_session():
         from headswap.preprocess import preferred_onnx_providers
 
         providers = preferred_onnx_providers()
+        _how = "providers kwarg"
         try:
             _REMBG_SESSION = new_session(providers=providers)
         except TypeError:
-            # Older rembg builds the session without a providers kwarg.
+            # Older rembg builds the session without a providers kwarg -- and
+            # that fallback yields a CPU session, so it must not be logged as
+            # if the request succeeded.
             _REMBG_SESSION = new_session()
-        print(f"[rembg] session cached providers={providers}", flush=True)
+            _how = "FALLBACK new_session() -- providers kwarg unsupported"
+
+        # Report what the session ACTUALLY runs on, not what we asked for.
+        # The first version printed the requested list either way, so a
+        # silent CPU fallback was indistinguishable from success -- and the
+        # measurement it was meant to explain (12.6s for one matte) is
+        # exactly what a CPU session looks like.
+        actual = None
+        inner = getattr(_REMBG_SESSION, "inner_session", None)
+        if inner is not None and hasattr(inner, "get_providers"):
+            try:
+                actual = list(inner.get_providers())
+            except Exception:  # noqa: BLE001
+                actual = None
+        print(
+            f"[rembg] session cached via {_how}; requested={providers}; "
+            f"ACTUAL={actual if actual is not None else 'unknown'}",
+            flush=True,
+        )
+        if actual is not None and "CUDAExecutionProvider" not in actual:
+            print(
+                "[rembg] WARNING: matte is running on CPU. This is the "
+                "dominant pre-dispatch cost and no sampling change affects "
+                "it.",
+                flush=True,
+            )
     except Exception as exc:  # noqa: BLE001
         print(f"[rembg] session cache unavailable ({exc}); using remove() "
               "per call", flush=True)
