@@ -47,3 +47,24 @@ def test_cuda_free_mb_returns_none_without_cuda():
 
     val = _cuda_free_mb()
     assert val is None or isinstance(val, float)
+
+
+def test_every_after_sample_offload_site_is_gated():
+    """There are TWO after_sample call sites: one in the `not enabled`
+    branch and one in the live force_full_load path. The first fix patched
+    only the dead one, so churn stayed at 4.9s and the skip line never
+    printed. Both must be gated, or the fix is invisible rather than absent.
+    """
+    import re
+
+    # Count the GATE itself, not a log string -- the log phrase also appears
+    # in a comment, which made the first version of this test count three
+    # gates for two call sites.
+    n_calls = SRC.count('reason="after_sample"')
+    n_gates = len(re.findall(
+        r'if _ample:\s*\n\s*print\(\s*\n?\s*"\[full_load\] post-sample', SRC))
+    assert n_calls >= 1
+    assert n_gates == n_calls, (
+        f"{n_calls} after_sample call sites but {n_gates} gated -- an "
+        "ungated site silently keeps the churn"
+    )

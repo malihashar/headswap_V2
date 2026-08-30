@@ -535,7 +535,22 @@ def force_sampling_full_load(
             sys.stdout.flush()
         except Exception:
             pass
-        after = offload_gpu_models(reason="after_sample", patchers=patchers)
+        # Gate the LIVE after_sample eviction too. There are TWO call
+        # sites; the first attempt patched the one in the `not enabled`
+        # branch, which never runs with force_full_load=true, so churn
+        # stayed at 4.9s and the "post-sample offload SKIPPED" line was
+        # simply absent from the log. Verified by that absence, not by
+        # re-reading the diff.
+        if _ample:
+            print(
+                "[full_load] post-sample offload SKIPPED (ample VRAM)",
+                flush=True,
+            )
+            after = {"ok": True, "skipped": "ample_vram"}
+        else:
+            after = offload_gpu_models(
+                reason="after_sample", patchers=patchers
+            )
         info["freed_after_sample"] = bool(after.get("ok"))
         info["offload_after"] = after
         if after.get("error") and not info.get("error"):
