@@ -30,6 +30,7 @@ DEFAULTS = {
     "driving_multiplier": 0.8,
     "animation_region": "lip",
     "skip_refine": True,
+    "remove_headwear": True,
     "seed": 46,
 }
 
@@ -42,6 +43,7 @@ def load_models(
     *,
     seed: int = 46,
     skip_refine: bool = True,
+    remove_headwear: bool = True,
     config_path: str | Path | None = None,
 ) -> Any:
     """Build (or return) the Krea2 pipeline. Cheap on repeat calls."""
@@ -66,6 +68,25 @@ def load_models(
         # sampling pass worth ~20s of ~40s; CHECKPOINT-12 measured it as
         # visually indistinguishable on a 42% bust shot.
         cfg["simple_full_body_refine_max_face_frac"] = 0.25
+    if remove_headwear:
+        # T4's base prompt only says "anything worn on the head", which was
+        # not enough: a target wearing a cap kept the cap through the swap.
+        # This appends an explicit remove-and-replace clause that already
+        # existed in the codebase but shipped default-off and was never run
+        # on GPU.
+        #
+        # Prompt fix, not a mask fix. CHECKPOINT-07's headwear GHOST came
+        # from _head_matte_mask chopping rigid headwear out of the generation
+        # mask, but this route runs raw_model (body_restore, LAB wash and
+        # skin_repaint all disabled), so there is no mask and no composite
+        # boundary for a ghost to appear at. CHECKPOINT-05 records the cost
+        # of getting that backwards: "several rounds were wrongly spent
+        # debugging masks/blending before this was found."
+        #
+        # Note preserve_headwear in the yaml does NOT reach this route -- it
+        # only feeds _append_headwear_policy, which run_simple_full_body
+        # never calls.
+        cfg["simple_full_body_remove_headwear"] = True
     _STATE["cfg"] = cfg
     _STATE["pipe"] = create_pipeline(
         cfg, runtime=get_shared_krea2_runtime(init_custom_nodes=True)
@@ -91,8 +112,13 @@ def warmup(
     would look non-deterministic.
     """
     t0 = time.perf_counter()
-    load_models(seed=int(kw.get("seed", DEFAULTS["seed"])),
-                skip_refine=bool(kw.get("skip_refine", DEFAULTS["skip_refine"])))
+    load_models(
+        seed=int(kw.get("seed", DEFAULTS["seed"])),
+        skip_refine=bool(kw.get("skip_refine", DEFAULTS["skip_refine"])),
+        remove_headwear=bool(
+            kw.get("remove_headwear", DEFAULTS["remove_headwear"])
+        ),
+    )
     out = Path(out_dir) if out_dir else (_repo() / "results" / "_warmup")
     res = run_chain(body_path, face_path, out_dir=out, lp_dir=lp_dir, **kw)
     _STATE["warm"] = True
