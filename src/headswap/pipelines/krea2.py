@@ -5154,42 +5154,27 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 else ""
             )
             + ", so the head and body are one person. "
-            # NOTE: an expression-preservation block ("take ONLY the identity
-            # from the second image... the expression stays exactly as it is
-            # in the first image") plus an absolute clothing prohibition were
-            # added here and then removed.
+            # REVERTED to T4's approved wording.
             #
-            # They did not do what they claimed and they cost quality. On the
-            # same pair, same seed and identical sampling
-            # (ref_boost=5.5 denoise=0.85 cfg=1.8 seed=46), adding them moved
-            # the generated face from 38.7% of the frame to 45.0% -- a visibly
-            # tighter, more cropped result -- while the expression was
-            # unchanged either way, so the clauses bought nothing and broke
-            # framing. Long prompts have repeatedly destabilised this route.
+            # This briefly read "Keep the clothing below the neck ...",
+            # on the theory that "keep the clothing" was arguing with the
+            # headwear removal clause, since a cap is clothing. The cap
+            # survived that change anyway -- so the qualifier fixed
+            # nothing, while weakening a preservation instruction on a
+            # route whose known-unfixed list (CHECKPOINT-10) already
+            # includes "a robed subject can still come back shirtless".
+            # A robed subject then came back shirtless.
             #
-            # Do not re-add expression language here without an A/B on the
-            # same seed showing the face fraction is unchanged.
-            # "Keep the clothing ... exactly as they are" and the headwear
-            # removal clause below CONTRADICT each other: a cap is clothing,
-            # and _append_headwear_policy's own default treats headwear as
-            # "functionally clothing" for exactly that reason. Measured: with
-            # the removal clause appended (chars=943, confirmed in the log)
-            # the cap still survived the swap -- the base sentence was
-            # telling the model to keep it, from a source latent that already
-            # contained it at denoise=0.85.
+            # Cause not isolated: that failure predates the change. But
+            # an edit that bought nothing does not get to stay as a
+            # suspect, and CHECKPOINT-10 requires prompt edits be A/B'd
+            # on face fraction before landing, which this never was.
             #
-            # So when removal is requested, the preservation clause is scoped
-            # BELOW THE NECK rather than left to argue with it. Byte-identical
-            # to T4's approved text when removal is off.
-            + (
-                "Keep the clothing below the neck, pose, body shape, "
-                "background and lighting exactly as they are. "
-                "Do not turn any clothed area into skin."
-                if bool(self.cfg.get("simple_full_body_remove_headwear", False))
-                else "Keep the clothing, pose, body shape, background and "
-                     "lighting exactly as they are. "
-                     "Do not turn any clothed area into skin."
-            )
+            # Headwear is handled by ERASING it from the target before
+            # the swap (chain.py), taking it out of the source latent
+            # instead of arguing with the prompt about it.
+            "Keep the clothing, pose, body shape, background and lighting "
+            "exactly as they are. Do not turn any clothed area into skin."
         )
 
         # Explicit headwear-removal clause. Off by default (never applied to

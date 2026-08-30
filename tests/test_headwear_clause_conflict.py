@@ -1,16 +1,19 @@
-"""Removing headwear must not leave "keep the clothing" arguing against it.
+"""The clothing-preservation clause must stay at T4's approved wording.
 
-Measured: with the removal clause appended (chars=943, confirmed in the run
-log) a Nike cap still survived the swap. The base T4 sentence says "Keep the
-clothing, pose, body shape, background and lighting exactly as they are" --
-and a cap IS clothing. _append_headwear_policy's own default preserves
-headwear on exactly that reasoning. At denoise=0.85 the sampler starts from
-a source latent that already contains the hat, so a preserve instruction is
-all the excuse it needs.
+It briefly read "Keep the clothing below the neck ...", on the theory that
+"keep the clothing" was contradicting the headwear removal clause, since a
+cap is clothing. The cap survived that change anyway. So the qualifier fixed
+nothing while weakening a preservation instruction on a route whose
+known-unfixed list (CHECKPOINT-10) already includes "a robed subject can
+still come back shirtless" -- and a robed subject then came back shirtless.
 
-When removal is off, T4's prompt must stay byte-identical: CHECKPOINT-10
-records that the 564-char text is part of the approved recipe and that
-prompt length alone moves framing on this route.
+Cause was never isolated; that failure predates the change. The point is
+that an edit which bought nothing does not get to remain a suspect, and
+CHECKPOINT-10 requires prompt edits be A/B'd on face fraction before
+landing, which this one never was.
+
+Headwear is now handled by ERASING it from the target before the swap, which
+takes it out of the source latent rather than arguing with the prompt.
 """
 from __future__ import annotations
 
@@ -20,17 +23,27 @@ ROOT = Path(__file__).resolve().parents[1]
 KREA2 = (ROOT / "src" / "headswap" / "pipelines" / "krea2.py").read_text()
 
 
-def test_preservation_is_scoped_below_the_neck_when_removing():
-    assert '"Keep the clothing below the neck, pose, body shape, "' in KREA2
+def test_clothing_clause_is_t4s_approved_wording():
+    assert ('"Keep the clothing, pose, body shape, background and lighting "'
+            in KREA2)
 
 
-def test_original_wording_is_kept_for_the_default_path():
-    """T4's approved 564-char prompt must be unchanged when removal is off."""
-    assert '"Keep the clothing, pose, body shape, background and "' in KREA2
+def test_the_below_the_neck_variant_is_gone():
+    """Reverted, not merely disabled -- it is a suspect in a garment
+    regression and bought nothing.
+
+    Matches the string LITERAL, not prose: the comment explaining the revert
+    necessarily quotes the phrase, and a plain substring check flags that as
+    the code still being present. This repo already documents that exact
+    false positive elsewhere.
+    """
+    import re
+    assert not re.search(r'"Keep the clothing below the neck', KREA2), (
+        "the qualified variant is still in the prompt"
+    )
 
 
-def test_both_branches_hang_off_the_removal_flag():
-    i = KREA2.find('"Keep the clothing below the neck')
-    assert i > 0
-    window = KREA2[max(0, i - 400):i + 600]
-    assert 'simple_full_body_remove_headwear' in window
+def test_headwear_is_handled_before_the_swap_instead():
+    chain = (ROOT / "src" / "headswap" / "chain.py").read_text()
+    assert "erase_headwear_first" in chain
+    assert 'fallback="telea"' in chain
