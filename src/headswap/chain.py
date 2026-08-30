@@ -32,6 +32,13 @@ DEFAULTS = {
     "skip_refine": True,
     "remove_headwear": True,
     "erase_headwear": True,
+    # Telea is cruder than LaMa: it smears inward from the mask edge instead
+    # of reconstructing, so a mask that merely covers the hat leaves a dark
+    # rim of un-erased brim to smear FROM. Both values are more generous
+    # than headwear_erase's own defaults (dilate 11, feather 3), which were
+    # tuned for LaMa.
+    "headwear_dilate_px": 25,
+    "headwear_feather_px": 11,
     "seed": 46,
 }
 
@@ -255,13 +262,25 @@ def run_chain(
             elif _matte is None:
                 erase_info["reason"] = f"no_person_matte: {_mreason}"
             else:
-                _mask = _hw_mask(body_im, _fb, _matte)
+                _mask = _hw_mask(
+                    body_im, _fb, _matte,
+                    dilate_px=int(DEFAULTS["headwear_dilate_px"]),
+                )
                 _cov = float((_np.asarray(_mask) > 127).mean())
                 if _cov <= 0.0005:
                     erase_info.update(reason="no headwear detected",
                                       coverage=round(_cov, 5))
                 else:
-                    _plate, _einfo = _erase(body_im, _mask, fallback="telea")
+                    # Save the mask. "The mask added problems" is not
+                    # actionable without seeing which pixels it claimed --
+                    # too small leaves a brim to smear from, too large eats
+                    # forehead and hair.
+                    from PIL import Image as _PILImage  # noqa: PLC0415
+                    _PILImage.fromarray(_mask).save(out / "headwear_mask.png")
+                    _plate, _einfo = _erase(
+                        body_im, _mask, fallback="telea",
+                        feather_px=int(DEFAULTS["headwear_feather_px"]),
+                    )
                     _einfo = _einfo or {}
                     # Trust the callee's own verdict. erase_headwear falls
                     # back and returns the image UNCHANGED when its backend
