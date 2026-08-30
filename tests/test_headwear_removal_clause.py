@@ -30,7 +30,12 @@ def test_disabled_when_prompt_is_overridden():
     """A caller-supplied prompt must win outright, same rule as the inline
     expression hint -- this must not silently append onto an override."""
     i = KREA2.find('if not _prompt_override and bool(')
-    j = KREA2.find('self.cfg.get("simple_full_body_remove_headwear"')
+    # Search FROM the guard, not from the top of the file. The flag is now
+    # read in two places -- once to scope the clothing-preservation clause
+    # (which would otherwise instruct the model to keep the hat) and once
+    # here -- so a plain find() returns the earlier one and this assertion
+    # measured the distance to the wrong occurrence.
+    j = KREA2.find('self.cfg.get("simple_full_body_remove_headwear"', i)
     assert i > 0 and 0 < j - i < 80
 
 
