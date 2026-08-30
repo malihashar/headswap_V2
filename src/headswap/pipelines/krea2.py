@@ -3962,14 +3962,40 @@ class Krea2IdentityEditPipeline(BasePipeline):
             try:
                 from headswap.segmentation import _try_birefnet_mask
 
-                mask, skip_reason = _try_birefnet_mask(body, None, blur_px=0)
+                # Segment a DOWNSCALED copy. The matte is used only for row
+                # extents -> person_height_frac, a RATIO taken against the
+                # matte's own height, so it is scale-invariant; nothing
+                # here reaches the output image. (below_face_frac comes
+                # from the face box and the full-size frame, not from the
+                # matte at all.) Running the ~1GB matte model at full
+                # 1024px to compute a fraction was measured at 12.9s of a
+                # 13.4s pre-dispatch stage -- and it lands on CPU regardless
+                # of onnxruntime-gpu, because ORT advertises
+                # CUDAExecutionProvider and then silently falls back
+                # (confirmed: requested=[CUDA, CPU] -> ACTUAL=[CPU]).
+                #
+                # Fixing the CUDA/cuDNN mismatch would help every ONNX user
+                # here and is worth doing, but this cost should not exist
+                # even on a GPU: it is a routing heuristic, not a mask.
+                _mp = int(self.cfg.get("body_route_matte_max_dim", 384))
+                _probe = body
+                if max(body.size) > _mp:
+                    _probe = resize_max_keep_ar(body, _mp, div_by=8)
+                mask, skip_reason = _try_birefnet_mask(_probe, None, blur_px=0)
             except Exception as exc:  # pragma: no cover - defensive
                 mask, skip_reason = None, f"import_failed:{exc}"
             if mask is not None:
                 alpha = np.asarray(mask)
                 rows = np.where((alpha > 16).any(axis=1))[0]
                 if rows.size > 0:
-                    person_h_frac = float(rows.max() - rows.min()) / float(h)
+                    # Divide by the MATTE's own height, not the full-frame
+                    # h. The matte is computed on a downscaled probe, so
+                    # using h would scale this ratio down by the probe
+                    # factor and quietly bias every routing decision toward
+                    # "not a full body". Ratios are scale-invariant only if
+                    # both terms come from the same frame.
+                    _mask_h = float(alpha.shape[0]) or float(h)
+                    person_h_frac = float(rows.max() - rows.min()) / _mask_h
                     person_h_frac_min = float(
                         self.cfg.get("body_route_person_height_frac_min", 0.55)
                     )
