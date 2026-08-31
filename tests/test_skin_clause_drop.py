@@ -107,16 +107,22 @@ def test_chain_uses_the_matte_signal_and_not_the_add_words_one():
     Adding words altered clothing on inputs that were already correct, so
     that approach stays off permanently.
 
-    Dropping the clause is the right shape but needs a reliable "is this
-    subject covered?" signal. Three GEOMETRIC attempts inverted (53.0/5.5,
-    then 18.0/6.9 -- covered scoring higher than bare both times) because
+    Dropping/scoping the clause needed a reliable "is this subject
+    covered?" signal. Three GEOMETRIC attempts inverted (53.0/5.5, then
+    18.0/6.9 -- covered scoring higher than bare both times) because
     background and framing dominated. Measuring inside the person matte
-    removes both confounds, so it is enabled again.
+    removed both confounds and was re-enabled -- but on the exact test case
+    it was built to fix, both the full-drop and the scoped-wording variants
+    then rendered the subject's genuinely-visible hands visibly WHITE and
+    mismatched, worse than the shirtless bug they replaced. Measured on GPU
+    twice. Off again, at Ali's direction: keep the plain enumeration that
+    already works for most cases rather than iterate further on a mechanism
+    that has now failed the same test case three separate ways.
     """
-    assert '"skip_skin_clause_when_covered": True' in CHAIN, (
-        "re-enabled once the measurement used the person MATTE instead of a "
-        "geometric box -- the box variants inverted because background and "
-        "framing dominated"
+    assert '"skip_skin_clause_when_covered": False' in CHAIN, (
+        "off again -- the matte-based drop/scope mechanism produced "
+        "mismatched white hands on the covered test case it was built to "
+        "fix, worse than the shirtless bug it replaced"
     )
     assert '"protect_garments": False' in CHAIN, (
         "the add-words approach stays off: it altered clothing on inputs "

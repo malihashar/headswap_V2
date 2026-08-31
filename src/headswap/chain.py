@@ -43,11 +43,19 @@ DEFAULTS = {
     # mode (a robed subject can come back shirtless, CHECKPOINT-10
     # known-unfixed) is at least understood and bounded.
     "protect_garments": False,
-    # ON now that the measurement uses the person MATTE rather than a
-    # geometric box. The three box variants all inverted (CHECKPOINT-16)
-    # because background and framing dominated; the silhouette removes both
-    # confounds. Falls back to keeping the clause when no matte is available.
-    "skip_skin_clause_when_covered": True,
+    # OFF. Turning this on (matte measurement, then the additive torso
+    # measurement) fixed the robe-exposure case but broke it a different
+    # way: with the sentence dropped OR scoped-to-visible-skin instead of
+    # the full enumeration, the subject's genuinely-visible hands rendered
+    # visibly WHITE/mismatched -- worse than the shirtless bug it was meant
+    # to fix, and measured on GPU on the exact same test case twice (once
+    # with the clause fully dropped, once with the scoped wording). Ali's
+    # direction: revert to the plain enumeration wording that already works
+    # for most cases rather than keep iterating on a mechanism that has now
+    # failed on this same test case three ways. The enumeration's own
+    # failure mode (a robed subject can come back shirtless,
+    # CHECKPOINT-10 known-unfixed) is at least bounded and understood.
+    "skip_skin_clause_when_covered": False,
     # THE structural lever for headwear, and mask-free.
     #
     # 0.85 seeds from the SOURCE latent, which is why clothing, pose and
@@ -144,7 +152,12 @@ def load_models(
     # into a bathrobe. Any caller relying on this function's default (not
     # DEFAULTS) got the bathrobe clause without asking for it.
     protect_garments: bool = False,
-    skip_skin_clause_when_covered: bool = True,
+    # False, matching DEFAULTS above -- see that entry: dropping/scoping
+    # the skin sentence for a covered subject fixed the robe-exposure bug
+    # but broke it a different way (mismatched white hands), measured on
+    # GPU twice. Any caller relying on this function's own default (not
+    # DEFAULTS) got that regression without asking for it.
+    skip_skin_clause_when_covered: bool = False,
     config_path: str | Path | None = None,
 ) -> Any:
     """Build (or return) the Krea2 pipeline. Cheap on repeat calls.
