@@ -567,6 +567,109 @@ def sweep_scene_conditioning(
     return {"arms": rows, "montage": str(montage)}
 
 
+def sweep_grounding(
+    body_path: str | Path,
+    face_path: str | Path,
+    *,
+    out_dir: str | Path = "results/grounding_sweep",
+    grounding_px: tuple[int, ...] = (768, 512, 384, 256),
+    seed: int = 46,
+) -> dict[str, Any]:
+    """Sweep CARRIER 3 -- the only scene-conditioning path never touched.
+
+    The scene reaches the sampler three ways. ref_boost_a scales one of them
+    and was swept to 0.3 (default 1.6) with the cap unmoved and the polo
+    wrecked. denoise governs the second and cannot be lowered without losing
+    clothing. The third is this one: Krea2EditGroundedEncode gets
+    ``image=scene_t`` at ``grounding_px`` and runs the VLM over it BEFORE the
+    prompt is interpreted (krea2.py:2679-2687). Nothing tried so far scales
+    it, and it is what decides what the model believes it is looking at.
+
+    Why lowering it might move a hat. The prompt says the head covering is
+    gone and the donor's hair is there instead. The VLM reads that against a
+    grounding image where a cap is large, sharp and unambiguous. Less
+    grounding resolution means a weaker commitment to "this person is wearing
+    a cap" while the prompt text is unchanged -- the instruction and the
+    evidence stop contradicting each other.
+
+    Why it might move the clothing too. The same encoder is what tells the
+    model a robed subject IS robed. CHECKPOINT-16 closed the clothing problem
+    by prompt wording only; the grounding side of it was never tested.
+
+    The failure mode to watch for is the OPPOSITE, and it is the reason not to
+    go to zero: grounding is also how the model locates the face. Too low and
+    identity, framing or pose degrade. yaml:466 already keeps a HIGHER value
+    for the full-frame route precisely because a smaller face needs more
+    grounding pixels, which is direct evidence this knob has real work to do.
+
+    No mask, no second model, no boundary -- CHECKPOINT-17 ruled all of that
+    out, on a measurement rather than a preference.
+
+    In-process on purpose: a subprocess loads a second ~28GB copy alongside
+    the kernel's and OOMs.
+    """
+    import time  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    _warn_if_stale()
+    pipe = load_models()
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    body = Image.open(Path(body_path)).convert("RGB")
+    face = Image.open(Path(face_path)).convert("RGB")
+
+    # full_frame_grounding_px overrides grounding_px when the route resolves
+    # to full_frame. Setting only one would silently sweep nothing on that
+    # route -- and the log would still print a moving number.
+    keys = ("grounding_px", "full_frame_grounding_px")
+    prev = {k: pipe.cfg.get(k) for k in (*keys, "seed")}
+    pipe.cfg["seed"] = int(seed)
+    tiles = [("target", body), ("donor", face)]
+    rows: list[dict[str, Any]] = []
+    try:
+        for gp in grounding_px:
+            for k in keys:
+                pipe.cfg[k] = int(gp)
+            print(f"\n=== grounding_px={gp} ===\n", flush=True)
+            t0 = time.perf_counter()
+            res = pipe.run(body, face, out_dir=out)
+            wall = time.perf_counter() - t0
+            path = out / f"grounding_{gp}.png"
+            res.image.save(path)
+            tiles.append((f"gp={gp}", res.image))
+            # Report the EFFECTIVE value the sampler used, not the requested
+            # one. A requested number that never reached the node is exactly
+            # how earlier arms in this investigation produced byte-identical
+            # results while the log showed them changing.
+            eff = (res.meta or {}).get("grounding_px")
+            rows.append({"requested_px": gp, "effective_px": eff,
+                         "seconds": round(wall, 1), "path": str(path)})
+            print(f"  -> {wall:.0f}s  effective grounding_px={eff}  "
+                  f"{path.name}", flush=True)
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                pipe.cfg.pop(k, None)
+            else:
+                pipe.cfg[k] = v
+
+    montage = out / "grounding_montage.png"
+    _strip(tiles, montage)
+    print(f"\nmontage -> {montage}")
+    print(
+        "Judge THREE things, in this order:\n"
+        "  1. effective_px moved on every arm. If two arms share a value the\n"
+        "     knob never reached the node and the images are not evidence.\n"
+        "  2. did the hat go, and did the garment survive?\n"
+        "  3. did identity/pose/framing hold? Grounding is also how the model\n"
+        "     finds the face -- a hatless arm that lost the likeness is not a\n"
+        "     win, it is the knob turned too far.",
+        flush=True,
+    )
+    return {"arms": rows, "montage": str(montage)}
+
+
 def _strip(items, out_path, pad: int = 8, h: int = 420) -> None:
     from PIL import Image, ImageDraw  # noqa: PLC0415
 

@@ -6475,7 +6475,27 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     "leaving the wash off as before",
                     flush=True,
                 )
-        if _head_restored and _wash_default:
+        if _raw_model:
+            # Under raw_model NONE of the branches below describe what
+            # happened: the restore block is gated on `not _raw_model`, so
+            # _head_restored is False for a reason that has nothing to do with
+            # a failure, and the wash at the bottom is gated on `not
+            # _raw_model` too. The else-branch was therefore printing "the
+            # ORIGINAL body was restored and the model's skin was discarded"
+            # on a route where no restore ran, nothing was discarded and the
+            # wash is off -- four false claims in one line, directly next to
+            # the raw_model line saying the opposite.
+            #
+            # This log has misdirected this investigation repeatedly. Say what
+            # actually happened.
+            print(
+                "[krea2 skin] no wash, no restore, no repaint - raw_model "
+                "ships the model's own skin exactly as rendered. The head "
+                "and body come from one render, so there is nothing to "
+                "reconcile.",
+                flush=True,
+            )
+        elif _head_restored and _wash_default:
             print(
                 f"[krea2 skin] LAB wash ON - the restore succeeded but the model "
                 f"did not recolour the body: face L={tone_diag.get('face_L')} vs "
@@ -6556,6 +6576,12 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "body_size": list(body_full.size),
             "loras_loaded": sample_meta.get("loras_loaded"),
             "ref_boost": sample_meta.get("ref_boost"),
+            # The value actually handed to Krea2EditGroundedEncode. Surfaced
+            # so a sweep can prove the knob reached the node instead of
+            # trusting the number it requested -- an earlier arm in this
+            # investigation returned byte-identical results while the log
+            # showed the setting changing.
+            "grounding_px": sample_meta.get("grounding_px"),
             "pre_edit_donor_expression": pre_edit_expr_diag,
             "face_refine": refine_diag,
             "body_restore": body_restore_diag,
