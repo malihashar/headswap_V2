@@ -5249,6 +5249,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
         """
         diag: dict[str, Any] = {}
         try:
+            import cv2  # noqa: PLC0415
             import numpy as np  # noqa: PLC0415
 
             from headswap.skin_harmonize import (  # noqa: PLC0415
@@ -5295,10 +5296,45 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 diag["reason"] = f"skin_frac_too_large:{skin_frac:.3f}"
                 return False, diag
 
-            ys, xs = np.where(skin_below)
-            bbox_h = int(ys.max() - ys.min()) if ys.size else 0
-            bbox_w = int(xs.max() - xs.min()) if xs.size else 0
-            max_extent = float(self.cfg.get("bare_skin_compact_max_face_h", 1.6))
+            # The DOMINANT blob's own extent, not the bounding box of every
+            # skin pixel below the face. Measured on GPU: a single stray
+            # sliver (a bit of neck skin just below the chin, or bare
+            # ankles/feet near the bottom of the frame) sits far from the
+            # actual hands blob, and a naive full-region bounding box
+            # stretches to cover BOTH -- 326px tall against a 43px face on
+            # the real failing case, even though the hands themselves are a
+            # small, contained blob. Connected components isolate the
+            # blob that actually matters and ignore small, distant
+            # satellites the same way restore_stripped_garment's speckle
+            # guard already does for a different mask.
+            binary = skin_below.astype(np.uint8)
+            n_comp, labels, stats, _ = cv2.connectedComponentsWithStats(
+                binary, connectivity=8
+            )
+            if n_comp <= 1:
+                diag["reason"] = "no_connected_components"
+                return None, diag
+            areas = stats[1:, cv2.CC_STAT_AREA]
+            dominant_id = 1 + int(np.argmax(areas))
+            dominant_area = int(areas.max())
+            dominant_frac_of_skin = dominant_area / max(1, skin_px)
+            diag["dominant_frac_of_skin"] = round(dominant_frac_of_skin, 4)
+            min_dominant_frac = float(
+                self.cfg.get("bare_skin_dominant_min_frac", 0.5)
+            )
+            if dominant_frac_of_skin < min_dominant_frac:
+                # No single blob explains most of the visible skin -- e.g.
+                # two separately-bare regions (both hands AND a bare
+                # forearm) -- too ambiguous to describe as "one small area".
+                diag["compact"] = False
+                diag["reason"] = (
+                    f"no_dominant_blob:{dominant_frac_of_skin:.2f}"
+                )
+                return False, diag
+
+            bbox_h = int(stats[dominant_id, cv2.CC_STAT_HEIGHT])
+            bbox_w = int(stats[dominant_id, cv2.CC_STAT_WIDTH])
+            max_extent = float(self.cfg.get("bare_skin_compact_max_face_h", 2.5))
             diag.update(bbox_h=bbox_h, bbox_w=bbox_w, face_h=fh)
             compact = bbox_h <= max_extent * fh and bbox_w <= max_extent * fh
             diag["compact"] = compact
