@@ -6730,6 +6730,53 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "Falling back to the wash so the skin still changes.",
                 flush=True,
             )
+        # Post-render diff correction: restore ORIGINAL garment pixels
+        # wherever the render turned fabric into skin near the torso.
+        #
+        # NOT nested inside `not _raw_model`. _raw_model exists because a
+        # compositing stage draws an arbitrary geometric/probability
+        # boundary with no reason to align with the source photo -- true of
+        # restore/wash/repaint above, and exactly why they are off here.
+        # This correction's boundary sits on a REAL garment silhouette that
+        # already existed in body_full, which is the case _raw_model's own
+        # reasoning does not cover. _raw_model=True is the production
+        # default and where this bug was actually measured; nesting the fix
+        # inside `not _raw_model` would make it inert in production.
+        #
+        # Runs BEFORE extend_skin_harmonization below, not after: an
+        # erroneously-exposed patch would otherwise get sampled as "current
+        # body skin" by that call and skew its donor-tone transfer.
+        #
+        # DEFAULT OFF. Three prompt-text fixes for this same bug were tried
+        # and rejected (see restore_stripped_garment's docstring); this is a
+        # structurally different, unrelated mechanism, but it is new and
+        # unproven on GPU across the regression-prone cases (a bare-armed
+        # subject that previously broke under a different fix attempt). Ship
+        # opt-in, validate on GPU, then flip the default -- same discipline
+        # already used for skip_skin_clause_when_covered and protect_garments.
+        restore_diag: dict = {"applied": False}
+        if bool(self.cfg.get(
+            "simple_full_body_restore_stripped_garment", False
+        )) and selected_face is not None:
+            try:
+                from headswap.skin_harmonize import restore_stripped_garment
+
+                out, restore_diag = restore_stripped_garment(
+                    out,
+                    body_full,
+                    int(selected_face.x0),
+                    int(selected_face.y0),
+                    int(selected_face.x1),
+                    int(selected_face.y1),
+                )
+            except Exception as exc:  # noqa: BLE001
+                restore_diag = {"applied": False, "reason": f"failed: {exc}"}
+                print(
+                    f"[krea2 garment_restore] FAILED - {exc}; shipping the "
+                    "render unrestored",
+                    flush=True,
+                )
+
         if not _raw_model and bool(self.cfg.get("simple_full_body_skin_harmonize", _wash_default)) and selected_face is not None:
             try:
                 from headswap.skin_harmonize import extend_skin_harmonization
@@ -6803,6 +6850,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "skin_repaint": _repaint_diag,
             "raw_model": _raw_model,
             "skin_harmonize": skin_diag,
+            "restore_stripped_garment": restore_diag,
             # Per-stage wall time. Every stage in this route is already
             # wrapped in _stage(), which accumulates into `timings` -- the
             # numbers existed all along and were simply never surfaced, so

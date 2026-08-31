@@ -1093,3 +1093,193 @@ def extend_skin_harmonization(
         flush=True,
     )
     return Image.fromarray(result_np), info
+
+
+def restore_stripped_garment(
+    rendered: Image.Image,
+    original: Image.Image,
+    head_x0: int,
+    head_y0: int,
+    head_x1: int,
+    head_y1: int,
+    *,
+    min_stripped_frac: float = 0.003,
+    min_stripped_px: int = 400,
+    open_px: int = 3,
+    min_component_frac: float = 0.0015,
+    feather_px: int = 12,
+    neck_excl_frac: float = 0.04,
+) -> tuple[Image.Image, dict]:
+    """Paste back ORIGINAL garment pixels wherever the render turned fabric
+    into skin, and nowhere else.
+
+    Three prompt-text fixes for "a covered subject can come back with
+    clothing stripped near the torso" were tried and rejected (see
+    krea2.py's run_simple_full_body and DEFAULTS in chain.py): a
+    do-not-expose prohibition moved the stripping to the sleeves instead of
+    fixing it; naming garment types turned an unrelated bare-armed subject's
+    polo shirt into a bathrobe ("on this route the model draws whatever the
+    prompt names"); dropping or scoping the skin-recolour sentence for a
+    "covered" subject fixed the stripping but left genuinely-visible skin
+    (praying hands) with no tone instruction, rendering it visibly
+    white/mismatched -- twice, under two different wordings.
+
+    This is a different kind of fix: not a prompt change, a post-render
+    diff. `clothes_before` (semantic_clothes_mask on the ORIGINAL photo) AND
+    `skin_after` (a skin classifier on the RENDER) together identify exactly
+    the pixels that were fabric and are now skin -- structurally, not by
+    threshold tuning, so it can never touch skin that was already bare
+    before the swap (hands, neck, face). That is what keeps it from
+    reproducing the white-hands regression: those pixels were never
+    "clothes_before", so they are never in the restore mask to begin with.
+
+    Head/neck exclusion is BOTH semantic (semantic_head_mask) and geometric
+    (a row-zero from the passed-in head box), not semantic alone --
+    _semantic_category_mask has a documented failure mode where it silently
+    returns an all-zero array (not None) on some frames, which would make a
+    semantic-only exclusion evaluate to "no exclusion at all" and paste
+    original pixels under the just-swapped neck. The geometric zero is
+    applied both before AND after the Gaussian blur, mirroring
+    extend_skin_harmonization's own fix for exactly this reorder bug
+    (that function's docstring/comments measured max_diff 19 and 11 in the
+    head region before the reorder -- same mistake, not repeated here).
+
+    Speckle guard: cv2.INTER_LINEAR resizing inside the mask functions
+    produces a thin fractional halo along EVERY garment edge on every
+    render, not just a buggy one. Left unguarded this would "fix" the target
+    case while adding a hairline fringe of restored-original pixels along
+    every collar/cuff on cases that were already correct -- the same
+    "fixed one case, broke a working one" trap as the earlier do-not-expose
+    and garment-naming attempts. A morphological opening removes the
+    speckle, then a connected-component AREA filter (not just a total pixel
+    count) drops anything too small to be the real stripped region -- a
+    total-pixel-count check alone can be fooled by a long thin halo summing
+    past the floor while still being visually a hairline.
+
+    Blends actual original garment pixels, not a LAB-shifted statistical
+    correction -- extend_skin_harmonization's own docstring notes a mean-shift
+    "cannot produce skin rendered under the scene's light"; restoring the
+    real original pixels sidesteps that critique entirely, since they are
+    already lit consistently with whatever of the same garment the render
+    got right (img2img on this route is explicitly instructed to preserve
+    clothing/lighting, and mostly does for the parts it does not strip).
+
+    Fails closed: returns `rendered` unchanged whenever either classifier is
+    unavailable, or the detected area is below the noise floor -- never
+    breaks a render.
+    """
+    info: dict = {"applied": False}
+    W, H = rendered.size
+    rendered_np = np.asarray(rendered.convert("RGB"), dtype=np.uint8).copy()
+    original_np_full = np.asarray(original.convert("RGB"), dtype=np.uint8)
+    if original_np_full.shape[:2] != (H, W):
+        original_np_full = cv2.resize(
+            original_np_full, (W, H), interpolation=cv2.INTER_LINEAR
+        )
+
+    clothes_before = semantic_clothes_mask(original_np_full)
+    if clothes_before is None:
+        info["reason"] = "segmenter_unavailable_clothes_before"
+        print(
+            "[skin_harm] restore_stripped_garment skipped -- clothes "
+            "segmenter unavailable on the original photo",
+            flush=True,
+        )
+        return rendered, info
+
+    skin_after = _semantic_skin_mask(rendered_np)
+    if skin_after is None:
+        info["reason"] = "segmenter_unavailable_skin_after"
+        print(
+            "[skin_harm] restore_stripped_garment skipped -- skin "
+            "segmenter unavailable on the render",
+            flush=True,
+        )
+        return rendered, info
+
+    stripped = np.clip(clothes_before, 0.0, 1.0) * np.clip(skin_after, 0.0, 1.0)
+
+    # Head/neck exclusion -- semantic AND geometric, see docstring.
+    head_h = max(1, head_y1 - head_y0)
+    head_excl = min(H, max(0, head_y1) + max(2, int(head_h * neck_excl_frac)))
+    _head_sem = semantic_head_mask(rendered_np)
+    if _head_sem is not None:
+        stripped = stripped * (1.0 - np.clip(_head_sem, 0.0, 1.0))
+    stripped[:head_excl] = 0.0
+
+    raw_px = int((stripped > 0.5).sum())
+    info["raw_stripped_px"] = raw_px
+    if raw_px < min_stripped_px:
+        info["reason"] = f"below_pixel_floor:{raw_px}<{min_stripped_px}"
+        print(
+            f"[skin_harm] restore_stripped_garment skipped -- only {raw_px}px "
+            f"detected (< {min_stripped_px})",
+            flush=True,
+        )
+        return rendered, info
+
+    # Speckle guard: remove isolated noise, then keep only components large
+    # enough to be a real stripped region rather than an edge-resample halo.
+    binary = (stripped > 0.5).astype(np.uint8)
+    k = max(1, int(open_px)) * 2 + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    n_comp, labels, stats, _ = cv2.connectedComponentsWithStats(
+        opened, connectivity=8
+    )
+    frame_area = float(H * W)
+    min_comp_px = max(1.0, min_component_frac * frame_area)
+    kept = np.zeros_like(opened)
+    kept_area = 0
+    for comp_id in range(1, n_comp):
+        area = stats[comp_id, cv2.CC_STAT_AREA]
+        if area >= min_comp_px:
+            kept[labels == comp_id] = 1
+            kept_area += int(area)
+    info["kept_component_px"] = kept_area
+
+    stripped_frac = kept_area / frame_area
+    info["stripped_frac"] = round(stripped_frac, 5)
+    if kept_area < min_stripped_px or stripped_frac < min_stripped_frac:
+        info["reason"] = (
+            f"below_area_floor:frac={stripped_frac:.5f}<{min_stripped_frac}"
+        )
+        print(
+            f"[skin_harm] restore_stripped_garment skipped -- surviving area "
+            f"{stripped_frac:.4%} below floor {min_stripped_frac:.4%} "
+            "(likely edge-resample noise, not a real stripped region)",
+            flush=True,
+        )
+        return rendered, info
+
+    weight = kept.astype(np.float32)
+    blur_k = max(3, (int(feather_px) // 2) * 2 + 1)
+    weight = cv2.GaussianBlur(weight, (blur_k, blur_k), 0)
+    # Re-zero AFTER the blur -- blurring smears nonzero weight back up across
+    # the head-exclusion line otherwise. Same reorder fix as
+    # extend_skin_harmonization; see this function's docstring.
+    weight[:head_excl] = 0.0
+    weight = np.clip(weight, 0.0, 1.0)
+
+    w3 = weight[..., None]
+    out_np = np.clip(
+        original_np_full.astype(np.float32) * w3
+        + rendered_np.astype(np.float32) * (1.0 - w3),
+        0, 255,
+    ).astype(np.uint8)
+
+    hx0, hy0 = max(0, head_x0), max(0, head_y0)
+    hx1 = min(W, head_x1)
+    head_before = rendered_np[hy0:head_excl, hx0:hx1]
+    head_after = out_np[hy0:head_excl, hx0:hx1]
+    info["head_identical"] = bool(np.array_equal(head_before, head_after))
+
+    info["applied"] = True
+    print(
+        f"[skin_harm] restore_stripped_garment applied -- restored "
+        f"{stripped_frac:.4%} of the frame ({kept_area}px) where the "
+        "original was fabric and the render turned it into skin; "
+        f"head_identical={info['head_identical']}",
+        flush=True,
+    )
+    return Image.fromarray(out_np), info
