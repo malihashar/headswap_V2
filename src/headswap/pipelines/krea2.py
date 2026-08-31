@@ -4991,6 +4991,61 @@ class Krea2IdentityEditPipeline(BasePipeline):
         }
         return edited, diag
 
+    def _measure_visible_skin(self, body_full) -> tuple:
+        """Fraction of the body below the face whose hue matches the face.
+
+        Decides whether the skin-recolour SENTENCE belongs in the prompt, and
+        nothing else. Builds no mask, touches no pixels, never reaches the
+        output -- the same kind of measurement as the existing body_route and
+        lighting_route checks.
+
+        Why a measurement rather than better wording. Three attempts to
+        protect garments by ADDING words each broke something new: a
+        do-not-expose prohibition covered the torso but removed the sleeves,
+        dropping the body-part list brought the sleeves back, and naming
+        "robe, shirt or top" rendered a tennis polo as a bathrobe. On this
+        route the model draws whatever the prompt names, so the fix has to be
+        FEWER words: on a covered subject, omit the sentence that asks for
+        bare skin at all.
+
+        Compares against the subject's OWN face colour instead of a fixed
+        skin range, so it works across skin tones with no hardcoded palette,
+        and in a*b* only so shadow does not read as clothing.
+        """
+        diag = {}
+        try:
+            import cv2  # noqa: PLC0415
+            import numpy as np  # noqa: PLC0415
+
+            rgb = pil_to_rgb_np(body_full)
+            box = detect_best_face(rgb, self.cache_dir)
+            if box is None:
+                diag["reason"] = "no_face_detected"
+                return None, diag
+            h, w = rgb.shape[:2]
+            lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+            fx0 = max(0, int(box.x0 + 0.25 * box.width))
+            fx1 = min(w, int(box.x1 - 0.25 * box.width))
+            fy0 = max(0, int(box.y0 + 0.35 * box.height))
+            fy1 = min(h, int(box.y1 - 0.15 * box.height))
+            if fx1 <= fx0 or fy1 <= fy0:
+                diag["reason"] = "face_box_degenerate"
+                return None, diag
+            ref = np.median(lab[fy0:fy1, fx0:fx1].reshape(-1, 3), axis=0)
+            by0 = min(h - 1, int(box.y1))
+            if by0 >= h - 2:
+                diag["reason"] = "no_body_below_face"
+                return None, diag
+            body = lab[by0:, :, :].reshape(-1, 3)
+            dist = np.linalg.norm(body[:, 1:] - ref[1:], axis=1)
+            tol = float(self.cfg.get("visible_skin_ab_tolerance", 12.0))
+            frac = float((dist < tol).mean())
+            diag.update(fraction=round(frac, 4), tolerance=tol)
+            return frac, diag
+        except Exception as exc:  # noqa: BLE001 -- must never break a render
+            diag["reason"] = f"{type(exc).__name__}: {exc}"
+            return None, diag
+
     def run_simple_full_body(
         self, body: Image.Image, face: Image.Image, out_dir: Path | None = None
     ) -> PipelineResult:
@@ -5092,6 +5147,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # Overridable so A/B arms can differ by wording alone. The prompt was
         # hardcoded, so every attempt to test a different phrasing required a
         # code edit and a push.
+        # Is there bare skin to recolour? Decided per image.
+        #
+        # The skin sentence is what strips a robe: it asks for bare
+        # neck/arms/legs, a covered subject has none, so the model makes
+        # some. Three attempts to fix that by ADDING words each broke
+        # something else -- a prohibition removed the sleeves instead,
+        # dropping the body-part list brought them back, and naming "robe,
+        # shirt or top" turned a tennis polo into a bathrobe.
+        #
+        # This REMOVES words instead: on a covered subject the sentence is
+        # omitted. Nothing new is named, so a subject that was already
+        # correct cannot change.
+        _drop_skin_clause = False
+        if bool(self.cfg.get("skip_skin_clause_when_covered", False)):
+            _sf, _sd = self._measure_visible_skin(body_full)
+            _smin = float(self.cfg.get("visible_skin_min_frac", 0.06))
+            if _sf is not None and _sf < _smin:
+                _drop_skin_clause = True
+                print(f"[krea2 skin_clause] DROPPED - only {_sf:.1%} of the "
+                      f"body below the face matches the face's own colour "
+                      f"(< {_smin:.0%}); this subject is covered", flush=True)
+            elif _sf is not None:
+                print(f"[krea2 skin_clause] kept - {_sf:.1%} bare skin below "
+                      "the face", flush=True)
+            else:
+                print("[krea2 skin_clause] kept - could not measure "
+                      f"({_sd.get('reason')})", flush=True)
+
         _prompt_override = str(self.cfg.get("simple_full_body_prompt", "") or "").strip()
         # Measured, INLINE variant of the expression hint. CHECKPOINT-13's
         # hint used the same measurement (mouth width/openness from
@@ -5137,10 +5220,17 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     flush=True,
                 )
         prompt = _prompt_override or (
-            "Two changes. First: replace the head from the first image with "
+            # "Two changes ... First ... Second" only parses as instructions
+            # if the second one is actually there. When the skin sentence is
+            # dropped for a covered subject, promising two and giving one
+            # leaves a dangling contract in the prompt.
+            ("One change: replace the head from the first image with "
+               if _drop_skin_clause else
+               "Two changes. First: replace the head from the first image with ")
+            + (
             "the head from the second image completely -- the face, the hair "
             "and anything worn on the head, exactly as they appear in the "
-            f"second image, with none of the first person's head remaining{_expr_inline}. "
+            f"second image, with none of the first person's head remaining{_expr_inline}. ")
             # Headwear goes HERE, inside the head sentence -- not appended
             # after the prohibitions at the end.
             #
@@ -5176,7 +5266,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # So when garments are protected, stop naming parts at all and
             # scope the recolour to whatever skin the photo already shows.
             # Nothing is enumerated, so there is nothing to go and expose.
-            + (
+            + ("" if _drop_skin_clause else (
                 "Second: change the skin colour to the skin colour of the "
                 "person in the second image, wherever skin is already "
                 "visible in the first image and only there -- if very little "
@@ -5185,7 +5275,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 else "Second: change the skin colour of the body -- the neck, "
                      "arms, hands and legs that are already bare -- to the "
                      "skin colour of the person in the second image"
-            )
+            ))
             # Naming the measured tone in words turns "match the other image"
             # (an inference the model may not attend to) into a literal
             # instruction. Set by the A/B runner for variant C; empty
@@ -5195,7 +5285,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 if self.cfg.get("simple_full_body_tone_words")
                 else ""
             )
-            + ", so the head and body are one person. "
+            + ("" if _drop_skin_clause
+               else ", so the head and body are one person. ")
             # REVERTED to T4's approved wording.
             #
             # This briefly read "Keep the clothing below the neck ...",
@@ -5215,7 +5306,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # Headwear is handled by ERASING it from the target before
             # the swap (chain.py), taking it out of the source latent
             # instead of arguing with the prompt about it.
-            "Keep the clothing, pose, body shape, background and lighting "
+            + "Keep the clothing, pose, body shape, background and lighting "
             "exactly as they are. "
             # A robed subject still comes back shirtless -- CHECKPOINT-10
             # lists it as known-unfixed, and the cause is named in this
@@ -5267,6 +5358,37 @@ class Krea2IdentityEditPipeline(BasePipeline):
         #
         # Logged in full rather than truncated -- the whole point is that the
         # log is enough to reconstruct the arm.
+        # Steer AWAY from headwear using the NEGATIVE prompt.
+        #
+        # Four positive wordings have failed: the base "anything worn on the
+        # head", an appended CRITICAL clause, that clause with the clothing
+        # sentence scoped below the neck, and the fact-style sentence now in
+        # sentence one. At denoise=0.85 the sampler starts from a latent that
+        # already contains the cap, and describing what to draw does not
+        # remove what is already there.
+        #
+        # This is a different MECHANISM, not a fifth wording: at cfg=1.8
+        # classifier-free guidance is active, so the sampler is pushed away
+        # from these tokens. It is also safe for the clothing regressions
+        # that broke the last three attempts, because it adds nothing to the
+        # positive prompt -- a hatless input is unaffected by "hat" appearing
+        # in the negative.
+        #
+        # negative_prompt ships empty, so a full grounded VLM encode is
+        # currently spent on "" on every render.
+        if not _prompt_override and bool(
+            self.cfg.get("simple_full_body_remove_headwear", False)
+        ) and not str(self.cfg.get("negative_prompt", "") or "").strip():
+            self.cfg["negative_prompt"] = (
+                "hat, cap, baseball cap, headscarf, headband, durag, "
+                "head covering, brim, visor"
+            )
+            print(
+                "[krea2 headwear] negative prompt steers away from headwear: "
+                f"{self.cfg['negative_prompt']}",
+                flush=True,
+            )
+
         print(
             "[krea2 prompt] source="
             + ("cfg:simple_full_body_prompt" if _prompt_override else "built-in default")

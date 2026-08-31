@@ -31,6 +31,9 @@ def _assemble(headwear: bool, garments: bool) -> str:
     ns = {
         "_prompt_override": "",
         "_expr_inline": "",
+        # T4's default path: the skin sentence is kept.
+        # It is dropped only for a subject with no visible skin.
+        "_drop_skin_clause": False,
         "self": type("C", (), {"cfg": {
             "simple_full_body_remove_headwear": headwear,
             "simple_full_body_protect_garments": garments,

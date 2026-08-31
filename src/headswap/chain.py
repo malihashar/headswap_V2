@@ -42,6 +42,7 @@ DEFAULTS = {
     # mode (a robed subject can come back shirtless, CHECKPOINT-10
     # known-unfixed) is at least understood and bounded.
     "protect_garments": False,
+    "skip_skin_clause_when_covered": True,
     # OFF. The LaMa/Telea inpaint did remove the hat, but Telea smears
     # rather than reconstructs and the plate's artifacts survived into the
     # final image -- rejected on looks. Headwear is a PROMPT concern on this
@@ -68,6 +69,7 @@ def load_models(
     skip_refine: bool = True,
     remove_headwear: bool = True,
     protect_garments: bool = True,
+    skip_skin_clause_when_covered: bool = True,
     config_path: str | Path | None = None,
 ) -> Any:
     """Build (or return) the Krea2 pipeline. Cheap on repeat calls."""
@@ -111,6 +113,11 @@ def load_models(
         # only feeds _append_headwear_policy, which run_simple_full_body
         # never calls.
         cfg["simple_full_body_remove_headwear"] = True
+    if skip_skin_clause_when_covered:
+        # Drop the skin-recolour sentence on a covered subject instead of
+        # adding words to defend the garment -- every add-words attempt
+        # altered clothing on inputs that were already correct.
+        cfg["skip_skin_clause_when_covered"] = True
     if protect_garments:
         # A robed subject comes back shirtless: the skin-recolour clause asks
         # for bare neck/arms/legs, so on a covered subject the model exposes
@@ -211,6 +218,10 @@ def warmup(
         ),
         protect_garments=bool(
             kw.get("protect_garments", DEFAULTS["protect_garments"])
+        ),
+        skip_skin_clause_when_covered=bool(
+            kw.get("skip_skin_clause_when_covered",
+                   DEFAULTS["skip_skin_clause_when_covered"])
         ),
     )
     out = Path(out_dir) if out_dir else (_repo() / "results" / "_warmup")
