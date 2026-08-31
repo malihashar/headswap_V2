@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 _STATE: dict[str, Any] = {"pipe": None, "cfg": None, "warm": False,
-                          "head": None}
+                          "head": None, "flags_key": None}
 
 DEFAULTS = {
     "driving_multiplier": 0.8,
@@ -138,13 +138,40 @@ def load_models(
     seed: int = 46,
     skip_refine: bool = True,
     remove_headwear: bool = True,
-    protect_garments: bool = True,
+    # False, matching DEFAULTS above -- this parameter's own default was
+    # stale at True, contradicting DEFAULTS["protect_garments"]=False and
+    # the finding right above it: "robe, shirt or top" turns a tennis polo
+    # into a bathrobe. Any caller relying on this function's default (not
+    # DEFAULTS) got the bathrobe clause without asking for it.
+    protect_garments: bool = False,
     skip_skin_clause_when_covered: bool = True,
     config_path: str | Path | None = None,
 ) -> Any:
-    """Build (or return) the Krea2 pipeline. Cheap on repeat calls."""
-    if _STATE["pipe"] is not None:
+    """Build (or return) the Krea2 pipeline. Cheap on repeat calls.
+
+    Rebuilds when the requested flags differ from the ones the cached
+    pipeline was built with. Without this, `_STATE["pipe"] is not None`
+    returned the FIRST call's pipeline forever, silently ignoring every
+    argument passed on every later call in the same kernel -- so whichever
+    flags happened to be used first became permanent for the rest of the
+    Colab session regardless of what a later cell asked for. This is how
+    `protect_garments` reached the grounding sweep: something earlier in
+    that kernel enabled it, and the sweep script's own call was ignored.
+    """
+    _flags_key = (
+        bool(skip_refine), bool(remove_headwear), bool(protect_garments),
+        bool(skip_skin_clause_when_covered),
+        str(config_path) if config_path else None,
+    )
+    if _STATE["pipe"] is not None and _STATE.get("flags_key") == _flags_key:
         return _STATE["pipe"]
+    if _STATE["pipe"] is not None:
+        print(
+            f"[chain] flags changed ({_STATE.get('flags_key')} -> "
+            f"{_flags_key}) -- rebuilding rather than reusing a pipeline "
+            "built for different settings",
+            flush=True,
+        )
 
     from headswap.config import load_config  # noqa: PLC0415
     from headswap.pipelines import create_pipeline  # noqa: PLC0415
@@ -183,18 +210,25 @@ def load_models(
         # only feeds _append_headwear_policy, which run_simple_full_body
         # never calls.
         cfg["simple_full_body_remove_headwear"] = True
+    else:
+        cfg["simple_full_body_remove_headwear"] = False
     if skip_skin_clause_when_covered:
         # Drop the skin-recolour sentence on a covered subject instead of
         # adding words to defend the garment -- every add-words attempt
         # altered clothing on inputs that were already correct.
         cfg["skip_skin_clause_when_covered"] = True
+    else:
+        cfg["skip_skin_clause_when_covered"] = False
     if protect_garments:
         # A robed subject comes back shirtless: the skin-recolour clause asks
         # for bare neck/arms/legs, so on a covered subject the model exposes
         # some. Opt-in because it lengthens T4's approved 564-char prompt,
         # and length alone moves face fraction on this route.
         cfg["simple_full_body_protect_garments"] = True
+    else:
+        cfg["simple_full_body_protect_garments"] = False
     _STATE["cfg"] = cfg
+    _STATE["flags_key"] = _flags_key
     _STATE["head"] = _git_head()
     _STATE["pipe"] = create_pipeline(
         cfg, runtime=get_shared_krea2_runtime(init_custom_nodes=True)
@@ -665,6 +699,123 @@ def sweep_grounding(
         "  3. did identity/pose/framing hold? Grounding is also how the model\n"
         "     finds the face -- a hatless arm that lost the likeness is not a\n"
         "     win, it is the knob turned too far.",
+        flush=True,
+    )
+    return {"arms": rows, "montage": str(montage)}
+
+
+def sweep_guidance(
+    body_path: str | Path,
+    face_path: str | Path,
+    *,
+    out_dir: str | Path = "results/guidance_sweep",
+    arms: tuple[tuple[float, float], ...] = (
+        (1.8, 5.5),   # baseline (shipped)
+        (3.0, 5.5),
+        (4.5, 5.5),
+        (3.0, 8.0),
+        (1.8, 8.0),
+    ),
+    seed: int = 46,
+) -> dict[str, Any]:
+    """Sweep GUIDANCE, after all three scene carriers were eliminated.
+
+    Where this leaves the diagnosis. The cap survives ref_boost_a at 0.3
+    (default 1.6), a working noise_mask (CHECKPOINT-17: inside=35.40, so the
+    head region genuinely regenerated from pure noise with no cap in its
+    starting point), and grounding_px all the way down to 256 with the
+    effective value confirmed moving on every arm. That is every path by
+    which the scene reaches the sampler.
+
+    So nothing is structurally PINNING the cap. The model is simply not doing
+    what the sentence asks. That is a guidance problem, and none of the
+    guidance knobs have been swept on this route.
+
+    Two arms, both sample-time and neither reloading a model:
+
+    ``cfg`` -- classifier-free guidance, shipped at 1.8. This is the knob that
+    decides how hard the sampler is pulled toward the positive prompt and
+    pushed away from the negative, and the negative already contains "hat,
+    cap, baseball cap, ... brim, visor". At 1.8 that push is gentle. The one
+    recorded cfg measurement on this route (1.0 -> 1.8 moving identity 0.561
+    -> 0.671, the only arm of five that moved at all) says the knob has real
+    authority here; it was simply never taken above 1.8.
+
+    ``ref_boost`` -- the DONOR reference strength, shipped at 5.5. Every sweep
+    so far weakened the scene; none strengthened the donor. The donor head is
+    bare, so a stronger donor attacks the same problem from the other side,
+    and unlike ref_boost_a it has no reason to touch the clothing.
+
+    What to watch. High cfg on a distilled Turbo model is not free: it
+    oversaturates, hardens edges and can burn out highlights, and 8 steps
+    leaves little room to recover. Judge colour and skin texture, not just
+    the hat. A cap removed at cfg=4.5 on a plastic-looking face is not a
+    result.
+
+    No mask, no external model, no reload -- CHECKPOINT-17 closed masks on a
+    measurement, and identity_lora_strength is deliberately NOT swept here
+    because it is part of the model cache key (krea2.py:550), so each value
+    would add a full ~28GB bundle to rt.models and OOM the kernel.
+
+    In-process: a subprocess loads a second copy alongside the kernel's.
+    """
+    import time  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    _warn_if_stale()
+    pipe = load_models()
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    body = Image.open(Path(body_path)).convert("RGB")
+    face = Image.open(Path(face_path)).convert("RGB")
+
+    prev = {k: pipe.cfg.get(k) for k in ("cfg", "ref_boost", "seed")}
+    pipe.cfg["seed"] = int(seed)
+    tiles = [("target", body), ("donor", face)]
+    rows: list[dict[str, Any]] = []
+    try:
+        for cfg_v, rb in arms:
+            pipe.cfg["cfg"] = float(cfg_v)
+            pipe.cfg["ref_boost"] = float(rb)
+            print(f"\n=== cfg={cfg_v} ref_boost={rb} ===\n", flush=True)
+            t0 = time.perf_counter()
+            res = pipe.run(body, face, out_dir=out)
+            wall = time.perf_counter() - t0
+            path = out / f"cfg{cfg_v}_rb{rb}.png"
+            res.image.save(path)
+            tiles.append((f"cfg={cfg_v} rb={rb}", res.image))
+            meta = res.meta or {}
+            rows.append({
+                "requested_cfg": cfg_v, "requested_ref_boost": rb,
+                # Effective values, straight off the sampler. A requested
+                # number that never reached the node is how an earlier arm
+                # produced byte-identical images under a changing log.
+                "effective_cfg": meta.get("cfg"),
+                "effective_ref_boost": meta.get("ref_boost"),
+                "seconds": round(wall, 1), "path": str(path),
+            })
+            print(f"  -> {wall:.0f}s  effective cfg={meta.get('cfg')} "
+                  f"ref_boost={meta.get('ref_boost')}  {path.name}", flush=True)
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                pipe.cfg.pop(k, None)
+            else:
+                pipe.cfg[k] = v
+
+    montage = out / "guidance_montage.png"
+    _strip(tiles, montage)
+    print(f"\nmontage -> {montage}")
+    print(
+        "Judge in this order:\n"
+        "  1. effective_cfg / effective_ref_boost moved on every arm.\n"
+        "     Repeats mean the knob never reached the sampler.\n"
+        "  2. is the cap gone, and is the polo still the polo?\n"
+        "  3. COLOUR AND TEXTURE. High cfg on a distilled Turbo model\n"
+        "     oversaturates and hardens edges, and 8 steps cannot recover.\n"
+        "     A hatless arm with a plastic face is the knob turned too far,\n"
+        "     not a win.",
         flush=True,
     )
     return {"arms": rows, "montage": str(montage)}

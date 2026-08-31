@@ -2571,6 +2571,20 @@ class Krea2IdentityEditPipeline(BasePipeline):
 
         w, h = scene.size
         neg = str(self.cfg.get("negative_prompt", "") or "")
+        # Log it EVERY render, not once. run_simple_full_body sets the
+        # headwear negative into self.cfg permanently, and its own log line is
+        # gated on the value still being empty -- so it prints on the first
+        # render of a kernel and never again, while the value stays active.
+        # Four grounding arms were read without it being visible that a
+        # headwear negative was in play the whole time.
+        print(
+            f"[krea2 negative] cfg={float(self.cfg.get('cfg', 1.8))} "
+            + (f"prompt={neg!r}" if neg.strip() else "prompt=<empty>")
+            + (" (cfg<=1.0 -> classifier-free guidance is OFF and this text "
+               "does nothing)" if float(self.cfg.get("cfg", 1.8)) <= 1.0
+               else ""),
+            flush=True,
+        )
         grounding_px = int(self.cfg.get("grounding_px", 768))
         ref_boost = float(self.cfg.get("ref_boost", 4.0))
         ref_boost_a = float(self.cfg.get("ref_boost_a", 1.0))
@@ -2902,6 +2916,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "ref_boost_a": ref_boost_a,
             "ref_boost_mask_used": used_ref_boost_mask,
             "grounding_px": grounding_px,
+            "negative_prompt": neg,
             "fit_mode": fit_mode,
             "verbose": verbose,
         }
@@ -5077,6 +5092,46 @@ class Krea2IdentityEditPipeline(BasePipeline):
             diag["reason"] = f"{type(exc).__name__}: {exc}"
             return None, diag
 
+    def _measure_donor_baldness(self, face_crop: Image.Image) -> tuple[bool, dict]:
+        """Is the DONOR bald? Decides which headwear-removal wording to use.
+
+        The remove-headwear clause says "the second person's hair is there
+        instead" -- which is a claim about pixels that do not exist when the
+        donor is bald. On a bald donor the model has nothing coherent to
+        draw in place of the removed cap, and the target's original headwear
+        can survive as the path of least resistance. Measured, not assumed:
+        a per-donor check using the same mediapipe hair class the skin
+        harmonizer already loads, so a donor WITH hair still gets the
+        original, already-working wording untouched. This must never become
+        a blanket "everyone is bald" instruction -- that is a documented
+        regression risk, not a hypothetical one.
+
+        Fails closed to False (not bald) on any error or unmeasurable case,
+        so the untested branch is never the default: the existing wording
+        keeps running exactly as it did before this function existed.
+        """
+        diag: dict[str, Any] = {}
+        try:
+            import numpy as np  # noqa: PLC0415
+
+            from headswap.skin_harmonize import (  # noqa: PLC0415
+                _SEM_HAIR,
+                _semantic_category_mask,
+            )
+
+            rgb = pil_to_rgb_np(face_crop)
+            cat = _semantic_category_mask(rgb)
+            if cat is None:
+                diag["reason"] = "segmenter_unavailable"
+                return False, diag
+            hair_frac = float((cat == _SEM_HAIR).mean())
+            thresh = float(self.cfg.get("donor_bald_hair_frac_max", 0.015))
+            diag.update(hair_frac=round(hair_frac, 4), threshold=thresh)
+            return hair_frac < thresh, diag
+        except Exception as exc:  # noqa: BLE001 -- must never break a render
+            diag["reason"] = f"{type(exc).__name__}: {exc}"
+            return False, diag
+
     def run_simple_full_body(
         self, body: Image.Image, face: Image.Image, out_dir: Path | None = None
     ) -> PipelineResult:
@@ -5141,6 +5196,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
             include_shoulders=bool(self.cfg.get("include_shoulders", False)),
             tight_identity_crop=bool(self.cfg.get("tight_identity_crop", True)),
         )
+
+        # Only measured when the headwear-removal clause is actually going
+        # to be used -- the mediapipe hair check is wasted work otherwise.
+        _donor_bald = False
+        if bool(self.cfg.get("simple_full_body_remove_headwear", False)):
+            _donor_bald, _bald_diag = self._measure_donor_baldness(face_crop)
+            if _donor_bald:
+                print(
+                    f"[krea2 headwear] donor measured BALD (hair_frac="
+                    f"{_bald_diag.get('hair_frac')} < "
+                    f"{_bald_diag.get('threshold')}); using bare-head wording "
+                    "instead of claiming hair that is not there",
+                    flush=True,
+                )
+            elif _bald_diag.get("reason"):
+                print(
+                    f"[krea2 headwear] donor hair check unavailable "
+                    f"({_bald_diag['reason']}); using the default hair "
+                    "wording, unchanged",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[krea2 headwear] donor has hair (hair_frac="
+                    f"{_bald_diag.get('hair_frac')}); using the default "
+                    "wording, unchanged",
+                    flush=True,
+                )
 
         # Spell out that the DONOR's hair/hairline replaces the target's,
         # and that the target's headwear goes away. "Replace the head, face
@@ -5278,8 +5361,14 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # _measure_expression_hint's docstring on why measured facts
             # outperform meta-instructions here.
             + (
-                "The first person's hat, cap or head covering is gone, and "
-                "the second person's hair is there instead. "
+                (
+                    "The first person's hat, cap or head covering is gone, "
+                    "and the second person's bare head is there instead -- "
+                    "there is no hair on it, it is bald. "
+                    if _donor_bald else
+                    "The first person's hat, cap or head covering is gone, "
+                    "and the second person's hair is there instead. "
+                )
                 if bool(self.cfg.get("simple_full_body_remove_headwear", False))
                 else ""
             )
@@ -6582,6 +6671,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # investigation returned byte-identical results while the log
             # showed the setting changing.
             "grounding_px": sample_meta.get("grounding_px"),
+            "cfg": sample_meta.get("cfg"),
+            "ref_boost_a": sample_meta.get("ref_boost_a"),
+            "negative_prompt": sample_meta.get("negative_prompt"),
             "pre_edit_donor_expression": pre_edit_expr_diag,
             "face_refine": refine_diag,
             "body_restore": body_restore_diag,

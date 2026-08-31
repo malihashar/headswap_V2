@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 KREA2 = (ROOT / "src" / "headswap" / "pipelines" / "krea2.py").read_text()
 
 
-def _assemble(remove_headwear: bool) -> str:
+def _assemble(remove_headwear: bool, donor_bald: bool = False) -> str:
     """Build the prompt exactly as run_simple_full_body does."""
     i = KREA2.find("prompt = _prompt_override or (")
     j = KREA2.find("\n        # Print the prompt that will actually be used", i)
@@ -39,6 +39,10 @@ def _assemble(remove_headwear: bool) -> str:
         # T4's default path: the skin sentence is kept.
         # It is dropped only for a subject with no visible skin.
         "_drop_skin_clause": False,
+        # Bald-donor wording (see test_donor_baldness_headwear_wording.py):
+        # False reproduces the original, already-working sentence exactly;
+        # True selects the bare-head branch for a donor with no hair.
+        "_donor_bald": donor_bald,
         "self": type("C", (), {
             "cfg": {"simple_full_body_remove_headwear": remove_headwear}
         })(),
@@ -82,3 +86,18 @@ def test_override_still_wins():
     """A caller-supplied prompt must not get the clause spliced into it."""
     i = KREA2.find("prompt = _prompt_override or (")
     assert i > 0, "the override must short-circuit the whole assembled prompt"
+
+
+def test_bald_donor_gets_bare_head_wording_not_hair():
+    p = _assemble(True, donor_bald=True)
+    assert "there is no hair on it, it is bald" in p
+    assert "the second person's hair is there instead" not in p
+
+
+def test_non_bald_donor_wording_is_unaffected_by_the_bald_branch():
+    """The False path must produce EXACTLY what it produced before the
+    bald-donor branch was added -- same length as the original 4-arm sweep
+    measured (CHECKPOINT-16)."""
+    p_default = _assemble(True, donor_bald=False)
+    assert "the second person's hair is there instead" in p_default
+    assert "it is bald" not in p_default
