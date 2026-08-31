@@ -24,7 +24,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-_STATE: dict[str, Any] = {"pipe": None, "cfg": None, "warm": False}
+_STATE: dict[str, Any] = {"pipe": None, "cfg": None, "warm": False,
+                          "head": None}
 
 DEFAULTS = {
     "driving_multiplier": 0.8,
@@ -62,6 +63,44 @@ DEFAULTS = {
 def _repo() -> Path:
     return Path(__file__).resolve().parents[2]
 
+
+
+def _git_head() -> str:
+    """Short HEAD of the repo, or "" if it cannot be read."""
+    import subprocess  # noqa: PLC0415
+
+    try:
+        return subprocess.run(
+            ["git", "-C", str(_repo()), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _warn_if_stale() -> None:
+    """Shout if the checkout moved after the models were loaded.
+
+    Cell 1 pulls and re-imports; Cell 3 does neither, so running Cell 3 alone
+    re-executes whatever is already in the kernel. That is invisible in the
+    output -- the run looks normal and prints plausible numbers.
+
+    It cost a full render to notice: a fix that changes which pixels are
+    sampled came back with byte-identical values (53.0% and 5.5%) to the run
+    before it, which is only possible if the new code never loaded.
+    """
+    loaded = _STATE.get("head")
+    now = _git_head()
+    if loaded and now and loaded != now:
+        print(
+            "\n" + "!" * 70 +
+            f"\n[chain] STALE CODE: models were loaded at {loaded}, but the "
+            f"checkout is now {now}."
+            "\n[chain] This run is using the OLD code. Re-run Cell 1 to "
+            "reload, or its results mean nothing."
+            "\n" + "!" * 70 + "\n",
+            flush=True,
+        )
 
 def load_models(
     *,
@@ -125,6 +164,7 @@ def load_models(
         # and length alone moves face fraction on this route.
         cfg["simple_full_body_protect_garments"] = True
     _STATE["cfg"] = cfg
+    _STATE["head"] = _git_head()
     _STATE["pipe"] = create_pipeline(
         cfg, runtime=get_shared_krea2_runtime(init_custom_nodes=True)
     )
@@ -252,6 +292,7 @@ def run_chain(
     """
     from PIL import Image  # noqa: PLC0415
 
+    _warn_if_stale()
     pipe = load_models()
     if erase_headwear_first is None:
         erase_headwear_first = bool(DEFAULTS["erase_headwear"])
