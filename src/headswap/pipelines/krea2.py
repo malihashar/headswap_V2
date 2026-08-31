@@ -5450,19 +5450,175 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 flush=True,
             )
 
-        with _stage(timings, "sampling"):
-            sample_meta = self._sample_edit(
-                rt,
-                bundle,
-                body_full,
-                face_crop,
-                timings,
-                prompt=prompt,
-                edit_cache_info=edit_cache_info,
+        # EXPERIMENT E1 on T4: sampling-time containment.
+        #
+        # The cap survives every global lever because the scene reaches the
+        # sampler through THREE conditioning paths and only one of them has a
+        # strength knob:
+        #   1. source_image/source_latent on Krea2EditModelPatch  (ref_boost_a)
+        #   2. the img2img seed -- at denoise=0.85 latent_image IS the scene
+        #   3. Krea2EditGroundedEncode's VLM grounding on the scene
+        # Measured: ref_boost_a 1.0/0.6/0.3 (default is 1.6) left the cap
+        # untouched at every value while 0.3 wrecked the shirt, so carrier 1
+        # is not what holds it. Four prompt wordings failed too (CHECKPOINT-16).
+        #
+        # What is actually needed is SPATIAL, which no global knob expresses:
+        # regenerate the head region from pure noise so no cap exists in its
+        # starting point, and pin everything else to the source.
+        #
+        # noise_mask does exactly that, and is neither a compositing mask nor
+        # inpainting: ComfyUI re-pins every latent OUTSIDE the mask to the
+        # source at every step, so there is no composite and no boundary --
+        # the CHECKPOINT-07 ghost class cannot occur. Outside the mask the
+        # output should be near pixel-identical to the input, which is a
+        # STRONGER clothing guarantee than denoise=0.85 gives today.
+        #
+        # denoise=1.0 is safe here specifically because the mask exists:
+        # Krea2 is ModelType.FLUX, so noise_scaling multiplies latent_image by
+        # (1 - sigma) = 0 at sigma_max. The starting noise is bit-identical to
+        # the empty-latent case; the encoded latent's only role is to make the
+        # mask pin functional (see _sample_edit's docstring).
+        #
+        # Same pattern as the skin-repaint pass below, which is the INVERSE
+        # mask -- it pins the head so the body can change; this pins the body
+        # so the head can.
+        _contain = bool(self.cfg.get("simple_full_body_containment", False))
+        _contain_mask = None
+        _contain_diag: dict[str, Any] = {"applied": False}
+        if _contain:
+            try:
+                _cf, _ = select_face_box(
+                    pil_to_rgb_np(body_full), self.cache_dir,
+                    index=0, policy="largest",
+                )
+            except Exception as exc:  # noqa: BLE001
+                _cf, _contain_diag["reason"] = None, f"face_detect_failed: {exc}"
+            if _cf is None:
+                _contain_diag.setdefault("reason", "no_face_detected")
+            else:
+                # ELLIPSE ONLY. head_matte intersects a person matte that
+                # returns ZERO foreground for rigid headwear (CHECKPOINT-07,
+                # confirmed by alpha_max_in_crown=0), which would chop the cap
+                # straight out of the region we are trying to regenerate.
+                #
+                # top_extend stays at mask_top_extend's tuned 1.30. It was
+                # REDUCED from 1.55 because on tall headwear "Krea2 fails to
+                # continue the hat's own color/shape in the outer ~1/3 of the
+                # extended region", and headwear_erase.py records that every
+                # attempt pairing removal with an enlarged mask "blew up into
+                # a glowing oval". If 1.30 does not cover the crown, that is a
+                # finding to report, not a number to raise.
+                _contain_mask, _cm_info = build_head_hair_mask(
+                    body_full,
+                    self.cache_dir,
+                    backend="ellipse",
+                    face_box=_cf,
+                    expand_px=int(self.cfg.get("mask_expand_px", 18)),
+                    blur_px=int(self.cfg.get("mask_blur_px", 12)),
+                    top_extend=float(self.cfg.get("mask_top_extend", 1.30)),
+                    side_extend=float(self.cfg.get("mask_side_extend", 0.60)),
+                    bot_extend=float(self.cfg.get("mask_bot_extend", 0.40)),
+                )
+                import numpy as _np_c  # noqa: PLC0415
+
+                _cov = float(
+                    (_np_c.asarray(_contain_mask.convert("L")) > 127).mean()
+                )
+                _contain_diag = {
+                    "applied": True, "coverage": round(_cov, 4),
+                    "backend": _cm_info.get("backend"),
+                    "top_extend": float(self.cfg.get("mask_top_extend", 1.30)),
+                }
+                print(
+                    f"[krea2 containment] head region = {_cov:.1%} of frame "
+                    f"(backend={_cm_info.get('backend')}); inside it denoise=1.0 "
+                    "so nothing of the original head -- including headwear -- "
+                    "is in the starting point. Outside is pinned to source.",
+                    flush=True,
+                )
+                if out_dir is not None:
+                    _cd = Path(out_dir)
+                    _cd.mkdir(parents=True, exist_ok=True)
+                    _contain_mask.convert("L").save(_cd / "containment_mask.png")
+
+        _prev_cont = self.cfg.get("sampling_containment")
+        _prev_dn = self.cfg.get("denoise")
+        if _contain_mask is not None:
+            self.cfg["sampling_containment"] = True
+            self.cfg["denoise"] = float(
+                self.cfg.get("containment_denoise", 1.0)
             )
+        try:
+            with _stage(timings, "sampling"):
+                sample_meta = self._sample_edit(
+                    rt,
+                    bundle,
+                    body_full,
+                    face_crop,
+                    timings,
+                    prompt=prompt,
+                    edit_cache_info=edit_cache_info,
+                    edit_mask=_contain_mask,
+                )
+        finally:
+            # Restore before face_refine, which must NOT run contained.
+            for _k, _v in (("sampling_containment", _prev_cont),
+                           ("denoise", _prev_dn)):
+                if _v is None:
+                    self.cfg.pop(_k, None)
+                else:
+                    self.cfg[_k] = _v
         out = sample_meta["edited"]
         if out.size != body_full.size:
             out = out.resize(body_full.size, Image.Resampling.LANCZOS)
+
+        if _contain_mask is not None:
+            # Report the OUTCOME, not the intent. Three separate times this
+            # session an instrument printed what was requested rather than
+            # what happened, and runs were spent interpreting it.
+            #
+            # inside  -- if this is ~0 the mask did nothing. yaml:738-740
+            #            warns distilled/Turbo LoRAs have been reported to
+            #            make noise_mask a silent no-op on other flow DiTs,
+            #            and Krea2 Turbo is distilled. That would invalidate
+            #            the approach, not the tuning: check it FIRST.
+            # outside -- the clothing guarantee, as a number. Should be ~0
+            #            because KSamplerX0Inpaint re-pins those latents to
+            #            the source at every step. This is what ref_boost_a
+            #            0.3 violated when it wrecked the polo.
+            import numpy as _np_d  # noqa: PLC0415
+
+            _a = _np_d.asarray(body_full.convert("RGB"), dtype=_np_d.float32)
+            _b = _np_d.asarray(out.convert("RGB"), dtype=_np_d.float32)
+            _m = (
+                _np_d.asarray(
+                    _contain_mask.convert("L").resize(
+                        body_full.size, Image.Resampling.BILINEAR
+                    )
+                )
+                > 127
+            )
+            _d = _np_d.abs(_a - _b).mean(axis=2)
+            _in = float(_d[_m].mean()) if _m.any() else float("nan")
+            _out_ = float(_d[~_m].mean()) if (~_m).any() else float("nan")
+            _contain_diag.update(
+                {"mean_abs_diff_inside": round(_in, 2),
+                 "mean_abs_diff_outside": round(_out_, 2)}
+            )
+            print(
+                f"[krea2 containment] mean|diff| inside={_in:.2f} "
+                f"outside={_out_:.2f} (0-255). "
+                + (
+                    "INSIDE ~0 -> noise_mask did nothing; this is the "
+                    "documented Turbo no-op, not a tuning problem."
+                    if _in < 1.0
+                    else "outside ~0 -> clothing/background held by the pin."
+                    if _out_ < 1.0
+                    else "OUTSIDE is NOT ~0 -> the pin is not holding; "
+                    "expect clothing/background drift."
+                ),
+                flush=True,
+            )
 
         refine_diag: dict[str, Any] = {"applied": False}
         selected_face: FaceBox | None = None
@@ -6557,6 +6713,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "loras_loaded": sample_meta.get("loras_loaded"),
             "ref_boost": sample_meta.get("ref_boost"),
             "pre_edit_donor_expression": pre_edit_expr_diag,
+            "containment": _contain_diag,
             "face_refine": refine_diag,
             "body_restore": body_restore_diag,
             "expression_hint": expression_diag,

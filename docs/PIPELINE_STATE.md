@@ -618,3 +618,96 @@ kernel. One "fix" returned byte-identical numbers (53.0%/5.5%) to the run
 before it, which is only possible if the new code never loaded. `run_chain`
 now compares HEAD at load time against HEAD at run time and prints a banner
 when they differ. Verify a number MOVED before interpreting it.
+
+---
+
+## CHECKPOINT-17 — Sampling-time containment (E1) wired into T4 — UNVERIFIED
+
+**Status: shipped, default OFF, not yet run on GPU.** Everything below is
+mechanism and prediction. Do not cite it as a result.
+
+### Why every global lever failed
+
+The scene reaches the sampler through **three** conditioning carriers, and
+only one of them has a strength knob:
+
+| # | carrier | code | affected by `ref_boost_a`? |
+|---|---|---|---|
+| 1 | `source_image`/`source_latent` on `Krea2EditModelPatch` | `krea2.py:2644-2651` | yes |
+| 2 | img2img seed — at `denoise=0.85`, `latent_image` **is** the encoded scene | `krea2.py:2731+` | no |
+| 3 | `Krea2EditGroundedEncode` VLM grounding on `image=scene_t` | `krea2.py:2679-2687` | no |
+
+Measured: `ref_boost_a` at 1.0 / 0.6 / 0.3 (shipped default **1.6**) left the
+cap untouched at every value, while 0.3 wrecked the polo. An ~80% cut to
+carrier 1 that changes the hat not at all is strong evidence carrier 1 is not
+what holds it. Four prompt wordings failed too (CHECKPOINT-16).
+
+The requirement is **spatial**, which no global scalar can express: the head
+region must regenerate from noise (so no cap exists in its starting point)
+while everything else stays pinned.
+
+### What was wired
+
+`_sample_edit` already supported this (EXPERIMENT E1, `krea2.py:2707-2730`);
+nothing on T4's main pass had ever passed `edit_mask`. Now
+`run_simple_full_body` builds an **ellipse** head region and calls the main
+`_sample_edit` with `sampling_containment=True` and `denoise=1.0`, restored in
+a `finally` so `face_refine` is unaffected.
+
+- Not a compositing mask and not inpainting. ComfyUI's `KSamplerX0Inpaint`
+  re-pins every latent *outside* the mask to the source **at every step** —
+  there is no composite and no boundary, so CHECKPOINT-07's ghost class
+  cannot occur. Outside the mask, output should be near pixel-identical to
+  input — a *stronger* clothing guarantee than today's 0.85.
+- `denoise=1.0` is safe **because** the mask exists: Krea2 is `ModelType.FLUX`,
+  so `noise_scaling` multiplies `latent_image` by `(1 - sigma) = 0` at
+  sigma_max. The starting noise is bit-identical to the empty-latent case.
+- **`backend="ellipse"` only.** `head_matte` intersects a person matte that
+  returns *zero* foreground for rigid headwear (CHECKPOINT-07,
+  `alpha_max_in_crown=0`) — it would chop the cap out of the very region being
+  regenerated.
+- **`mask_top_extend` stays 1.30.** It was reduced from 1.55 because Krea2
+  "fails to continue the hat's own color/shape in the outer ~1/3", and
+  `headwear_erase.py` records that pairing removal with an enlarged mask
+  "blew up into a glowing oval". If 1.30 does not cover the crown, that is a
+  finding to report, not a number to raise.
+- This is the **inverse** of T4's own skin-repaint pass (`krea2.py:6299+`),
+  which masks the head *out* so the body can change.
+
+### Read the two numbers before the picture
+
+The run now prints `mean|diff|` inside and outside the mask:
+
+- **inside ≈ 0** → `noise_mask` did nothing. The yaml warns distilled/Turbo
+  LoRAs have been reported to make `noise_mask` a silent no-op on other flow
+  DiTs, and Krea2 Turbo is distilled. That invalidates the *approach*, not the
+  tuning — **check this first** and stop there.
+- **outside ≈ 0** → the pin is holding; clothing and background are safe.
+  This is the assertion `ref_boost_a=0.3` violated.
+
+`containment_mask.png` is dumped next to the result. Judge the mask before the
+output.
+
+### Correction: LaMa was never actually tested
+
+Every erase run in that session logged `simple_lama_missing`, so what was
+judged and rejected was the **Telea fallback** at `headwear_dilate_px: 25` — a
+value the code itself calls "more generous than headwear_erase's own defaults
+(dilate 11, feather 3), which were tuned for LaMa." `headwear_erase.py:1-24`
+records the opposite outcome for LaMa proper: it "removes the crown AND the
+stiff side flaps and reconstructs the sky and hairline convincingly." The
+record should not say LaMa was tried and failed. It is excluded here only as
+an external model.
+
+### If E1 fails, in order
+
+1. **Carrier 3** — `Krea2EditGroundedEncode` at `grounding_px=768`, never
+   swept, untouched by every knob tried.
+2. **Carrier 2 alone** — raise `denoise` globally, accepting clothing damage,
+   purely to confirm it is a carrier.
+3. **LaMa properly** — real backend, original tight mask (dilate 11,
+   feather 3). External, so out of scope by instruction, but it is the one
+   option with a recorded measured success and it has never been run.
+
+If the region provably regenerates (inside ≫ 0) and a cap still appears, E1 is
+eliminated: record it and stop rather than reaching for a sixth mechanism.
