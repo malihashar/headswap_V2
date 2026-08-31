@@ -38,6 +38,9 @@ def _assemble(headwear: bool, garments: bool) -> str:
         # only there") fires whenever garments are protected -- see
         # test_torso_clothed_skin_clause.py and test_skin_clause_drop.py.
         "_scope_skin_to_visible": garments,
+        # False path: the measured-location wording is off by default and
+        # never fires here (see test_precise_skin_location.py).
+        "_precise_skin_location": False,
         "self": type("C", (), {"cfg": {
             "simple_full_body_remove_headwear": headwear,
             "simple_full_body_protect_garments": garments,

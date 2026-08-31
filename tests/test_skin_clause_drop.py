@@ -46,6 +46,9 @@ def _assemble(drop: bool, headwear: bool = False) -> str:
         "_expr_inline": "",
         "_drop_skin_clause": drop,
         "_scope_skin_to_visible": drop,
+        # Measured-location wording (see test_precise_skin_location.py): off
+        # by default, never fires in this file's tests.
+        "_precise_skin_location": False,
         "self": type("C", (), {"cfg": {
             "simple_full_body_remove_headwear": headwear,
             "simple_full_body_protect_garments": False,

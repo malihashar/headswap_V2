@@ -42,6 +42,9 @@ def _assemble(remove_headwear: bool, donor_bald: bool = False,
         # there") instead of the enumerated one. False (T4's default path)
         # reproduces the original, already-working sentence exactly.
         "_scope_skin_to_visible": scope_skin_to_visible,
+        # Measured-location wording (see test_precise_skin_location.py): off
+        # by default, never fires in this file's tests.
+        "_precise_skin_location": False,
         # Bald-donor wording (see test_donor_baldness_headwear_wording.py):
         # False reproduces the original, already-working sentence exactly;
         # True selects the bare-head branch for a donor with no hair.

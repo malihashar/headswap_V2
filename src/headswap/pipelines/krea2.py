@@ -5209,6 +5209,106 @@ class Krea2IdentityEditPipeline(BasePipeline):
             diag["reason"] = f"{type(exc).__name__}: {exc}"
             return None, diag
 
+    def _measure_bare_skin_is_compact(
+        self, body_full: Image.Image
+    ) -> tuple[bool | None, dict]:
+        """Is the visible bare skin below the face a SMALL, CONTAINED blob
+        (e.g. praying hands), rather than large/spread-out (e.g. bare arms)?
+
+        Four attempts at fighting the bleed after the fact have failed: a
+        do-not-expose prohibition (moved it to the sleeves), naming garment
+        types (broke an unrelated case), dropping/scoping the skin-recolour
+        sentence (left genuinely-visible skin with no tone instruction,
+        rendered mismatched -- twice), and a negative-prompt exposure guard
+        (no measurable effect; the positive "recolour the already-bare skin"
+        instruction has no negative-prompt opponent the way headwear removal
+        did, because there IS an active positive instruction pulling toward
+        drawing skin here).
+
+        The actual cause, per this codebase's own repeated finding, is
+        AMBIGUITY: the default prompt names body parts ("the neck, arms,
+        hands and legs") generically, so on a photo where only a small area
+        is genuinely bare, the model has no precise boundary for "already
+        bare" and bleeds recolouring into whatever fabric is adjacent. This
+        measures whether that ambiguity applies to THIS photo, so the prompt
+        can state a MEASURED FACT about where the skin actually is instead
+        of an enumerated list that may not match -- the one prompt mechanism
+        already proven to work elsewhere in this file (expression hints,
+        bald-donor wording) rather than a prohibition, an enumeration, or a
+        negative-prompt repulsion term, none of which have worked here.
+
+        True only when the visible skin is both a small FRACTION of the
+        region below the face AND spatially COMPACT (a small bounding box,
+        not spread across the frame) -- a hands-at-chest pose scores true; a
+        genuinely bare-armed subject (large area, wide bounding box) scores
+        false, so this cannot fire on the case that must not regress.
+
+        None on any failure or when skin coverage is ambiguous, so the
+        caller falls back to the existing enumerated wording -- never
+        breaks a render, never overrides a case this cannot measure clearly.
+        """
+        diag: dict[str, Any] = {}
+        try:
+            import numpy as np  # noqa: PLC0415
+
+            from headswap.skin_harmonize import (  # noqa: PLC0415
+                _semantic_skin_mask,
+                semantic_person_mask,
+            )
+
+            rgb = pil_to_rgb_np(body_full)
+            box = detect_best_face(rgb, self.cache_dir)
+            if box is None:
+                diag["reason"] = "no_face_detected"
+                return None, diag
+            h, w = rgb.shape[:2]
+            fh = max(1, box.y1 - box.y0)
+            y0 = min(h - 1, int(box.y1 + 0.05 * fh))
+            if y0 >= h - 2:
+                diag["reason"] = "region_degenerate"
+                return None, diag
+
+            skin = _semantic_skin_mask(rgb)
+            person = semantic_person_mask(rgb)
+            if skin is None or person is None:
+                diag["reason"] = "segmenter_unavailable"
+                return None, diag
+
+            skin_below = (skin[y0:h] > 0.5) & (person[y0:h] > 0.5)
+            person_below = person[y0:h] > 0.5
+            n_person = float(person_below.sum())
+            if n_person < 200:
+                diag["reason"] = f"too_little_person_below_face:{int(n_person)}"
+                return None, diag
+
+            skin_px = int(skin_below.sum())
+            skin_frac = float(skin_px / n_person)
+            small_frac_max = float(
+                self.cfg.get("bare_skin_compact_max_frac", 0.15)
+            )
+            diag.update(skin_px=skin_px, skin_frac=round(skin_frac, 4))
+            if skin_px < 200:
+                diag["reason"] = "too_little_skin_to_measure_shape"
+                return None, diag
+            if skin_frac > small_frac_max:
+                diag["compact"] = False
+                diag["reason"] = f"skin_frac_too_large:{skin_frac:.3f}"
+                return False, diag
+
+            ys, xs = np.where(skin_below)
+            bbox_h = int(ys.max() - ys.min()) if ys.size else 0
+            bbox_w = int(xs.max() - xs.min()) if xs.size else 0
+            max_extent = float(self.cfg.get("bare_skin_compact_max_face_h", 1.6))
+            diag.update(bbox_h=bbox_h, bbox_w=bbox_w, face_h=fh)
+            compact = bbox_h <= max_extent * fh and bbox_w <= max_extent * fh
+            diag["compact"] = compact
+            if not compact:
+                diag["reason"] = "skin_bbox_too_spread_out"
+            return compact, diag
+        except Exception as exc:  # noqa: BLE001 -- must never break a render
+            diag["reason"] = f"{type(exc).__name__}: {exc}"
+            return None, diag
+
     def _measure_donor_baldness(self, face_crop: Image.Image) -> tuple[bool, dict]:
         """Is the DONOR bald? Decides which headwear-removal wording to use.
 
@@ -5427,6 +5527,38 @@ class Krea2IdentityEditPipeline(BasePipeline):
                       f"({_sd.get('reason')}); torso_clothes_frac="
                       f"{_td.get('clothes_frac', _td.get('reason'))}", flush=True)
 
+        # Four ways of fighting the bleed AFTER the fact have failed (see
+        # _measure_bare_skin_is_compact's docstring for the full history).
+        # This asks a different question: is the ambiguity that CAUSES the
+        # bleed even present in this photo? If the bare skin is a small,
+        # contained blob, state that as a MEASURED FACT and let the model
+        # recolour precisely that, instead of an enumerated list of body
+        # parts that invites it to guess a boundary.
+        _precise_skin_location = False
+        _pskin_diag: dict = {}
+        if bool(self.cfg.get("simple_full_body_precise_skin_location", False)):
+            _pskin_compact, _pskin_diag = self._measure_bare_skin_is_compact(
+                body_full
+            )
+            _precise_skin_location = bool(_pskin_compact)
+            if _precise_skin_location:
+                print(
+                    "[krea2 precise_skin] compact bare-skin blob detected "
+                    f"(skin_frac={_pskin_diag.get('skin_frac')} "
+                    f"bbox_h={_pskin_diag.get('bbox_h')} "
+                    f"bbox_w={_pskin_diag.get('bbox_w')} vs face_h="
+                    f"{_pskin_diag.get('face_h')}) -- stating its location "
+                    "as a fact instead of enumerating body parts",
+                    flush=True,
+                )
+            else:
+                print(
+                    "[krea2 precise_skin] not compact/measurable "
+                    f"({_pskin_diag.get('reason')}) -- using the default "
+                    "enumerated wording",
+                    flush=True,
+                )
+
         _prompt_override = str(self.cfg.get("simple_full_body_prompt", "") or "").strip()
         # Measured, INLINE variant of the expression hint. CHECKPOINT-13's
         # hint used the same measurement (mouth width/openness from
@@ -5542,6 +5674,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # expose, and unlike a full drop this still tells the model what
             # tone to use on skin (e.g. praying hands) that is already bare.
             + (
+                "Second: only a small area of skin near the middle of the "
+                "body, at chest height, is already bare in the first image "
+                "-- change the colour of just that small area to the skin "
+                "colour of the person in the second image, and leave every "
+                "other part of the body exactly as it already appears"
+                if _precise_skin_location
+                else
                 "Second: change the skin colour to the skin colour of the "
                 "person in the second image, wherever skin is already "
                 "visible in the first image and only there -- if very little "
@@ -5675,6 +5814,19 @@ class Krea2IdentityEditPipeline(BasePipeline):
         # additive OR) used by skip_skin_clause_when_covered, so an
         # already-bare-armed subject -- which legitimately needs skin
         # exposed and must not regress -- never receives these tokens.
+        #
+        # Measured on GPU: "exposed torso, bare chest, ... nudity" had no
+        # measurable effect and the render still came back fully shirtless.
+        # The likely reason: those are SKIN-state words, and the positive
+        # prompt's "Second:" sentence is ALSO actively asking for skin to
+        # appear nearby (the genuinely-bare hands) -- headwear removal had
+        # no positive-prompt opponent pulling toward a hat, but this bleed
+        # does have one pulling toward skin, so a skin-state negative term
+        # fights its own positive prompt as much as the bug. Retargeted to
+        # GARMENT-state words instead (clothing disappearing is the actual
+        # failure), which do not overlap with "recolour the already-bare
+        # hands" at all -- the two instructions now point at different
+        # concepts instead of the same one from opposite directions.
         _neg_clauses: list[str] = []
         if not _prompt_override and bool(
             self.cfg.get("simple_full_body_remove_headwear", False)
@@ -5694,8 +5846,8 @@ class Krea2IdentityEditPipeline(BasePipeline):
             _ngp_torso_covered = bool(_ngp_tc)
             if _ngp_skin_covered or _ngp_torso_covered:
                 _neg_clauses.append(
-                    "exposed torso, bare chest, exposed stomach, "
-                    "shirtless, nudity"
+                    "missing clothing, garment removed, robe missing, "
+                    "sleeves missing, undressed, disrobed"
                 )
                 print(
                     "[krea2 garment_negative] covered subject detected "
