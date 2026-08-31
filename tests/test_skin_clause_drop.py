@@ -77,14 +77,14 @@ def test_measurement_compares_against_the_subjects_own_face():
     read as clothing."""
     i = KREA2.find("def _measure_visible_skin(")
     assert i > 0
-    body = KREA2[i:i + 3200]
+    body = KREA2[i:KREA2.find('\n    def ', i + 10)]
     assert "np.median(lab[fy0:fy1, fx0:fx1]" in body
     assert "body[:, 1:] - ref[1:]" in body
 
 
 def test_measurement_never_breaks_a_render():
     i = KREA2.find("def _measure_visible_skin(")
-    assert "must never break a render" in KREA2[i:i + 3200]
+    assert "must never break a render" in KREA2[i:KREA2.find('\n    def ', i + 10)]
 
 
 def test_chain_enables_it_and_leaves_add_words_off():

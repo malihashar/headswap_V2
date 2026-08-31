@@ -5032,11 +5032,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 diag["reason"] = "face_box_degenerate"
                 return None, diag
             ref = np.median(lab[fy0:fy1, fx0:fx1].reshape(-1, 3), axis=0)
+            # Restrict to a COLUMN around the subject, not the full width.
+            #
+            # Sampling the whole rectangle below the chin measures the
+            # BACKGROUND, and backgrounds are not neutral: desert sand sits
+            # almost exactly on skin hue. Measured, and it inverted both
+            # answers -- a fully robed subject in a desert scored 53% "bare
+            # skin" (sand), while a tennis player with bare arms against a
+            # dark blurred court scored 5.5%. So the clause was kept for the
+            # covered subject and dropped for the bare one, the exact
+            # opposite of the intent.
+            #
+            # A band of a few face-widths centred on the face is roughly the
+            # subject's own silhouette for both framings, and needs no
+            # segmentation.
             by0 = min(h - 1, int(box.y1))
             if by0 >= h - 2:
                 diag["reason"] = "no_body_below_face"
                 return None, diag
-            body = lab[by0:, :, :].reshape(-1, 3)
+            span = float(self.cfg.get("visible_skin_column_face_widths", 3.0))
+            cx = 0.5 * (box.x0 + box.x1)
+            half = max(1.0, 0.5 * span * box.width)
+            bx0 = max(0, int(cx - half))
+            bx1 = min(w, int(cx + half))
+            if bx1 - bx0 < 4:
+                diag["reason"] = "column_too_narrow"
+                return None, diag
+            diag["column"] = [bx0, bx1, by0, h]
+            body = lab[by0:, bx0:bx1, :].reshape(-1, 3)
             dist = np.linalg.norm(body[:, 1:] - ref[1:], axis=1)
             tol = float(self.cfg.get("visible_skin_ab_tolerance", 12.0))
             frac = float((dist < tol).mean())
