@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Sweep the SWAP's denoise. The structural lever for headwear, mask-free.
+"""Sweep what actually holds the hat: scene-side conditioning, and denoise.
+
+CORRECTION to the earlier reasoning in this file. denoise is NOT the main
+lever, and the arithmetic says so: Krea2 is FLUX-family, so noise scaling is
+sigma*noise + (1-sigma)*latent. At denoise=0.85 the starting latent is
+already 85% noise and only 15% source -- yet clothing, pose and background
+survive almost perfectly. Something other than the img2img seed is doing
+that work.
+
+It is Krea2EditModelPatch, which feeds source_image and source_latent as
+conditioning at EVERY step. That is what pins the scene, and therefore what
+pins the cap. Its strength knob is ref_boost_a (scene side, default 1.0),
+the counterpart to ref_boost (donor side, 5.5).
+
+So this sweeps ref_boost_a primarily, denoise secondarily.
 
 Why denoise and not another prompt or a mask. denoise=0.85 seeds the sampler
 from the SOURCE latent, which is exactly why clothing, pose, framing and
@@ -39,7 +53,10 @@ REPO = Path(__file__).resolve().parents[1]
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pair-dir", default=str(REPO / "data" / "custom" / "chain_pair"))
-    ap.add_argument("--denoise", default="0.85,0.90,0.95")
+    ap.add_argument("--denoise", default="0.85")
+    ap.add_argument("--ref-boost-a", default="1.0,0.6,0.3",
+                    help="scene-side conditioning strength; the knob that "
+                         "actually holds the hat")
     ap.add_argument("--seed", type=int, default=46)
     ap.add_argument("--out-dir", default=str(REPO / "results" / "denoise_sweep"))
     args = ap.parse_args()
@@ -85,21 +102,25 @@ def main() -> int:
                 "simple_full_body_refine_max_face_frac": 0.25})
     pipe = create_pipeline(cfg, runtime=get_shared_krea2_runtime(init_custom_nodes=True))
 
-    values = [float(x) for x in args.denoise.split(",") if x.strip()]
-    print(f"\n=== WARMUP (excluded) ===\n", flush=True)
-    pipe.cfg["denoise"] = values[0]
+    dns = [float(x) for x in args.denoise.split(",") if x.strip()]
+    rbas = [float(x) for x in args.ref_boost_a.split(",") if x.strip()]
+    arms = [(d, r) for d in dns for r in rbas]
+
+    print("\n=== WARMUP (excluded) ===\n", flush=True)
+    pipe.cfg["denoise"], pipe.cfg["ref_boost_a"] = arms[0]
     pipe.run(body, face, out_dir=out)
 
     tiles = [("target", body)]
-    for dn in values:
+    for dn, rba in arms:
         pipe.cfg["denoise"] = dn
-        print(f"\n=== denoise={dn} ===\n", flush=True)
+        pipe.cfg["ref_boost_a"] = rba
+        print(f"\n=== denoise={dn} ref_boost_a={rba} ===\n", flush=True)
         t0 = time.perf_counter()
         res = pipe.run(body, face, out_dir=out)
         wall = time.perf_counter() - t0
-        path = out / f"swap_denoise_{dn}.png"
+        path = out / f"swap_dn{dn}_rba{rba}.png"
         res.image.save(path)
-        tiles.append((f"dn={dn}", res.image))
+        tiles.append((f"dn{dn} rba{rba}", res.image))
         print(f"  -> {wall:.0f}s  {path.name}", flush=True)
 
     _montage(tiles, out / "denoise_montage.png")
