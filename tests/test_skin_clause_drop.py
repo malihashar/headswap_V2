@@ -87,17 +87,27 @@ def test_measurement_never_breaks_a_render():
     assert "must never break a render" in KREA2[i:KREA2.find('\n    def ', i + 10)]
 
 
-def test_chain_leaves_both_approaches_off():
+def test_chain_uses_the_matte_signal_and_not_the_add_words_one():
     """Both are off, for different reasons (CHECKPOINT-16).
 
-    Adding words altered clothing on inputs that were already correct.
-    Dropping the clause is the right shape, but needs a reliable
-    "is this subject covered?" signal, and three attempts all inverted on the
-    two real images -- 53.0/5.5 then 18.0/6.9, covered scoring HIGHER than
-    bare both times. An unreliable verdict silently rewriting the prompt is
-    worse than not having the feature.
+    Adding words altered clothing on inputs that were already correct, so
+    that approach stays off permanently.
+
+    Dropping the clause is the right shape but needs a reliable "is this
+    subject covered?" signal. Three GEOMETRIC attempts inverted (53.0/5.5,
+    then 18.0/6.9 -- covered scoring higher than bare both times) because
+    background and framing dominated. Measuring inside the person matte
+    removes both confounds, so it is enabled again.
     """
-    assert '"skip_skin_clause_when_covered": False' in CHAIN
+    assert '"skip_skin_clause_when_covered": True' in CHAIN, (
+        "re-enabled once the measurement used the person MATTE instead of a "
+        "geometric box -- the box variants inverted because background and "
+        "framing dominated"
+    )
+    assert '"protect_garments": False' in CHAIN, (
+        "the add-words approach stays off: it altered clothing on inputs "
+        "that were previously correct"
+    )
     assert '"protect_garments": False' in CHAIN, (
         "the add-words approach must stay off: it altered clothing on inputs "
         "that were previously correct"

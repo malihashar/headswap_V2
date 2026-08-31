@@ -5032,34 +5032,42 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 diag["reason"] = "face_box_degenerate"
                 return None, diag
             ref = np.median(lab[fy0:fy1, fx0:fx1].reshape(-1, 3), axis=0)
-            # Restrict to a COLUMN around the subject, not the full width.
+            # Restrict to the PERSON, using the segmentation matte.
             #
-            # Sampling the whole rectangle below the chin measures the
-            # BACKGROUND, and backgrounds are not neutral: desert sand sits
-            # almost exactly on skin hue. Measured, and it inverted both
-            # answers -- a fully robed subject in a desert scored 53% "bare
-            # skin" (sand), while a tennis player with bare arms against a
-            # dark blurred court scored 5.5%. So the clause was kept for the
-            # covered subject and dropped for the bare one, the exact
-            # opposite of the intent.
+            # Three geometric approximations all inverted on the two real
+            # images, because background and framing dominate:
+            #   full rectangle below chin : robe 53.0% vs tennis  5.5%
+            #   3 face-widths column      : robe 18.0% vs tennis  6.9%
+            # Covered scored HIGHER than bare both times. Desert sand sits
+            # almost exactly on skin hue; the robed subject's bare praying
+            # hands sit dead-centre below the face; and the tennis player's
+            # face is 30% of frame, so a face-relative column is mostly dark
+            # background and dilutes his genuinely bare arms.
             #
-            # A band of a few face-widths centred on the face is roughly the
-            # subject's own silhouette for both framings, and needs no
-            # segmentation.
+            # No geometric box separates those two, so this uses the actual
+            # silhouette. The matte is a MEASUREMENT input only -- it never
+            # reaches the output image, exactly like body_route's use of it.
             by0 = min(h - 1, int(box.y1))
             if by0 >= h - 2:
                 diag["reason"] = "no_body_below_face"
                 return None, diag
-            span = float(self.cfg.get("visible_skin_column_face_widths", 3.0))
-            cx = 0.5 * (box.x0 + box.x1)
-            half = max(1.0, 0.5 * span * box.width)
-            bx0 = max(0, int(cx - half))
-            bx1 = min(w, int(cx + half))
-            if bx1 - bx0 < 4:
-                diag["reason"] = "column_too_narrow"
+
+            from headswap.segmentation import _person_matte  # noqa: PLC0415
+
+            matte, mreason = _person_matte(body_full)
+            if matte is None:
+                diag["reason"] = f"no_person_matte: {mreason}"
                 return None, diag
-            diag["column"] = [bx0, bx1, by0, h]
-            body = lab[by0:, bx0:bx1, :].reshape(-1, 3)
+            m = np.asarray(matte)
+            if m.shape[:2] != (h, w):
+                m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+            sel = m[by0:, :] > 128
+            n_person = int(sel.sum())
+            diag["person_px_below_face"] = n_person
+            if n_person < 500:
+                diag["reason"] = f"too_little_person_below_face:{n_person}"
+                return None, diag
+            body = lab[by0:, :, :][sel]
             dist = np.linalg.norm(body[:, 1:] - ref[1:], axis=1)
             tol = float(self.cfg.get("visible_skin_ab_tolerance", 12.0))
             frac = float((dist < tol).mean())

@@ -43,16 +43,19 @@ DEFAULTS = {
     # mode (a robed subject can come back shirtless, CHECKPOINT-10
     # known-unfixed) is at least understood and bounded.
     "protect_garments": False,
-    # OFF. The measurement behind it is not reliable -- see CHECKPOINT-16.
-    # Three variants, all inverted on the two real test images, because
-    # framing scale and background swamp the signal. Leaving it enabled means
-    # a wrong verdict silently changes the prompt.
-    "skip_skin_clause_when_covered": False,
+    # ON now that the measurement uses the person MATTE rather than a
+    # geometric box. The three box variants all inverted (CHECKPOINT-16)
+    # because background and framing dominated; the silhouette removes both
+    # confounds. Falls back to keeping the clause when no matte is available.
+    "skip_skin_clause_when_covered": True,
     # OFF. The LaMa/Telea inpaint did remove the hat, but Telea smears
     # rather than reconstructs and the plate's artifacts survived into the
     # final image -- rejected on looks. Headwear is a PROMPT concern on this
     # route now; see the clause inside sentence one of run_simple_full_body.
-    "erase_headwear": False,
+    # ON. Four prompt wordings could not remove a cap (CHECKPOINT-16):
+    # denoise=0.85 seeds from a latent that already contains it. LaMa takes
+    # it out of that latent instead. Guarded -- see headwear_* below.
+    "erase_headwear": True,
     # Telea is cruder than LaMa: it smears inward from the mask edge instead
     # of reconstructing, so a mask that merely covers the hat leaves a dark
     # rim of un-erased brim to smear FROM. Both values are more generous
@@ -60,6 +63,13 @@ DEFAULTS = {
     # tuned for LaMa.
     "headwear_dilate_px": 25,
     "headwear_feather_px": 11,
+    # Mask clamp: headwear sits above and beside the head, never below the
+    # chin. Bounds are in face-box units so they scale with framing.
+    "headwear_up_face_heights": 1.6,
+    "headwear_side_face_widths": 0.9,
+    # Refuse to inpaint above this share of the frame -- a runaway mask is
+    # worse than a surviving hat, because LaMa invents whatever it covers.
+    "headwear_coverage_max": 0.30,
     "seed": 46,
 }
 
@@ -347,8 +357,57 @@ def run_chain(
                     body_im, _fb, _matte,
                     dilate_px=int(DEFAULTS["headwear_dilate_px"]),
                 )
+
+                # GUARD 1: clamp the mask to the head region.
+                #
+                # Without this the mask is free to reach into background and
+                # LaMa inpaints scenery, which is the "mask added problems"
+                # failure. Bound it to the face box grown upward and sideways
+                # (headwear sits above and around the head) and hard-stop at
+                # the chin: nothing below the jaw is ever headwear, and the
+                # torso is exactly where a stray erase would be most visible.
+                import numpy as _np2  # noqa: PLC0415
+
+                _m = _np2.asarray(_mask).copy()
+                _H, _W = _m.shape[:2]
+                _fh = max(1, int(_fb.y1) - int(_fb.y0))
+                _fw = max(1, int(_fb.x1) - int(_fb.x0))
+                _up = float(DEFAULTS["headwear_up_face_heights"])
+                _side = float(DEFAULTS["headwear_side_face_widths"])
+                _ty0 = max(0, int(_fb.y0 - _up * _fh))
+                _ty1 = min(_H, int(_fb.y1))          # chin: hard floor
+                _tx0 = max(0, int(_fb.x0 - _side * _fw))
+                _tx1 = min(_W, int(_fb.x1 + _side * _fw))
+                _keep = _np2.zeros_like(_m)
+                _keep[_ty0:_ty1, _tx0:_tx1] = 1
+                _clipped = int((_m > 127).sum())
+                _m = (_m * _keep).astype(_m.dtype)
+                _kept = int((_m > 127).sum())
+                if _clipped != _kept:
+                    print(f"[chain] headwear mask clamped to the head box: "
+                          f"{_clipped} -> {_kept}px (dropped "
+                          f"{_clipped - _kept}px outside it)", flush=True)
+                _mask = _m
+
                 _cov = float((_np.asarray(_mask) > 127).mean())
-                if _cov <= 0.0005:
+                # GUARD 2: refuse an implausible mask.
+                #
+                # Too small means nothing was found. Too large means the mask
+                # ran away -- and a runaway erase is far worse than a
+                # surviving hat, because LaMa will invent whatever it
+                # covered. Headwear on a framed subject is a few percent of
+                # the image; anything past the ceiling is a detection
+                # failure, not a big hat.
+                _cov_max = float(DEFAULTS["headwear_coverage_max"])
+                if _cov > _cov_max:
+                    erase_info.update(
+                        reason=f"mask too large ({_cov:.1%} > {_cov_max:.0%}) "
+                               "- refusing to inpaint, this is a detection "
+                               "failure not a big hat",
+                        coverage=round(_cov, 5))
+                    print(f"[chain] headwear erase REFUSED: {erase_info['reason']}",
+                          flush=True)
+                elif _cov <= 0.0005:
                     erase_info.update(reason="no headwear detected",
                                       coverage=round(_cov, 5))
                 else:
@@ -375,6 +434,15 @@ def run_chain(
                     if erase_info["applied"]:
                         body_im = _plate
                         body_im.save(out / "body_headwear_erased.png")
+                        # GUARD 3: dump the mask itself. When an erase goes
+                        # wrong the plate alone does not say whether the mask
+                        # or the inpaint was at fault.
+                        try:
+                            from PIL import Image as _I2  # noqa: PLC0415
+                            _I2.fromarray(_np2.asarray(_mask)).save(
+                                out / "body_headwear_mask.png")
+                        except Exception:  # noqa: BLE001
+                            pass
                         print(f"[chain] headwear ERASED (coverage={_cov:.3%})"
                               " -> body_headwear_erased.png", flush=True)
         except Exception as exc:  # noqa: BLE001
