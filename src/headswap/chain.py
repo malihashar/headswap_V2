@@ -61,19 +61,6 @@ DEFAULTS = {
     # pressure on the garment is the sampling budget itself. None = keep the
     # config value (0.85).
     "swap_denoise": None,
-    # Sampling-time containment (E1) on the main swap pass.
-    #
-    # The scene reaches the sampler through three conditioning paths and only
-    # one has a strength knob, which is why every global lever failed: a cap
-    # survived ref_boost_a at 1.0/0.6/0.3 (default 1.6) while 0.3 wrecked the
-    # shirt, and four prompt wordings did nothing (CHECKPOINT-16). What is
-    # needed is spatial.
-    #
-    # noise_mask gives that: the head region regenerates from pure noise (no
-    # cap in its starting point) while every latent OUTSIDE it is re-pinned to
-    # the source at every step. Not a composite -- no boundary, so the
-    # CHECKPOINT-07 ghost class cannot occur -- and no external model.
-    "containment": True,
     # OFF. The LaMa/Telea inpaint did remove the hat, but Telea smears
     # rather than reconstructs and the plate's artifacts survived into the
     # final image -- rejected on looks. Headwear is a PROMPT concern on this
@@ -93,6 +80,10 @@ DEFAULTS = {
     # tuned for LaMa.
     "headwear_dilate_px": 25,
     "headwear_feather_px": 11,
+    # Mask clamp: headwear sits above and beside the head, never below the
+    # chin. Bounds are in face-box units so they scale with framing.
+    "headwear_up_face_heights": 1.6,
+    "headwear_side_face_widths": 0.9,
     # Refuse to inpaint above this share of the frame -- a runaway mask is
     # worse than a surviving hat, because LaMa invents whatever it covers.
     "headwear_coverage_max": 0.30,
@@ -147,7 +138,6 @@ def load_models(
     seed: int = 46,
     skip_refine: bool = True,
     remove_headwear: bool = True,
-    containment: bool = True,
     protect_garments: bool = True,
     skip_skin_clause_when_covered: bool = True,
     config_path: str | Path | None = None,
@@ -193,8 +183,6 @@ def load_models(
         # only feeds _append_headwear_policy, which run_simple_full_body
         # never calls.
         cfg["simple_full_body_remove_headwear"] = True
-    if containment:
-        cfg["simple_full_body_containment"] = True
     if skip_skin_clause_when_covered:
         # Drop the skin-recolour sentence on a covered subject instead of
         # adding words to defend the garment -- every add-words attempt
@@ -299,7 +287,6 @@ def warmup(
         remove_headwear=bool(
             kw.get("remove_headwear", DEFAULTS["remove_headwear"])
         ),
-        containment=bool(kw.get("containment", DEFAULTS["containment"])),
         protect_garments=bool(
             kw.get("protect_garments", DEFAULTS["protect_garments"])
         ),
@@ -505,12 +492,6 @@ def run_chain(
         "swap_s": round(swap_s, 2), "lp_s": round(lp_s, 2),
         "total_s": round(total, 2), "lp_applied": lp_used,
         "headwear_erased": erase_info,
-        # Surfaced so Cell 3 can print the OUTCOME numbers rather than the
-        # caller having to scroll the log for them.
-        "containment": (res.meta or {}).get("containment", {}),
-        "containment_mask": (out / "containment_mask.png"
-                             if (out / "containment_mask.png").exists()
-                             else None),
         "was_warm": bool(_STATE["warm"]),
     }
 
