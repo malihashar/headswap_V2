@@ -5162,9 +5162,30 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 if bool(self.cfg.get("simple_full_body_remove_headwear", False))
                 else ""
             )
-            + "Second: change the skin colour of the body -- the neck, arms, "
-            "hands and legs that are already bare -- to the skin colour of "
-            "the person in the second image"
+            # The ENUMERATION is the bug, not the missing prohibition.
+            #
+            # "the neck, arms, hands and legs that are already bare" names
+            # body parts, and this file's own history records where that
+            # leads: "naming body parts as 'bare skin' once made the model
+            # strip a robe". Measured twice now. First a robed subject came
+            # back bare-chested; adding a do-not-expose prohibition fixed the
+            # torso and the model simply moved down the list -- the same robe
+            # came back with the SLEEVES removed, because the clause still
+            # asks for bare arms and long sleeves do not provide any.
+            #
+            # So when garments are protected, stop naming parts at all and
+            # scope the recolour to whatever skin the photo already shows.
+            # Nothing is enumerated, so there is nothing to go and expose.
+            + (
+                "Second: change the skin colour to the skin colour of the "
+                "person in the second image, wherever skin is already "
+                "visible in the first image and only there -- if very little "
+                "skin is visible, recolour only that little"
+                if bool(self.cfg.get("simple_full_body_protect_garments", False))
+                else "Second: change the skin colour of the body -- the neck, "
+                     "arms, hands and legs that are already bare -- to the "
+                     "skin colour of the person in the second image"
+            )
             # Naming the measured tone in words turns "match the other image"
             # (an inference the model may not attend to) into a literal
             # instruction. Set by the A/B runner for variant C; empty

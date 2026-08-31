@@ -70,3 +70,24 @@ def test_chain_opts_in_but_t4_default_does_not():
     assert 'self.cfg.get("simple_full_body_protect_garments", False)' in KREA2
     assert '"protect_garments": True' in CHAIN
     assert 'cfg["simple_full_body_protect_garments"] = True' in CHAIN
+
+
+def test_opt_in_stops_enumerating_body_parts():
+    """The enumeration is the mechanism, not a missing prohibition.
+
+    "the neck, arms, hands and legs that are already bare" names parts, and
+    the model exposes whichever named part is covered so it has something to
+    recolour. Measured twice: a robed subject came back bare-chested; adding
+    a do-not-expose prohibition fixed the torso and the model moved down the
+    list, returning the same robe with the SLEEVES removed.
+    """
+    p = _assemble(False, True)
+    assert "the neck, arms, hands and legs that are already bare" not in p
+    assert "wherever skin is already visible in the first image" in p
+
+
+def test_default_keeps_the_enumeration():
+    """T4's approved 564-char text is unchanged; only opt-in callers differ."""
+    assert "the neck, arms, hands and legs that are already bare" in _assemble(
+        False, False
+    )
