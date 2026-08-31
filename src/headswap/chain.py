@@ -494,3 +494,91 @@ def run_chain(
         "headwear_erased": erase_info,
         "was_warm": bool(_STATE["warm"]),
     }
+
+
+def sweep_scene_conditioning(
+    body_path,
+    face_path,
+    *,
+    out_dir,
+    ref_boost_a=(1.0, 0.6, 0.3),
+    denoise=(0.85,),
+    seed: int = 46,
+):
+    """Sweep scene-side conditioning IN THIS PROCESS, reusing loaded models.
+
+    Runs in-kernel deliberately. As a separate script this OOM'd: the
+    notebook already holds ~28GB of models, and a second process tried to
+    load its own copy into a 40GB card. Reusing the resident models avoids
+    that entirely and skips the reload.
+
+    What is being swept and why. ref_boost_a is the strength of the SCENE
+    reference inside Krea2EditModelPatch, which feeds source_image and
+    source_latent as conditioning at every step. That -- not the img2img
+    seed -- is what pins the scene: at denoise=0.85 the starting latent is
+    already 85% noise and only 15% source, yet clothing and background
+    survive almost perfectly. So scene conditioning is what holds a cap in
+    place, and ref_boost_a is its knob.
+
+    It holds the CLOTHING too, so lowering it loosens both. A hatless arm
+    wearing a different outfit is not a win.
+    """
+    import time  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    pipe = load_models()
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    body = Image.open(Path(body_path)).convert("RGB")
+    face = Image.open(Path(face_path)).convert("RGB")
+
+    prev = {k: pipe.cfg.get(k) for k in ("denoise", "ref_boost_a", "seed")}
+    pipe.cfg["seed"] = int(seed)
+    tiles = [("target", body)]
+    rows = []
+    try:
+        for dn in denoise:
+            for rba in ref_boost_a:
+                pipe.cfg["denoise"] = float(dn)
+                pipe.cfg["ref_boost_a"] = float(rba)
+                print(f"\n=== ref_boost_a={rba} denoise={dn} ===\n", flush=True)
+                t0 = time.perf_counter()
+                res = pipe.run(body, face, out_dir=out)
+                wall = time.perf_counter() - t0
+                path = out / f"rba{rba}_dn{dn}.png"
+                res.image.save(path)
+                tiles.append((f"rba={rba}", res.image))
+                rows.append({"ref_boost_a": rba, "denoise": dn,
+                             "seconds": round(wall, 1), "path": str(path)})
+                print(f"  -> {wall:.0f}s  {path.name}", flush=True)
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                pipe.cfg.pop(k, None)
+            else:
+                pipe.cfg[k] = v
+
+    montage = out / "scene_conditioning_montage.png"
+    _strip(tiles, montage)
+    print(f"\nmontage -> {montage}")
+    print("Judge BOTH: is the hat gone, AND is the clothing still the "
+          "clothing? Scene conditioning holds both.")
+    return {"arms": rows, "montage": str(montage)}
+
+
+def _strip(items, out_path, pad: int = 8, h: int = 420) -> None:
+    from PIL import Image, ImageDraw  # noqa: PLC0415
+
+    tiles = [(lb, im.convert("RGB").resize(
+        (max(1, int(im.width * h / max(1, im.height))), h),
+        Image.Resampling.LANCZOS)) for lb, im in items]
+    W = sum(t.width for _, t in tiles) + pad * (len(tiles) + 1)
+    canvas = Image.new("RGB", (W, h + 26 + pad * 2), (24, 24, 24))
+    d = ImageDraw.Draw(canvas)
+    x = pad
+    for lb, t in tiles:
+        canvas.paste(t, (x, 26 + pad))
+        d.text((x + 2, 6), str(lb), fill=(235, 235, 235))
+        x += t.width + pad
+    canvas.save(out_path)
