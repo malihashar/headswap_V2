@@ -43,7 +43,11 @@ DEFAULTS = {
     # mode (a robed subject can come back shirtless, CHECKPOINT-10
     # known-unfixed) is at least understood and bounded.
     "protect_garments": False,
-    "skip_skin_clause_when_covered": True,
+    # OFF. The measurement behind it is not reliable -- see CHECKPOINT-16.
+    # Three variants, all inverted on the two real test images, because
+    # framing scale and background swamp the signal. Leaving it enabled means
+    # a wrong verdict silently changes the prompt.
+    "skip_skin_clause_when_covered": False,
     # OFF. The LaMa/Telea inpaint did remove the hat, but Telea smears
     # rather than reconstructs and the plate's artifacts survived into the
     # final image -- rejected on looks. Headwear is a PROMPT concern on this

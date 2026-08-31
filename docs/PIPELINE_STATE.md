@@ -544,3 +544,77 @@ The Colab cell should be one line that never changes:
 surprising result by checking the values the run actually PRINTED before
 concluding anything about the model — several conclusions in
 CHECKPOINT-14 had to be softened afterwards for exactly this reason.
+
+---
+
+## CHECKPOINT-16 — Headwear and garment control: what is and is not reachable
+**Status:** ❌ both closed as unreachable by the routes attempted.
+**Defaults:** unchanged. T4's approved 564-char prompt is byte-identical.
+
+### Headwear removal: 4 prompt wordings, none worked
+| attempt | wording | result |
+|---|---|---|
+| 1 | base "anything worn on the head" | cap survived |
+| 2 | appended CRITICAL remove-and-replace clause (943 ch) | cap survived |
+| 3 | as 2, with "keep the clothing" scoped below the neck (958 ch) | cap AND a durag survived |
+| 4 | fact-style sentence moved INTO sentence one (665 ch) | cap survived |
+
+The reason is structural, not lexical. `denoise=0.85` seeds from the SOURCE
+latent, which already contains a large, high-contrast cap, and img2img at
+that setting exists precisely to preserve such structure. Describing what to
+draw does not remove what is already there. A fifth wording is not the
+answer.
+
+`erase_headwear()` (LaMa inpainting, already in the repo) DOES remove it --
+the mask found a cap at 10.1% coverage first try -- but it was rejected on
+output quality. A negative-prompt arm was added and never confirmed firing.
+
+### Garment preservation: adding words always broke something else
+| attempt | result |
+|---|---|
+| do-not-expose prohibition | torso covered, SLEEVES removed instead |
+| drop the body-part enumeration | sleeves back |
+| name "robe, shirt or top" | a tennis POLO rendered as a fluffy bathrobe |
+
+The mechanism is consistent and worth stating plainly: **on this route the
+model draws whatever the prompt names.** The skin clause enumerates "the
+neck, arms, hands and legs that are already bare", a covered subject has
+none, so the model creates some; forbidding one named part just moves the
+exposure to the next one; and naming garment types renders those garments.
+
+### Why "drop the clause instead of adding words" also failed
+Removing the sentence for covered subjects is the right shape -- a shorter
+prompt cannot introduce a garment that was not there. But it needs a
+reliable "is this subject covered?" signal, and three attempts at one all
+inverted on the two real test images:
+
+| variant | robe (covered) | tennis (bare arms) |
+|---|---|---|
+| full rectangle below chin | 53.0% | 5.5% |
+| 3 face-widths column | 18.0% | 6.9% |
+
+Both confounded. Desert sand sits almost exactly on skin hue; the robed
+subject's bare praying hands sit dead-centre below the face; and the tennis
+player's face is 30% of frame, so a face-relative column spans mostly dark
+background and dilutes his genuinely bare arms. Framing scale and pose
+dominate the measurement.
+
+A correct signal needs the person's SILHOUETTE, i.e. segmentation. That was
+explicitly ruled out for this work, so the approach is closed rather than
+mistuned. `skip_skin_clause_when_covered` is default OFF; leaving it on
+would let a wrong verdict silently rewrite the prompt.
+
+### Honest options from here
+1. Accept both (a robed subject may come back shirtless; hats survive).
+2. Allow segmentation for the covered/bare DECISION only -- no output mask.
+3. Allow `erase_headwear()` (LaMa) for hats and tune its quality.
+4. Curate inputs: no hats, no fully-covered subjects.
+
+### Process note that cost the most time
+Roughly a dozen renders were spent on stale code or broken instruments
+rather than on the models: Colab caches cell source in the browser tab, and
+Cell 3 neither pulls nor re-imports, so it re-runs whatever is in the
+kernel. One "fix" returned byte-identical numbers (53.0%/5.5%) to the run
+before it, which is only possible if the new code never loaded. `run_chain`
+now compares HEAD at load time against HEAD at run time and prints a banner
+when they differ. Verify a number MOVED before interpreting it.
