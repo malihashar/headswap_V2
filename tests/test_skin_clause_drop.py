@@ -87,8 +87,17 @@ def test_measurement_never_breaks_a_render():
     assert "must never break a render" in KREA2[i:KREA2.find('\n    def ', i + 10)]
 
 
-def test_chain_enables_it_and_leaves_add_words_off():
-    assert '"skip_skin_clause_when_covered": True' in CHAIN
+def test_chain_leaves_both_approaches_off():
+    """Both are off, for different reasons (CHECKPOINT-16).
+
+    Adding words altered clothing on inputs that were already correct.
+    Dropping the clause is the right shape, but needs a reliable
+    "is this subject covered?" signal, and three attempts all inverted on the
+    two real images -- 53.0/5.5 then 18.0/6.9, covered scoring HIGHER than
+    bare both times. An unreliable verdict silently rewriting the prompt is
+    worse than not having the feature.
+    """
+    assert '"skip_skin_clause_when_covered": False' in CHAIN
     assert '"protect_garments": False' in CHAIN, (
         "the add-words approach must stay off: it altered clothing on inputs "
         "that were previously correct"
