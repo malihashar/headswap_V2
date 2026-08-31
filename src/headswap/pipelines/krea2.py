@@ -5092,6 +5092,90 @@ class Krea2IdentityEditPipeline(BasePipeline):
             diag["reason"] = f"{type(exc).__name__}: {exc}"
             return None, diag
 
+    def _measure_torso_clothed(
+        self, body_full: Image.Image
+    ) -> tuple[bool | None, dict]:
+        """Is the TORSO covered? Second, independent signal for the same
+        "should the skin-recolour clause be dropped" decision.
+
+        _measure_visible_skin asks "what fraction of ALL person-pixels below
+        the face are skin-coloured" across the whole silhouette. That
+        question has a blind spot: praying hands held at chest height are a
+        large, skin-coloured blob positioned dead-centre below the face, and
+        they inflate the fraction past the covered threshold regardless of
+        whether the torso underneath them is bare or fully robed. Measured:
+        13.7% on a subject wearing a full desert robe with only hands and
+        face visible -- well above the 6% cutoff, so the clause was kept and
+        the render came back shirtless. Not a repeat of CHECKPOINT-16's three
+        failed wording attempts; this is a measurement asking the wrong
+        question, not a prompt asking the wrong thing.
+
+        This asks a narrower, more specific question instead: over a
+        shoulder-width band below the face -- wide enough that a hand-sized
+        blob is a small fraction of it, not the whole picture -- what
+        fraction is classified GARMENT by the mediapipe multiclass segmenter?
+        That segmenter distinguishes skin from clothing by more than colour
+        (semantic_clothes_mask's own docstring: "chroma alone cannot do
+        this"), so it does not inherit the colour-matching confound either.
+
+        Returns True only when clothes_frac clears the threshold -- this is
+        additive, an extra way to detect "covered" that _measure_visible_skin
+        already missed, never a way to overrule a case it already gets right.
+        None on any failure, so the caller's existing behaviour is
+        unaffected when this cannot be computed.
+        """
+        diag: dict[str, Any] = {}
+        try:
+            import numpy as np  # noqa: PLC0415
+
+            from headswap.skin_harmonize import (  # noqa: PLC0415
+                semantic_clothes_mask,
+                semantic_person_mask,
+            )
+
+            rgb = pil_to_rgb_np(body_full)
+            box = detect_best_face(rgb, self.cache_dir)
+            if box is None:
+                diag["reason"] = "no_face_detected"
+                return None, diag
+            h, w = rgb.shape[:2]
+            fh = max(1, box.y1 - box.y0)
+            fw = max(1, box.x1 - box.x0)
+            # Shoulder-width, chest-to-waist: wide and tall enough that a
+            # hand-sized region cannot dominate the fraction the way it does
+            # across the WHOLE silhouette in _measure_visible_skin.
+            x0 = max(0, int(box.x0 - 0.6 * fw))
+            x1 = min(w, int(box.x1 + 0.6 * fw))
+            y0 = min(h - 1, int(box.y1 + 0.05 * fh))
+            y1 = min(h, int(box.y1 + 2.2 * fh))
+            if x1 <= x0 + 2 or y1 <= y0 + 2:
+                diag["reason"] = "torso_box_degenerate"
+                return None, diag
+
+            clothes = semantic_clothes_mask(rgb)
+            person = semantic_person_mask(rgb)
+            if clothes is None or person is None:
+                diag["reason"] = "segmenter_unavailable"
+                return None, diag
+            c_box = clothes[y0:y1, x0:x1]
+            p_box = person[y0:y1, x0:x1]
+            n_person = float((p_box > 0.5).sum())
+            if n_person < 200:
+                diag["reason"] = f"too_little_person_in_torso_box:{int(n_person)}"
+                return None, diag
+            clothes_frac = float(
+                ((c_box > 0.5) & (p_box > 0.5)).sum() / n_person
+            )
+            thresh = float(self.cfg.get("torso_clothed_min_frac", 0.5))
+            diag.update(
+                clothes_frac=round(clothes_frac, 4), threshold=thresh,
+                box=[x0, y0, x1, y1], person_px=int(n_person),
+            )
+            return clothes_frac >= thresh, diag
+        except Exception as exc:  # noqa: BLE001 -- must never break a render
+            diag["reason"] = f"{type(exc).__name__}: {exc}"
+            return None, diag
+
     def _measure_donor_baldness(self, face_crop: Image.Image) -> tuple[bool, dict]:
         """Is the DONOR bald? Decides which headwear-removal wording to use.
 
@@ -5277,17 +5361,38 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if bool(self.cfg.get("skip_skin_clause_when_covered", False)):
             _sf, _sd = self._measure_visible_skin(body_full)
             _smin = float(self.cfg.get("visible_skin_min_frac", 0.06))
-            if _sf is not None and _sf < _smin:
+            _skin_says_covered = _sf is not None and _sf < _smin
+            # Second, independent signal -- see _measure_torso_clothed's
+            # docstring. This exists because the skin-fraction measurement
+            # above has a blind spot: hands held at chest height inflate the
+            # whole-silhouette skin fraction past _smin even when the torso
+            # under them is fully covered. Additive OR only -- it can never
+            # turn a case the skin measurement already gets right into a
+            # false "keep".
+            _tc, _td = self._measure_torso_clothed(body_full)
+            _torso_says_covered = bool(_tc)
+            if _skin_says_covered or _torso_says_covered:
                 _drop_skin_clause = True
-                print(f"[krea2 skin_clause] DROPPED - only {_sf:.1%} of the "
-                      f"body below the face matches the face's own colour "
-                      f"(< {_smin:.0%}); this subject is covered", flush=True)
+                _why = []
+                if _skin_says_covered:
+                    _why.append(f"only {_sf:.1%} of the body below the face "
+                                 f"matches the face's own colour (< {_smin:.0%})")
+                if _torso_says_covered:
+                    _why.append(
+                        f"{_td.get('clothes_frac', 0):.1%} of the torso "
+                        f"band is classified GARMENT (>= "
+                        f"{_td.get('threshold', 0):.0%})"
+                    )
+                print(f"[krea2 skin_clause] DROPPED - {'; '.join(_why)}; "
+                      "this subject is covered", flush=True)
             elif _sf is not None:
                 print(f"[krea2 skin_clause] kept - {_sf:.1%} bare skin below "
-                      "the face", flush=True)
+                      f"the face; torso_clothes_frac="
+                      f"{_td.get('clothes_frac', _td.get('reason'))}", flush=True)
             else:
                 print("[krea2 skin_clause] kept - could not measure "
-                      f"({_sd.get('reason')})", flush=True)
+                      f"({_sd.get('reason')}); torso_clothes_frac="
+                      f"{_td.get('clothes_frac', _td.get('reason'))}", flush=True)
 
         _prompt_override = str(self.cfg.get("simple_full_body_prompt", "") or "").strip()
         # Measured, INLINE variant of the expression hint. CHECKPOINT-13's
