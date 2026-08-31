@@ -31,7 +31,17 @@ DEFAULTS = {
     "animation_region": "lip",
     "skip_refine": True,
     "remove_headwear": True,
-    "protect_garments": True,
+    # OFF. Every prompt-side attempt at this made something else worse:
+    #   1. do-not-expose prohibition  -> torso covered, SLEEVES removed
+    #   2. drop the body-part list    -> sleeves back
+    #   3. "robe, shirt or top"       -> a tennis POLO rendered as a fluffy
+    #                                    bathrobe, because naming garment
+    #                                    types injects those concepts
+    # (3) is the same error as (2)'s cause: naming things makes the model
+    # render them. Reverting to T4's approved 564-char prompt, whose failure
+    # mode (a robed subject can come back shirtless, CHECKPOINT-10
+    # known-unfixed) is at least understood and bounded.
+    "protect_garments": False,
     # OFF. The LaMa/Telea inpaint did remove the hat, but Telea smears
     # rather than reconstructs and the plate's artifacts survived into the
     # final image -- rejected on looks. Headwear is a PROMPT concern on this
