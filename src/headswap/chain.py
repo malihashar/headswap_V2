@@ -48,14 +48,31 @@ DEFAULTS = {
     # because background and framing dominated; the silhouette removes both
     # confounds. Falls back to keeping the clause when no matte is available.
     "skip_skin_clause_when_covered": True,
+    # THE structural lever for headwear, and mask-free.
+    #
+    # 0.85 seeds from the SOURCE latent, which is why clothing, pose and
+    # framing survive -- and equally why a cap does: img2img at that setting
+    # exists to preserve exactly that kind of large, high-contrast structure.
+    # Four prompt wordings could not argue it away (CHECKPOINT-16).
+    #
+    # Raising it gives the sampler room to drop the hat. It also loosens the
+    # anchor on clothing, which is why the skin-clause fix above matters
+    # first: it removes the INSTRUCTION to expose skin, so the only remaining
+    # pressure on the garment is the sampling budget itself. None = keep the
+    # config value (0.85).
+    "swap_denoise": None,
     # OFF. The LaMa/Telea inpaint did remove the hat, but Telea smears
     # rather than reconstructs and the plate's artifacts survived into the
     # final image -- rejected on looks. Headwear is a PROMPT concern on this
     # route now; see the clause inside sentence one of run_simple_full_body.
-    # ON. Four prompt wordings could not remove a cap (CHECKPOINT-16):
-    # denoise=0.85 seeds from a latent that already contains it. LaMa takes
-    # it out of that latent instead. Guarded -- see headwear_* below.
-    "erase_headwear": True,
+    # OFF, at Ali's direction. LaMa erase + mask clamping was tried before
+    # this session and rejected: the mask degrades the output, and clamping
+    # it is re-treading ground already known not to work.
+    #
+    # The hat is a STRUCTURAL problem -- denoise=0.85 seeds from a latent
+    # that already contains it -- so it gets a structural fix (see
+    # swap_denoise), not an external inpaint.
+    "erase_headwear": False,
     # Telea is cruder than LaMa: it smears inward from the mask edge instead
     # of reconstructing, so a mask that merely covers the hat leaves a dark
     # rim of un-erased brim to smear FROM. Both values are more generous
@@ -308,6 +325,12 @@ def run_chain(
 
     _warn_if_stale()
     pipe = load_models()
+
+    _dn = kw.get("swap_denoise", DEFAULTS["swap_denoise"])
+    if _dn is not None:
+        pipe.cfg["denoise"] = float(_dn)
+        print(f"[chain] swap denoise overridden to {float(_dn)} "
+              "(config default is 0.85)", flush=True)
     if erase_headwear_first is None:
         erase_headwear_first = bool(DEFAULTS["erase_headwear"])
     out = Path(out_dir)
@@ -357,37 +380,6 @@ def run_chain(
                     body_im, _fb, _matte,
                     dilate_px=int(DEFAULTS["headwear_dilate_px"]),
                 )
-
-                # GUARD 1: clamp the mask to the head region.
-                #
-                # Without this the mask is free to reach into background and
-                # LaMa inpaints scenery, which is the "mask added problems"
-                # failure. Bound it to the face box grown upward and sideways
-                # (headwear sits above and around the head) and hard-stop at
-                # the chin: nothing below the jaw is ever headwear, and the
-                # torso is exactly where a stray erase would be most visible.
-                import numpy as _np2  # noqa: PLC0415
-
-                _m = _np2.asarray(_mask).copy()
-                _H, _W = _m.shape[:2]
-                _fh = max(1, int(_fb.y1) - int(_fb.y0))
-                _fw = max(1, int(_fb.x1) - int(_fb.x0))
-                _up = float(DEFAULTS["headwear_up_face_heights"])
-                _side = float(DEFAULTS["headwear_side_face_widths"])
-                _ty0 = max(0, int(_fb.y0 - _up * _fh))
-                _ty1 = min(_H, int(_fb.y1))          # chin: hard floor
-                _tx0 = max(0, int(_fb.x0 - _side * _fw))
-                _tx1 = min(_W, int(_fb.x1 + _side * _fw))
-                _keep = _np2.zeros_like(_m)
-                _keep[_ty0:_ty1, _tx0:_tx1] = 1
-                _clipped = int((_m > 127).sum())
-                _m = (_m * _keep).astype(_m.dtype)
-                _kept = int((_m > 127).sum())
-                if _clipped != _kept:
-                    print(f"[chain] headwear mask clamped to the head box: "
-                          f"{_clipped} -> {_kept}px (dropped "
-                          f"{_clipped - _kept}px outside it)", flush=True)
-                _mask = _m
 
                 _cov = float((_np.asarray(_mask) > 127).mean())
                 # GUARD 2: refuse an implausible mask.
