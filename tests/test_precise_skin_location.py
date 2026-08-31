@@ -60,16 +60,20 @@ def test_measurement_fails_closed():
     assert body.count("return None, diag") >= 4
 
 
-def test_measurement_uses_dominant_connected_component_not_full_bbox():
-    """Measured on GPU: a naive bounding box over ALL skin pixels below the
-    face stretched from a neck sliver to bare ankles/feet near the bottom
-    of the frame -- 326px tall against a 43px face -- even though the
-    actual hands blob is small and contained. The bbox must be measured on
-    the DOMINANT connected component only, not every skin pixel in the
-    region."""
+def test_measurement_uses_top_components_not_full_bbox():
+    """v1 measured a naive bounding box over ALL skin pixels below the face
+    stretching from a neck sliver to bare ankles/feet near the bottom of the
+    frame -- 326px tall against a 43px face -- even though the hands blob
+    is small and contained. v2 (a single dominant component) then never
+    fired at all: praying hands routinely segment as TWO separate
+    components (the shadow where the palms touch breaks the connection),
+    so neither alone reaches 50% of the skin pixels. The bbox must be the
+    COMBINED extent of the top few components that together explain most
+    of the visible skin, not one component and not every skin pixel."""
     body = _function_body(KREA2, "def _measure_bare_skin_is_compact(")
     assert "connectedComponentsWithStats" in body
-    assert "dominant_frac_of_skin" in body
+    assert "covered_frac_of_skin" in body
+    assert "bare_skin_max_components" in body
 
 
 def test_measurement_uses_semantic_skin_not_colour():

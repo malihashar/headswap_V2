@@ -5296,17 +5296,33 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 diag["reason"] = f"skin_frac_too_large:{skin_frac:.3f}"
                 return False, diag
 
-            # The DOMINANT blob's own extent, not the bounding box of every
-            # skin pixel below the face. Measured on GPU: a single stray
-            # sliver (a bit of neck skin just below the chin, or bare
-            # ankles/feet near the bottom of the frame) sits far from the
-            # actual hands blob, and a naive full-region bounding box
-            # stretches to cover BOTH -- 326px tall against a 43px face on
-            # the real failing case, even though the hands themselves are a
-            # small, contained blob. Connected components isolate the
-            # blob that actually matters and ignore small, distant
-            # satellites the same way restore_stripped_garment's speckle
-            # guard already does for a different mask.
+            # The extent of the FEW blobs that together explain most of the
+            # visible skin, not the bounding box of every skin pixel below
+            # the face and not a single "dominant" blob either.
+            #
+            # v1 (full-region bbox) measured 326px tall against a 43px face
+            # on the real failing case -- a stray sliver of neck skin below
+            # the chin and bare ankles/feet near the bottom of the frame sat
+            # far from the actual hands and stretched the bbox to cover all
+            # of it.
+            #
+            # v2 (single dominant component >=50% of skin_px) then measured
+            # 0.4664 on the same photo and never fired at all: praying hands
+            # pressed together routinely segment as TWO separate components
+            # -- the shadow where the palms touch breaks the connection --
+            # so neither hand alone reaches 50%, even though together they
+            # are exactly the "one small area of skin" this wording
+            # describes.
+            #
+            # So: accumulate the largest components, most-area-first, until
+            # they cover most of the visible skin (coverage_frac), and
+            # measure the COMBINED bounding box of just those -- this
+            # naturally covers "two adjacent hand-blobs" while still
+            # excluding a distant stray sliver that would otherwise never
+            # need to be included to reach the coverage threshold. Capping
+            # how many components may be accumulated (max_components) keeps
+            # this from degrading into the same "cover everything" failure
+            # mode as v1 on a genuinely fragmented/scattered case.
             binary = skin_below.astype(np.uint8)
             n_comp, labels, stats, _ = cv2.connectedComponentsWithStats(
                 binary, connectivity=8
@@ -5314,26 +5330,45 @@ class Krea2IdentityEditPipeline(BasePipeline):
             if n_comp <= 1:
                 diag["reason"] = "no_connected_components"
                 return None, diag
-            areas = stats[1:, cv2.CC_STAT_AREA]
-            dominant_id = 1 + int(np.argmax(areas))
-            dominant_area = int(areas.max())
-            dominant_frac_of_skin = dominant_area / max(1, skin_px)
-            diag["dominant_frac_of_skin"] = round(dominant_frac_of_skin, 4)
-            min_dominant_frac = float(
-                self.cfg.get("bare_skin_dominant_min_frac", 0.5)
+
+            order = np.argsort(stats[1:, cv2.CC_STAT_AREA])[::-1] + 1
+            coverage_frac = float(
+                self.cfg.get("bare_skin_coverage_frac", 0.85)
             )
-            if dominant_frac_of_skin < min_dominant_frac:
-                # No single blob explains most of the visible skin -- e.g.
-                # two separately-bare regions (both hands AND a bare
-                # forearm) -- too ambiguous to describe as "one small area".
+            max_components = int(self.cfg.get("bare_skin_max_components", 3))
+            taken: list[int] = []
+            covered = 0
+            for comp_id in order:
+                if len(taken) >= max_components:
+                    break
+                taken.append(int(comp_id))
+                covered += int(stats[comp_id, cv2.CC_STAT_AREA])
+                if covered / max(1, skin_px) >= coverage_frac:
+                    break
+            covered_frac = covered / max(1, skin_px)
+            diag.update(
+                components_used=len(taken),
+                covered_frac_of_skin=round(covered_frac, 4),
+            )
+            if covered_frac < coverage_frac:
+                # Skin is fragmented across more blobs than max_components
+                # can explain -- genuinely scattered, not "a small area".
                 diag["compact"] = False
-                diag["reason"] = (
-                    f"no_dominant_blob:{dominant_frac_of_skin:.2f}"
-                )
+                diag["reason"] = f"skin_too_fragmented:{covered_frac:.2f}"
                 return False, diag
 
-            bbox_h = int(stats[dominant_id, cv2.CC_STAT_HEIGHT])
-            bbox_w = int(stats[dominant_id, cv2.CC_STAT_WIDTH])
+            x0s = [int(stats[c, cv2.CC_STAT_LEFT]) for c in taken]
+            y0s = [int(stats[c, cv2.CC_STAT_TOP]) for c in taken]
+            x1s = [
+                int(stats[c, cv2.CC_STAT_LEFT] + stats[c, cv2.CC_STAT_WIDTH])
+                for c in taken
+            ]
+            y1s = [
+                int(stats[c, cv2.CC_STAT_TOP] + stats[c, cv2.CC_STAT_HEIGHT])
+                for c in taken
+            ]
+            bbox_h = max(y1s) - min(y0s)
+            bbox_w = max(x1s) - min(x0s)
             max_extent = float(self.cfg.get("bare_skin_compact_max_face_h", 2.5))
             diag.update(bbox_h=bbox_h, bbox_w=bbox_w, face_h=fh)
             compact = bbox_h <= max_extent * fh and bbox_w <= max_extent * fh
