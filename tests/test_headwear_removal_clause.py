@@ -28,7 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 KREA2 = (ROOT / "src" / "headswap" / "pipelines" / "krea2.py").read_text()
 
 
-def _assemble(remove_headwear: bool, donor_bald: bool = False) -> str:
+def _assemble(remove_headwear: bool, donor_bald: bool = False,
+              scope_skin_to_visible: bool = False) -> str:
     """Build the prompt exactly as run_simple_full_body does."""
     i = KREA2.find("prompt = _prompt_override or (")
     j = KREA2.find("\n        # Print the prompt that will actually be used", i)
@@ -36,9 +37,11 @@ def _assemble(remove_headwear: bool, donor_bald: bool = False) -> str:
     ns = {
         "_prompt_override": "",
         "_expr_inline": "",
-        # T4's default path: the skin sentence is kept.
-        # It is dropped only for a subject with no visible skin.
-        "_drop_skin_clause": False,
+        # See test_torso_clothed_skin_clause.py: True selects the SCOPED
+        # skin clause ("wherever skin is already visible... and only
+        # there") instead of the enumerated one. False (T4's default path)
+        # reproduces the original, already-working sentence exactly.
+        "_scope_skin_to_visible": scope_skin_to_visible,
         # Bald-donor wording (see test_donor_baldness_headwear_wording.py):
         # False reproduces the original, already-working sentence exactly;
         # True selects the bare-head branch for a donor with no hair.

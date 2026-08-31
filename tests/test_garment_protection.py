@@ -34,6 +34,10 @@ def _assemble(headwear: bool, garments: bool) -> str:
         # T4's default path: the skin sentence is kept.
         # It is dropped only for a subject with no visible skin.
         "_drop_skin_clause": False,
+        # The scoped wording ("wherever skin is already visible... and
+        # only there") fires whenever garments are protected -- see
+        # test_torso_clothed_skin_clause.py and test_skin_clause_drop.py.
+        "_scope_skin_to_visible": garments,
         "self": type("C", (), {"cfg": {
             "simple_full_body_remove_headwear": headwear,
             "simple_full_body_protect_garments": garments,

@@ -5438,14 +5438,28 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     f"{_expr_inline_diag['reason']}",
                     flush=True,
                 )
+        # A covered subject still needs a skin instruction, just a SAFER one.
+        #
+        # This used to drop the "Second:" sentence entirely for a covered
+        # subject -- correct against the exposure bug (nothing named, nothing
+        # to go expose), but it also removed the ONLY instruction telling the
+        # model to colour-match whatever skin genuinely IS visible (a robed
+        # subject's own praying hands). Measured: hands rendered visibly
+        # darker than the face, mismatched, because nothing told the model
+        # what tone to use on them.
+        #
+        # The scoped wording below ("wherever skin is already visible... and
+        # only there") already exists for exactly this and was previously
+        # opt-in only via simple_full_body_protect_garments. It enumerates no
+        # body parts, so it cannot re-open the exposure bug the drop existed
+        # to prevent -- there is nothing to strip a robe FOR. So a covered
+        # subject now gets this instead of silence, whether or not
+        # protect_garments was explicitly requested.
+        _scope_skin_to_visible = _drop_skin_clause or bool(
+            self.cfg.get("simple_full_body_protect_garments", False)
+        )
         prompt = _prompt_override or (
-            # "Two changes ... First ... Second" only parses as instructions
-            # if the second one is actually there. When the skin sentence is
-            # dropped for a covered subject, promising two and giving one
-            # leaves a dangling contract in the prompt.
-            ("One change: replace the head from the first image with "
-               if _drop_skin_clause else
-               "Two changes. First: replace the head from the first image with ")
+            "Two changes. First: replace the head from the first image with "
             + (
             "the head from the second image completely -- the face, the hair "
             "and anything worn on the head, exactly as they appear in the "
@@ -5488,19 +5502,22 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # came back with the SLEEVES removed, because the clause still
             # asks for bare arms and long sleeves do not provide any.
             #
-            # So when garments are protected, stop naming parts at all and
-            # scope the recolour to whatever skin the photo already shows.
-            # Nothing is enumerated, so there is nothing to go and expose.
-            + ("" if _drop_skin_clause else (
+            # So when garments are protected -- explicitly, or because the
+            # covered-subject measurement fired -- stop naming parts at all
+            # and scope the recolour to whatever skin the photo already
+            # shows. Nothing is enumerated, so there is nothing to go and
+            # expose, and unlike a full drop this still tells the model what
+            # tone to use on skin (e.g. praying hands) that is already bare.
+            + (
                 "Second: change the skin colour to the skin colour of the "
                 "person in the second image, wherever skin is already "
                 "visible in the first image and only there -- if very little "
                 "skin is visible, recolour only that little"
-                if bool(self.cfg.get("simple_full_body_protect_garments", False))
+                if _scope_skin_to_visible
                 else "Second: change the skin colour of the body -- the neck, "
                      "arms, hands and legs that are already bare -- to the "
                      "skin colour of the person in the second image"
-            ))
+            )
             # Naming the measured tone in words turns "match the other image"
             # (an inference the model may not attend to) into a literal
             # instruction. Set by the A/B runner for variant C; empty
@@ -5510,8 +5527,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 if self.cfg.get("simple_full_body_tone_words")
                 else ""
             )
-            + ("" if _drop_skin_clause
-               else ", so the head and body are one person. ")
+            + ", so the head and body are one person. "
             # REVERTED to T4's approved wording.
             #
             # This briefly read "Keep the clothing below the neck ...",

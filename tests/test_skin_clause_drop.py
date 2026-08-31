@@ -1,4 +1,4 @@
-"""On a covered subject, DROP the skin sentence instead of adding words.
+"""On a covered subject, SCOPE the skin sentence instead of dropping it.
 
 The skin-recolour sentence asks to recolour the neck, arms, hands and legs
 "that are already bare". A robed subject has none, so the model exposes some
@@ -11,10 +11,18 @@ Three attempts to fix that by ADDING words each broke something else:
   2. drop the body-part list     sleeves back
   3. "robe, shirt or top"        a tennis POLO rendered as a fluffy bathrobe
 
-On this route the model draws whatever the prompt names. So the fix removes
-words rather than adding them, and because nothing new is named, a subject
-that was already correct cannot change -- which is the property all three
-earlier attempts lacked.
+A fourth attempt REMOVED words instead -- dropping the "Second:" sentence
+entirely for a covered subject. That fixed the exposure bug (nothing named,
+nothing to go expose) but also removed the only instruction telling the
+model to colour-match skin that genuinely IS visible: a robed subject's own
+praying hands came back visibly darker than the face, mismatched, because
+nothing told the model what tone to use on them. Measured on GPU.
+
+The current fix keeps the sentence but SCOPES it: "wherever skin is already
+visible in the first image and only there". Nothing is enumerated, so there
+is nothing to go and expose -- the same property the full drop had -- but
+unlike the full drop it still tells the model what tone already-visible skin
+(hands, face) should be recoloured to.
 """
 from __future__ import annotations
 
@@ -37,6 +45,7 @@ def _assemble(drop: bool, headwear: bool = False) -> str:
         "_prompt_override": "",
         "_expr_inline": "",
         "_drop_skin_clause": drop,
+        "_scope_skin_to_visible": drop,
         "self": type("C", (), {"cfg": {
             "simple_full_body_remove_headwear": headwear,
             "simple_full_body_protect_garments": False,
@@ -51,24 +60,29 @@ def test_t4_default_is_still_564_chars():
     assert len(_assemble(False)) == 564
 
 
-def test_covered_subject_loses_the_whole_skin_sentence():
+def test_covered_subject_keeps_the_skin_sentence_but_scopes_it():
+    """The full-drop approach is gone -- see this file's docstring. The
+    sentence stays, but no longer enumerates body parts, so it cannot
+    reopen the exposure bug it used to cause."""
     p = _assemble(True)
-    assert "skin colour" not in p
+    assert "skin colour" in p
     assert "already bare" not in p
+    assert "wherever skin is already visible in the first image" in p
 
 
-def test_covered_subject_adds_no_new_words():
-    """The property the three failed attempts lacked: a shorter prompt cannot
-    introduce a garment or body part that was not there before."""
-    assert len(_assemble(True)) < len(_assemble(False))
+def test_covered_subject_prompt_length():
+    """The scoped wording is not a full drop and is not shorter than the
+    enumeration -- it is a different sentence, not a truncated one. Its
+    own length is pinned so future edits to this branch are deliberate."""
+    assert len(_assemble(True)) == 622
 
 
-def test_dropping_also_fixes_the_dangling_two_changes_contract():
-    """"Two changes ... First ... Second" only parses as instructions if the
-    second one exists."""
+def test_scoping_keeps_the_two_changes_contract_intact():
+    """"Two changes ... First ... Second" must still parse as instructions
+    -- the sentence is scoped now, not removed."""
     assert _assemble(False).startswith("Two changes. First:")
-    assert _assemble(True).startswith("One change:")
-    assert "Second:" not in _assemble(True)
+    assert _assemble(True).startswith("Two changes. First:")
+    assert "Second:" in _assemble(True)
 
 
 def test_measurement_compares_against_the_subjects_own_face():
