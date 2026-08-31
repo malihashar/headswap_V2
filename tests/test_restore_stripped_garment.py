@@ -128,13 +128,24 @@ def test_speckle_guard_present():
     assert "min_component_frac" in body
 
 
-def test_blends_original_pixels_not_a_statistical_shift():
-    """extend_skin_harmonization's own docstring notes a LAB mean-shift
-    'cannot produce skin rendered under the scene's light'. This function
-    must restore the actual original pixels, not run a colour-transfer."""
+def test_pasted_patch_is_tone_matched_to_the_render():
+    """Measured on GPU: pasting RAW original pixels produced a visible
+    rectangular patch on the shoulders, because the diffusion pass shifts
+    global exposure/white-balance even at high denoise-preserve -- the
+    original photo and the render are two different colour grades, and a
+    boundary between them is visible exactly where they differ. Unlike
+    extend_skin_harmonization's rejected skin-wash (which shifts GENERATED
+    skin toward a donor face and 'cannot produce skin rendered under the
+    scene's light'), this samples its transfer target from garment pixels
+    ADJACENT to the patch in the SAME render -- literally how this render
+    already lit this same fabric a few centimetres away -- so it is not the
+    same critique. Must fall back to unmatched original pixels when too
+    little reference garment survives to measure a transform from."""
     body = _function_body(SKIN_HARM, "def restore_stripped_garment(")
-    assert "_reinhard_transfer" not in body
-    assert "original_np_full.astype(np.float32) * w3" in body
+    assert "_reinhard_transfer" in body
+    assert "_robust_lab_stats" in body
+    assert "paste_source" in body
+    assert "ref_mask" in body
 
 
 def test_log_line_names_skip_reason():

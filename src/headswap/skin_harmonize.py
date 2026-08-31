@@ -1261,9 +1261,54 @@ def restore_stripped_garment(
     weight[:head_excl] = 0.0
     weight = np.clip(weight, 0.0, 1.0)
 
+    # Tone-match the restored patch to the RENDER's own grade before
+    # pasting, not the original photo's raw grade.
+    #
+    # Measured on GPU: pasting raw original pixels produced a visible
+    # rectangular patch on both shoulders -- the diffusion pass shifts
+    # global exposure/white-balance even at high denoise-preserve, so the
+    # untouched original photo and the render are two different colour
+    # grades, and a boundary between them is visible exactly where they
+    # differ (the same "boundary is visible when the two sides differ"
+    # mechanism _raw_model exists to avoid elsewhere in this file).
+    #
+    # This is NOT the LAB-wash critique repeated -- that critique is about
+    # shifting SKIN tone, where "cannot produce skin rendered under the
+    # scene's light" is a real problem because skin has to look alive under
+    # specific lighting. This is a garment, and the reference sample is
+    # GARMENT PIXELS ADJACENT TO THE PATCH, in the SAME render, at the SAME
+    # photo coordinates -- so the transfer target is literally "how this
+    # exact render already lit this exact fabric a few centimetres away",
+    # not a generic donor-face colour. Falls back to unmatched original
+    # pixels (the pre-fix behaviour) if too little reference garment
+    # survives to measure a transform from.
+    ref_mask = (
+        (np.clip(clothes_before, 0.0, 1.0) > 0.5) & (kept < 1)
+    )
+    ref_px = int(ref_mask.sum())
+    info["tone_ref_px"] = ref_px
+    paste_source = original_np_full
+    if ref_px >= 300:
+        lab_orig = cv2.cvtColor(original_np_full, cv2.COLOR_RGB2LAB).astype(np.float32)
+        lab_rend = cv2.cvtColor(rendered_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+        src_mean, src_std = _robust_lab_stats(lab_orig[ref_mask])
+        tgt_mean, tgt_std = _robust_lab_stats(lab_rend[ref_mask])
+        paste_source = _reinhard_transfer(
+            original_np_full, src_mean, src_std, tgt_mean, tgt_std
+        )
+        info["tone_matched"] = True
+    else:
+        info["tone_matched"] = False
+        print(
+            f"[skin_harm] restore_stripped_garment -- only {ref_px}px of "
+            "reference garment survived to tone-match against (< 300); "
+            "pasting the original photo's own grade unmatched",
+            flush=True,
+        )
+
     w3 = weight[..., None]
     out_np = np.clip(
-        original_np_full.astype(np.float32) * w3
+        paste_source.astype(np.float32) * w3
         + rendered_np.astype(np.float32) * (1.0 - w3),
         0, 255,
     ).astype(np.uint8)
