@@ -66,10 +66,21 @@ def test_opt_in_names_the_garment_types_that_failed():
     assert "robe, shirt or top" in _assemble(False, True)
 
 
-def test_chain_opts_in_but_t4_default_does_not():
+def test_nothing_enables_garment_protection_by_default():
+    """The wording stays available behind a flag so the arms are
+    reproducible, but NOTHING turns it on.
+
+    Measured on GPU: naming garment types rendered them. A tennis polo came
+    back as a fluffy bathrobe because the clause said "robe, shirt or top".
+    That is the same mechanism as the body-part enumeration it was written to
+    replace -- on this route the prompt cannot name a thing without the model
+    drawing it -- so it is a wrong approach, not a wrong wording.
+    """
     assert 'self.cfg.get("simple_full_body_protect_garments", False)' in KREA2
-    assert '"protect_garments": True' in CHAIN
-    assert 'cfg["simple_full_body_protect_garments"] = True' in CHAIN
+    assert '"protect_garments": False' in CHAIN, (
+        "the chain must not opt in: it altered clothing on inputs that were "
+        "previously correct"
+    )
 
 
 def test_opt_in_stops_enumerating_body_parts():
