@@ -1332,6 +1332,7 @@ def restore_stripped_garment(
 
 def build_garment_containment_mask(
     body_full: Image.Image,
+    head_mask: Image.Image,
     *,
     feather_px: int = 12,
 ) -> tuple[Image.Image | None, dict]:
@@ -1348,29 +1349,46 @@ def build_garment_containment_mask(
     patch could not touch. The fix has to happen at sampling time, not
     after.
 
-    "Free" (mask=1) is head/hair/accessories UNION genuinely-bare skin --
-    semantic_person_skin_mask already computes exactly this union in one
-    call. "Protected" (mask=0) is everywhere else, with semantic_clothes_mask
-    as a HARD VETO on the free region: a pixel classified as clothing is
-    protected even if the skin/head classifier also fired on it, matching
-    the same veto pattern person_minus_clothes_mask already uses elsewhere
-    in this file. This is deliberately NOT "protect everything except the
-    head" (what the earlier, reverted sampling-containment attempt used) --
-    that would also pin genuinely-bare skin (hands, forearms) to the
-    ORIGINAL body's tone, silently reintroducing the "body doesn't match
-    the new head's skin tone" problem the skin-recolour prompt sentence
-    exists to fix.
+    ``head_mask`` MUST be a generously-oversized geometric mask (this
+    codebase's own build_head_hair_mask(..., backend="ellipse"), NOT a
+    silhouette/segmentation mask measured on the ORIGINAL photo. An earlier
+    version of this function computed head coverage from
+    semantic_person_skin_mask(body_full) alone, i.e. sized to the TARGET's
+    own original hairstyle -- and a donor head/hairstyle is routinely a
+    different shape and larger. Measured on GPU: a translucent halo with
+    wing-shaped protrusions at ear level appeared around the new head,
+    because containment re-pinned the region just outside that
+    too-tight boundary back to the ORIGINAL frame, and the original frame
+    there was the TARGET's own hair/ear silhouette showing through behind
+    the new one -- the exact "translucent oval with wings at ear level"
+    failure class this codebase already has a name for elsewhere
+    (_append_headwear_policy's docstring, a different bug with the same
+    root cause: a too-tight region boundary around a head that changes
+    shape). A geometric ellipse sized for ANY head, not measured from this
+    specific photo's silhouette, is what CHECKPOINT-17's containment
+    attempt used for exactly this reason and did not exhibit this artifact
+    -- its only measured problem was the temporal seam DifferentialDiffusion
+    now fixes.
 
-    Fails closed: returns (None, diag) if the segmenter is unavailable, so
-    the caller can fall through to the current unmasked img2img path
-    unchanged -- never breaks a render.
+    "Free" (mask=1) is ``head_mask`` UNION genuinely-bare skin
+    (semantic_person_skin_mask, silhouette-based -- fine for hands/arms
+    since those don't change shape or position the way a swapped head
+    does). "Protected" (mask=0) is everywhere else. semantic_clothes_mask
+    acts as a HARD VETO, but ONLY on the skin contribution, never on
+    ``head_mask`` -- the head region must always stay free regardless of
+    segmenter noise near the collar, or a clothes misfire could partially
+    veto the very region the swap needs to regenerate.
+
+    Fails closed: returns (None, diag) if the skin/clothes segmenter is
+    unavailable, so the caller can fall through to the current unmasked
+    img2img path unchanged -- never breaks a render.
     """
     info: dict = {}
     rgb = np.asarray(body_full.convert("RGB"), dtype=np.uint8)
     H, W = rgb.shape[:2]
 
-    free = semantic_person_skin_mask(rgb)
-    if free is None:
+    skin = semantic_person_skin_mask(rgb)
+    if skin is None:
         info["reason"] = "segmenter_unavailable_person_skin"
         print(
             "[skin_harm] build_garment_containment_mask skipped -- "
@@ -1389,7 +1407,12 @@ def build_garment_containment_mask(
         )
         return None, info
 
-    free = np.clip(free, 0.0, 1.0) * (1.0 - np.clip(clothes, 0.0, 1.0))
+    head_arr = np.asarray(head_mask.convert("L"), dtype=np.float32) / 255.0
+    if head_arr.shape[:2] != (H, W):
+        head_arr = cv2.resize(head_arr, (W, H), interpolation=cv2.INTER_LINEAR)
+
+    skin_free = np.clip(skin, 0.0, 1.0) * (1.0 - np.clip(clothes, 0.0, 1.0))
+    free = np.maximum(np.clip(head_arr, 0.0, 1.0), skin_free)
 
     blur_k = max(3, (int(feather_px) // 2) * 2 + 1)
     free = cv2.GaussianBlur(free, (blur_k, blur_k), 0)

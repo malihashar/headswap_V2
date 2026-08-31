@@ -118,5 +118,5 @@ def test_edit_mask_actually_passed_at_the_call_site():
 def test_falls_through_unmasked_when_flag_off_or_mask_build_fails():
     i = KREA2.find("_containment_mask = None")
     assert i > 0
-    window = KREA2[i:i + 600]
+    window = KREA2[i:i + 2500]
     assert 'if _containment_mask is None:' in window or "mask build failed" in window

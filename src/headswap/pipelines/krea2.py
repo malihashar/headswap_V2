@@ -5650,16 +5650,74 @@ class Krea2IdentityEditPipeline(BasePipeline):
         #
         # negative_prompt ships empty, so a full grounded VLM encode is
         # currently spent on "" on every render.
+        #
+        # GARMENT EXPOSURE (new): the skin-recolour sentence correctly tells
+        # the model to recolour genuinely-bare hands, but diffusion has no
+        # hard per-object boundary between "hand" and "sleeve fabric pressed
+        # against it", so that recolour bleeds into adjacent clothing when
+        # the hands sit against the torso (e.g. a praying-hands pose).
+        #
+        # Three POSITIVE-prompt fixes for this already failed on GPU: a
+        # do-not-expose prohibition (fixed the torso, stripped the sleeves
+        # instead), naming garment types (fixed the robe, turned an
+        # unrelated tennis polo into a bathrobe), and dropping/scoping the
+        # skin-recolour sentence (fixed the stripping, left genuinely-visible
+        # hands with no tone instruction -- rendered visibly mismatched,
+        # twice). "On this route the model draws whatever the positive
+        # prompt names."
+        #
+        # This is the SAME different-mechanism idea that already worked for
+        # headwear above, applied to a different bleed: CFG repulsion at
+        # cfg=1.8, not an instruction the model has to obey, so it adds
+        # nothing to the positive prompt and cannot repeat those three
+        # failures. Gated on the SAME already-measured "is this subject
+        # covered" signal (_measure_visible_skin / _measure_torso_clothed,
+        # additive OR) used by skip_skin_clause_when_covered, so an
+        # already-bare-armed subject -- which legitimately needs skin
+        # exposed and must not regress -- never receives these tokens.
+        _neg_clauses: list[str] = []
         if not _prompt_override and bool(
             self.cfg.get("simple_full_body_remove_headwear", False)
-        ) and not str(self.cfg.get("negative_prompt", "") or "").strip():
-            self.cfg["negative_prompt"] = (
+        ):
+            _neg_clauses.append(
                 "hat, cap, baseball cap, headscarf, headband, durag, "
                 "head covering, brim, visor"
             )
+
+        if not _prompt_override and bool(
+            self.cfg.get("simple_full_body_garment_negative_prompt", False)
+        ):
+            _ngp_sf, _ngp_sd = self._measure_visible_skin(body_full)
+            _ngp_smin = float(self.cfg.get("visible_skin_min_frac", 0.06))
+            _ngp_skin_covered = _ngp_sf is not None and _ngp_sf < _ngp_smin
+            _ngp_tc, _ngp_td = self._measure_torso_clothed(body_full)
+            _ngp_torso_covered = bool(_ngp_tc)
+            if _ngp_skin_covered or _ngp_torso_covered:
+                _neg_clauses.append(
+                    "exposed torso, bare chest, exposed stomach, "
+                    "shirtless, nudity"
+                )
+                print(
+                    "[krea2 garment_negative] covered subject detected "
+                    f"(skin_covered={_ngp_skin_covered} "
+                    f"torso_covered={_ngp_torso_covered}) -- steering away "
+                    "from exposure via the negative prompt instead of "
+                    "touching the positive prompt",
+                    flush=True,
+                )
+            else:
+                print(
+                    "[krea2 garment_negative] subject not covered "
+                    f"(skin_frac={_ngp_sf}, torso_clothes_frac="
+                    f"{_ngp_td.get('clothes_frac', _ngp_td.get('reason'))}) "
+                    "-- no exposure-guard tokens added",
+                    flush=True,
+                )
+
+        if _neg_clauses and not str(self.cfg.get("negative_prompt", "") or "").strip():
+            self.cfg["negative_prompt"] = ", ".join(_neg_clauses)
             print(
-                "[krea2 headwear] negative prompt steers away from headwear: "
-                f"{self.cfg['negative_prompt']}",
+                f"[krea2 negative_prompt] built: {self.cfg['negative_prompt']}",
                 flush=True,
             )
 
@@ -5712,16 +5770,47 @@ class Krea2IdentityEditPipeline(BasePipeline):
         if bool(self.cfg.get("simple_full_body_garment_containment", False)):
             from headswap.skin_harmonize import build_garment_containment_mask
 
-            _containment_mask, _containment_diag = build_garment_containment_mask(
-                body_full
-            )
-            if _containment_mask is None:
+            # head_mask MUST be a generously-oversized geometric ellipse, not
+            # a silhouette measured on the ORIGINAL photo -- see
+            # build_garment_containment_mask's docstring. A donor head/
+            # hairstyle is routinely a different shape than the target's own,
+            # and a too-tight boundary re-pins the region just outside it to
+            # the ORIGINAL frame, which is the target's own hair/ears --
+            # measured on GPU as a translucent halo with wing-shaped
+            # protrusions at ear level around the new head.
+            _rgb_bf = pil_to_rgb_np(body_full)
+            _cm_face_box = detect_best_face(_rgb_bf, self.cache_dir)
+            if _cm_face_box is None:
+                _containment_diag = {"reason": "no_face_detected"}
                 print(
                     "[krea2 garment_containment] mask build failed "
-                    f"({_containment_diag.get('reason')}) -- falling through "
-                    "to the current unmasked path",
+                    "(no_face_detected) -- falling through to the current "
+                    "unmasked path",
                     flush=True,
                 )
+            else:
+                _cm_head_mask, _cm_head_info = build_head_hair_mask(
+                    body_full,
+                    self.cache_dir,
+                    backend="ellipse",
+                    face_box=_cm_face_box,
+                    expand_px=int(self.cfg.get("mask_expand_px", 18)),
+                    blur_px=int(self.cfg.get("mask_blur_px", 12)),
+                    top_extend=1.55,
+                    side_extend=0.60,
+                    bot_extend=0.40,
+                )
+                _containment_mask, _containment_diag = build_garment_containment_mask(
+                    body_full, _cm_head_mask
+                )
+                _containment_diag["head_mask_backend"] = _cm_head_info.get("backend")
+                if _containment_mask is None:
+                    print(
+                        "[krea2 garment_containment] mask build failed "
+                        f"({_containment_diag.get('reason')}) -- falling "
+                        "through to the current unmasked path",
+                        flush=True,
+                    )
 
         _prev_sampling_containment = self.cfg.get("sampling_containment")
         _prev_denoise = self.cfg.get("denoise")
