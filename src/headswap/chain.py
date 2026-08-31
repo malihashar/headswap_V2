@@ -31,6 +31,7 @@ DEFAULTS = {
     "animation_region": "lip",
     "skip_refine": True,
     "remove_headwear": True,
+    "protect_garments": True,
     # OFF. The LaMa/Telea inpaint did remove the hat, but Telea smears
     # rather than reconstructs and the plate's artifacts survived into the
     # final image -- rejected on looks. Headwear is a PROMPT concern on this
@@ -56,6 +57,7 @@ def load_models(
     seed: int = 46,
     skip_refine: bool = True,
     remove_headwear: bool = True,
+    protect_garments: bool = True,
     config_path: str | Path | None = None,
 ) -> Any:
     """Build (or return) the Krea2 pipeline. Cheap on repeat calls."""
@@ -99,6 +101,12 @@ def load_models(
         # only feeds _append_headwear_policy, which run_simple_full_body
         # never calls.
         cfg["simple_full_body_remove_headwear"] = True
+    if protect_garments:
+        # A robed subject comes back shirtless: the skin-recolour clause asks
+        # for bare neck/arms/legs, so on a covered subject the model exposes
+        # some. Opt-in because it lengthens T4's approved 564-char prompt,
+        # and length alone moves face fraction on this route.
+        cfg["simple_full_body_protect_garments"] = True
     _STATE["cfg"] = cfg
     _STATE["pipe"] = create_pipeline(
         cfg, runtime=get_shared_krea2_runtime(init_custom_nodes=True)
@@ -190,6 +198,9 @@ def warmup(
         skip_refine=bool(kw.get("skip_refine", DEFAULTS["skip_refine"])),
         remove_headwear=bool(
             kw.get("remove_headwear", DEFAULTS["remove_headwear"])
+        ),
+        protect_garments=bool(
+            kw.get("protect_garments", DEFAULTS["protect_garments"])
         ),
     )
     out = Path(out_dir) if out_dir else (_repo() / "results" / "_warmup")

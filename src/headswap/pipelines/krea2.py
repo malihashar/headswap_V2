@@ -5195,7 +5195,28 @@ class Krea2IdentityEditPipeline(BasePipeline):
             # the swap (chain.py), taking it out of the source latent
             # instead of arguing with the prompt about it.
             "Keep the clothing, pose, body shape, background and lighting "
-            "exactly as they are. Do not turn any clothed area into skin."
+            "exactly as they are. "
+            # A robed subject still comes back shirtless -- CHECKPOINT-10
+            # lists it as known-unfixed, and the cause is named in this
+            # file's own history: "naming body parts as 'bare skin' once made
+            # the model strip a robe". The skin-recolour clause above asks
+            # for bare neck/arms/legs, so on a covered subject the model
+            # EXPOSES some to have something to recolour. "Do not turn any
+            # clothed area into skin" was the counterweight and is too weak.
+            #
+            # Gated, not unconditional. CHECKPOINT-10 fixes T4's default text
+            # at 564 chars as part of the approved recipe, and CHECKPOINT-11
+            # measured that length alone moves face fraction (38.7 -> 45.0,
+            # 40.3 -> 42.0). So the stronger wording is opt-in and the
+            # default stays byte-identical; chain.py turns it on.
+            + (
+                "Recolour only skin that is ALREADY visible: do not expose "
+                "any new skin, and do not remove, shorten or open any "
+                "garment. If the person is wearing a robe, shirt or top, "
+                "they are still wearing all of it."
+                if bool(self.cfg.get("simple_full_body_protect_garments", False))
+                else "Do not turn any clothed area into skin."
+            )
         )
 
         # Explicit headwear-removal clause. Off by default (never applied to
