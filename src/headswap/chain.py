@@ -314,6 +314,7 @@ def run_chain(
     animation_region: str | None = None,
     use_liveportrait: bool = True,
     erase_headwear_first: bool | None = None,
+    swap_denoise: float | None = None,
     **_ignored: Any,
 ) -> dict[str, Any]:
     """One request: T4 swap, then LivePortrait on its output.
@@ -326,7 +327,10 @@ def run_chain(
     _warn_if_stale()
     pipe = load_models()
 
-    _dn = kw.get("swap_denoise", DEFAULTS["swap_denoise"])
+    # Explicit parameter, not **kw: run_chain collects extras as _ignored,
+    # so reading `kw` here raised NameError on every call -- including from
+    # warmup(), which meant Cell 1 could not even load models.
+    _dn = swap_denoise if swap_denoise is not None else DEFAULTS["swap_denoise"]
     if _dn is not None:
         pipe.cfg["denoise"] = float(_dn)
         print(f"[chain] swap denoise overridden to {float(_dn)} "
