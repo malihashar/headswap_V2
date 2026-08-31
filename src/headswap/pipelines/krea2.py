@@ -2797,6 +2797,39 @@ class Krea2IdentityEditPipeline(BasePipeline):
             elif apply_shift:
                 mu_shift = None
 
+            # CHECKPOINT-17 (see PIPELINE_STATE.md) reverted plain noise_mask
+            # containment on T4 for a seam: KSamplerX0Inpaint blends the
+            # mask's weight IDENTICALLY at every step, so a feathered mask
+            # value like 0.5 sits 50/50 between "regenerating" and "pinned"
+            # for the WHOLE schedule -- a temporal problem, not spatial or
+            # under-tuned (measured mean|diff| inside=35.40 outside=0.91,
+            # proving the pin itself worked). DifferentialDiffusion is the
+            # fix for exactly that: it makes the mask's effective threshold
+            # move with the step's sigma, so a pixel's mask value sets WHEN
+            # in the schedule it releases, not a static per-step blend.
+            # Already vendored in this repo's ComfyUI, unused until now.
+            if containment_on and rt.has("DifferentialDiffusion"):
+                model = get_value_at_index(
+                    rt.call(
+                        "DifferentialDiffusion",
+                        model=model,
+                        strength=float(
+                            self.cfg.get(
+                                "containment_differential_strength", 1.0
+                            )
+                        ),
+                    ),
+                    0,
+                )
+            elif containment_on:
+                print(
+                    "[krea2 containment] DifferentialDiffusion node "
+                    "unavailable -- falling back to a static noise_mask "
+                    "pin, which is the exact mechanism CHECKPOINT-17 "
+                    "measured as seam-prone",
+                    flush=True,
+                )
+
             use_full_load = bool(self.cfg.get("force_full_load", True))
             sampler_name = str(self.cfg.get("sampler", "euler"))
             scheduler_name = str(self.cfg.get("scheduler", "simple"))
@@ -5660,16 +5693,69 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 flush=True,
             )
 
-        with _stage(timings, "sampling"):
-            sample_meta = self._sample_edit(
-                rt,
-                bundle,
-                body_full,
-                face_crop,
-                timings,
-                prompt=prompt,
-                edit_cache_info=edit_cache_info,
+        # Generation-time garment containment. A post-render pixel-diff
+        # patch (restore_stripped_garment, skin_harmonize.py) can restore
+        # colour where clothing was stripped, but not fix the render having
+        # drawn the arm/garment at a different SHAPE than the source photo
+        # -- measured on GPU, coverage and colour were both fixed but a
+        # sleeve/cuff still showed a geometric misalignment no pixel patch
+        # can correct. This stops the stripping from happening at all.
+        #
+        # DEFAULT OFF pending GPU validation on the target case (garment
+        # preserved, no misalignment this time) plus a regression-prone
+        # bare-armed case, same discipline as every other segmentation-gated
+        # mechanism in this file. Falls through to the current unmasked
+        # img2img path unchanged whenever the flag is off OR the mask fails
+        # to build -- a normal render is byte-for-byte unaffected.
+        _containment_mask = None
+        _containment_diag: dict = {"applied": False}
+        if bool(self.cfg.get("simple_full_body_garment_containment", False)):
+            from headswap.skin_harmonize import build_garment_containment_mask
+
+            _containment_mask, _containment_diag = build_garment_containment_mask(
+                body_full
             )
+            if _containment_mask is None:
+                print(
+                    "[krea2 garment_containment] mask build failed "
+                    f"({_containment_diag.get('reason')}) -- falling through "
+                    "to the current unmasked path",
+                    flush=True,
+                )
+
+        _prev_sampling_containment = self.cfg.get("sampling_containment")
+        _prev_denoise = self.cfg.get("denoise")
+        try:
+            if _containment_mask is not None:
+                # Required for the noise_mask + encoded-scene-latent
+                # combination to be correct on this model -- see
+                # _sample_edit's own docstring: Krea2 is ModelType.FLUX,
+                # whose noise_scaling zeroes the latent-image term at
+                # sigma_max, so denoise must be 1.0 for the mask pin to be
+                # meaningful. Restored below regardless of outcome.
+                self.cfg["sampling_containment"] = True
+                self.cfg["denoise"] = 1.0
+                print(
+                    "[krea2 garment_containment] containment ON -- "
+                    f"free={_containment_diag.get('free_frac')} "
+                    f"protected={_containment_diag.get('protected_frac')}; "
+                    "denoise forced to 1.0 for this render only",
+                    flush=True,
+                )
+            with _stage(timings, "sampling"):
+                sample_meta = self._sample_edit(
+                    rt,
+                    bundle,
+                    body_full,
+                    face_crop,
+                    timings,
+                    prompt=prompt,
+                    edit_cache_info=edit_cache_info,
+                    edit_mask=_containment_mask,
+                )
+        finally:
+            self.cfg["sampling_containment"] = _prev_sampling_containment
+            self.cfg["denoise"] = _prev_denoise
         out = sample_meta["edited"]
         if out.size != body_full.size:
             out = out.resize(body_full.size, Image.Resampling.LANCZOS)

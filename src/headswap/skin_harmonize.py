@@ -1328,3 +1328,83 @@ def restore_stripped_garment(
         flush=True,
     )
     return Image.fromarray(out_np), info
+
+
+def build_garment_containment_mask(
+    body_full: Image.Image,
+    *,
+    feather_px: int = 12,
+) -> tuple[Image.Image | None, dict]:
+    """Sampling-time containment mask: white (255) where the model may
+    regenerate, black (0) where it must stay pinned to the source latent.
+
+    A post-render pixel-diff patch (restore_stripped_garment, above) can
+    restore COLOUR where a covered subject's clothing was stripped, but it
+    cannot fix the render having drawn the arm/garment at a slightly
+    different shape than the source photo in the first place -- there is no
+    original-photo pixel that is "correct" for geometry the sampler never
+    produced. Measured on GPU: garment colour and coverage were restored
+    correctly, but a sleeve/cuff still showed a geometric misalignment the
+    patch could not touch. The fix has to happen at sampling time, not
+    after.
+
+    "Free" (mask=1) is head/hair/accessories UNION genuinely-bare skin --
+    semantic_person_skin_mask already computes exactly this union in one
+    call. "Protected" (mask=0) is everywhere else, with semantic_clothes_mask
+    as a HARD VETO on the free region: a pixel classified as clothing is
+    protected even if the skin/head classifier also fired on it, matching
+    the same veto pattern person_minus_clothes_mask already uses elsewhere
+    in this file. This is deliberately NOT "protect everything except the
+    head" (what the earlier, reverted sampling-containment attempt used) --
+    that would also pin genuinely-bare skin (hands, forearms) to the
+    ORIGINAL body's tone, silently reintroducing the "body doesn't match
+    the new head's skin tone" problem the skin-recolour prompt sentence
+    exists to fix.
+
+    Fails closed: returns (None, diag) if the segmenter is unavailable, so
+    the caller can fall through to the current unmasked img2img path
+    unchanged -- never breaks a render.
+    """
+    info: dict = {}
+    rgb = np.asarray(body_full.convert("RGB"), dtype=np.uint8)
+    H, W = rgb.shape[:2]
+
+    free = semantic_person_skin_mask(rgb)
+    if free is None:
+        info["reason"] = "segmenter_unavailable_person_skin"
+        print(
+            "[skin_harm] build_garment_containment_mask skipped -- "
+            "person/skin segmenter unavailable",
+            flush=True,
+        )
+        return None, info
+
+    clothes = semantic_clothes_mask(rgb)
+    if clothes is None:
+        info["reason"] = "segmenter_unavailable_clothes"
+        print(
+            "[skin_harm] build_garment_containment_mask skipped -- "
+            "clothes segmenter unavailable",
+            flush=True,
+        )
+        return None, info
+
+    free = np.clip(free, 0.0, 1.0) * (1.0 - np.clip(clothes, 0.0, 1.0))
+
+    blur_k = max(3, (int(feather_px) // 2) * 2 + 1)
+    free = cv2.GaussianBlur(free, (blur_k, blur_k), 0)
+    free = np.clip(free, 0.0, 1.0)
+
+    free_frac = float((free > 0.5).mean())
+    info["free_frac"] = round(free_frac, 4)
+    info["protected_frac"] = round(1.0 - free_frac, 4)
+    print(
+        f"[skin_harm] build_garment_containment_mask -- free={free_frac:.3%} "
+        f"protected={1.0 - free_frac:.3%} of the frame",
+        flush=True,
+    )
+
+    mask = Image.fromarray((free * 255.0).astype(np.uint8), mode="L")
+    if mask.size != (W, H):
+        mask = mask.resize((W, H), Image.Resampling.BILINEAR)
+    return mask, info
