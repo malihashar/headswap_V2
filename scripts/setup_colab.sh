@@ -189,7 +189,15 @@ python -c "import rembg" 2>/dev/null \
 echo "-> Installing simple-lama-inpainting (erase_headwear) + repairing its numpy/pillow downgrade..."
 pip install -q simple-lama-inpainting 2>&1 | tail -2 || echo "   WARN: simple-lama-inpainting install failed; erase_headwear will fall back/skip"
 pip install -q --force-reinstall --no-deps pillow==11.3.0
-pip install -q "numpy>=2.3,<2.5"
+# --force-reinstall, matching the pillow line above: a plain version-range
+# install can leave numpy's pure-Python files and its compiled C extension
+# from two different versions coexisting on disk (pip considers a range
+# "satisfied" and skips reinstalling), which surfaces later as an ImportError
+# deep in some unrelated import chain (e.g. "cannot import name '_slice'
+# from numpy._core.umath") rather than as anything about numpy or this
+# install step -- GPU-confirmed. --no-deps keeps this from cascading into
+# reinstalling everything else that depends on numpy.
+pip install -q --force-reinstall --no-deps numpy==2.3.4
 python -c "
 import rembg  # noqa: F401
 print('   rembg OK after simple-lama pin repair')
