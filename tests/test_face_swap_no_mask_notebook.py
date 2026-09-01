@@ -127,6 +127,44 @@ def test_experimental_garment_work_is_off():
         assert key in src, f"missing: {key}"
 
 
+def test_run_cell_reads_uploads_from_disk_not_kernel_state():
+    """The run cell must not depend on cell 2's widget objects still being
+    alive in the kernel.
+
+    That dependency broke in practice: `NameError: name 'body_uploaders' is
+    not defined`, from a stale cached copy of the cell being executed. Any
+    of a runtime restart, a re-run of cell 2, or Colab restoring an older
+    saved copy could trigger it. Cell 2 now writes each file to disk the
+    moment it is picked, and the run cell globs that directory, so the two
+    cells share no in-memory state at all.
+    """
+    src = _run_cell_source()
+    assert "body_uploaders" not in src and "face_uploaders" not in src, (
+        "run cell still references cell 2's widget lists -- it must read "
+        "the upload directory from disk instead"
+    )
+    assert 'UPLOAD_DIR / f"body_{i:02d}.png"' in src
+    assert 'UPLOAD_DIR / f"face_{i:02d}.png"' in src
+
+
+def test_upload_cell_persists_files_on_selection():
+    """Cell 2 must write to disk via an observe handler, not merely hold
+    bytes in the widget -- that is what makes the run cell independent of
+    kernel state."""
+    nb = json.loads(NB_PATH.read_text())
+    code_cells = [
+        "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
+    ]
+    upload = [s for s in code_cells if "FileUpload(" in s]
+    assert len(upload) == 1, "expected exactly one cell that builds uploaders"
+    src = upload[0]
+    assert ".observe(" in src, "uploads must be persisted on selection"
+    assert 'names="value"' in src
+    assert ".save(path)" in src
+    # Stale files from an earlier run must not be picked up as real pairs.
+    assert "CLEAR_PREVIOUS" in src
+
+
 def test_run_reports_the_actual_route_taken():
     """The mask-tuning failure went unnoticed because nothing surfaced which
     path actually ran. The notebook must read the route back from meta and
