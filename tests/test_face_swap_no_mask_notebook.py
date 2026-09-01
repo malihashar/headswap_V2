@@ -115,16 +115,34 @@ def test_prompt_carries_the_skin_tone_clause():
     assert "already bare" in p
 
 
-def test_sampling_recipe_is_not_overridden():
-    """ref_boost / denoise / cfg / seed / output resolution are a tuned
-    recipe shared with head-swap. A face swap is the same job with
-    different words, so the notebook must not fork those values."""
+def test_sampling_recipe_is_not_casually_overridden():
+    """denoise / cfg / seed / output resolution are a tuned recipe shared
+    with head-swap and must not be forked without measured reason.
+
+    ref_boost IS forked here (5.5 -> 7.0), deliberately: a head swap also
+    transplants the donor's hair, which carries much of perceived identity,
+    while this route keeps the target's own hair -- so the face is the only
+    channel the donor arrives through, and needs weighting up. 7.0 is the
+    config's own documented identity-fidelity value, not invented.
+    """
     src = _run_cell_source()
-    for key in ('"ref_boost"', '"denoise"', '"cfg"', '"body_min_long_side"'):
+    for key in ('"denoise"', '"cfg"', '"body_min_long_side"'):
         assert key not in src, (
             f"{key} is overridden here -- it should stay on the shared "
             "head-swap recipe unless there is measured reason to fork it"
         )
+
+
+def test_no_skin_painting_stages():
+    """body_restore already keeps the model's OWN rendered skin, so the LAB
+    wash has nothing to fix -- but it defaults to auto-on, and when
+    mediapipe pose fails it falls back to a geometric limb mask (lines
+    drawn between joints). GPU-measured: that painted a hard-edged tan blob
+    across praying hands, not following the hand silhouette at all.
+    skin_repaint is pinned too so enabling body_restore cannot admit it."""
+    src = _run_cell_source()
+    assert '"simple_full_body_skin_harmonize": False' in src
+    assert '"simple_full_body_skin_repaint": False' in src
 
 
 def test_the_two_flags_this_notebook_relies_on_still_gate_what_it_thinks():
