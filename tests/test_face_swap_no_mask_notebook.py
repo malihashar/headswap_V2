@@ -69,32 +69,50 @@ def test_bust_shots_also_take_the_simple_route():
     )
 
 
-def test_raw_model_on_and_face_refine_left_enabled():
-    """raw_model kills the WHOLE-FRAME compositing (body_restore, LAB skin
-    wash, skin_repaint). face_refine is deliberately left ON.
+def test_body_restore_constrains_what_may_change():
+    """raw_model must be OFF so body_restore runs.
 
-    An earlier version set simple_full_body_face_refine=False, reading "no
-    masks" as maximally as possible. That was wrong on the facts: head-swap
-    production does NOT disable face_refine -- chain.py's skip_refine=True
-    sets refine_max_face_frac=0.25, i.e. "refine when the face is under 25%
-    of frame". On a full-body shot the face is ~8% of frame (~84px at 1024
-    output), so production refines, and that pass is what carries identity.
-    Turning it off traded mask-freedom for an unusable result: identity had
-    84px to survive in, and did not.
+    With raw_model=True the render ships raw, and a full-frame pass at
+    denoise=0.85 is free to redraw every pixel. Measured on GPU: a black
+    robe came back tan and the hat was reshaped, with the prompt asking
+    for neither. A prompt biases that; it cannot guarantee it.
 
-    This route is head-swap's pipeline with a different prompt; the
-    architecture is deliberately identical.
+    body_restore is the control. Per its own implementation note it keeps
+    the generated HEAD and the generated SKIN -- so face identity and donor
+    skin tone both survive -- while clothes and background "come back from
+    the original verbatim". That is exactly "change only what we want to
+    change", and it is why the route stays full-frame rather than becoming
+    a face-only crop: bare skin has to take the donor's tone, which a face
+    crop can never do because the model never sees the arms.
     """
     src = _run_cell_source()
-    assert '"simple_full_body_raw_model": True' in src
-    assert '"simple_full_body_face_refine": False' not in src, (
-        "face_refine must stay enabled -- it is what carries identity on a "
-        "small face, and head-swap production runs it too"
+    assert '"simple_full_body_raw_model": False' in src, (
+        "raw_model must be OFF -- with it on, clothing/background drift is "
+        "unconstrained and was measured changing colour"
     )
-    assert '"simple_full_body_refine_max_face_frac": 0.25' in src, (
-        "mirror head-swap production's gate (chain.py skip_refine=True) "
-        "rather than inventing a different one"
-    )
+    assert '"simple_full_body_restore_body": True' in src
+
+
+def test_face_refine_left_enabled():
+    """An earlier version set simple_full_body_face_refine=False, reading
+    "no masks" as maximally as possible. Head-swap production does NOT
+    disable it -- chain.py's skip_refine=True sets refine_max_face_frac
+    =0.25, i.e. "refine when the face is under 25% of frame". On a
+    full-body shot the face is ~8% of frame (~84px at 1024 output), so
+    production refines, and that pass is what carries identity. Turning it
+    off left identity 84px to survive in, and it did not."""
+    src = _run_cell_source()
+    assert '"simple_full_body_face_refine": False' not in src
+    assert '"simple_full_body_refine_max_face_frac": 0.25' in src
+
+
+def test_prompt_carries_the_skin_tone_clause():
+    """A face-only instruction leaves a donor-toned face on target-toned
+    arms and hands. T4 carries a skin clause for this reason; a face swap
+    needs the same."""
+    p = _face_swap_prompt()
+    assert "skin colour" in p
+    assert "already bare" in p
 
 
 def test_sampling_recipe_is_not_overridden():
