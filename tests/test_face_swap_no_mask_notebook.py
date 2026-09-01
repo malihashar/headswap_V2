@@ -197,11 +197,31 @@ def test_prompt_leads_with_replacement_not_preservation():
     clause, exactly as T4's working prompt does.
     """
     p = _face_swap_prompt()
-    i_replace = p.find("replace the face")
-    i_keep = p.find("Keep the first person")
+    i_replace = p.find("replace the head")
+    i_keep = p.find("Keep the clothing")
     assert i_replace >= 0 and i_keep > 0, p
     assert i_replace < i_keep, (
         "the replacement instruction must precede the preservation clause"
+    )
+
+
+def test_prompt_asks_for_head_replacement_not_face_only():
+    """Identity is bought at generation time with a strong HEAD-replacement
+    instruction -- measured, that is what transferred identity, while
+    face-only wordings transferred none (keeping the target's hair leaves
+    the face as the only donor channel, and the model just preserves what
+    is already in the source latent).
+
+    The target's own hair and headwear are put back afterwards by
+    body_restore's keep_original_hair control, so the generated hairstyle
+    is discarded and only the generated face and skin survive.
+    """
+    p = _face_swap_prompt()
+    assert "replace the head" in p
+    src = _run_cell_source()
+    assert '"simple_full_body_restore_keep_original_hair": True' in src, (
+        "a head-replacement prompt without this control would also replace "
+        "the target's hair and headwear"
     )
 
 

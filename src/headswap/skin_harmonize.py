@@ -259,6 +259,33 @@ def semantic_head_mask(rgb_np: np.ndarray) -> np.ndarray | None:
     return np.clip(m, 0.0, 1.0)
 
 
+def semantic_hair_accessories_mask(rgb_np: np.ndarray) -> np.ndarray | None:
+    """Per-pixel P(hair OR accessories), EXCLUDING face skin, or None.
+
+    ``semantic_head_mask`` returns hair ∪ face-skin ∪ accessories, which is
+    the right region when the WHOLE head is being replaced -- a head swap
+    wants the donor's hairstyle and treats a hat as part of the head.
+
+    A FACE swap wants the opposite: the donor's face, but the target's own
+    hair and headwear. Face-skin is therefore deliberately excluded here.
+    Subtracting this mask from a "generated pixels win" region drops hair
+    and hats out of it -- so they are restored from the original -- without
+    touching the newly generated face.
+
+    Measured need: with hair/accessories left in the keep-mask, a strong
+    identity prompt produced a good donor face but also replaced the
+    target's winged hat with a plain one and swapped the hairstyle.
+    """
+    cat = _semantic_category_mask(rgb_np)
+    if cat is None:
+        return None
+    m = np.isin(cat, (_SEM_HAIR, _SEM_OTHERS)).astype(np.float32)
+    if m.shape != rgb_np.shape[:2]:
+        m = cv2.resize(m, (rgb_np.shape[1], rgb_np.shape[0]),
+                       interpolation=cv2.INTER_LINEAR)
+    return np.clip(m, 0.0, 1.0)
+
+
 _SEM_BACKGROUND = 0
 
 
