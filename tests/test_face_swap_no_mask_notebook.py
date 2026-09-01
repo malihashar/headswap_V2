@@ -69,12 +69,44 @@ def test_bust_shots_also_take_the_simple_route():
     )
 
 
-def test_raw_model_on_and_face_refine_off():
-    """raw_model alone is NOT enough -- face_refine is gated separately and
-    composites via feathered_soft_composite."""
+def test_raw_model_on_and_face_refine_left_enabled():
+    """raw_model kills the WHOLE-FRAME compositing (body_restore, LAB skin
+    wash, skin_repaint). face_refine is deliberately left ON.
+
+    An earlier version set simple_full_body_face_refine=False, reading "no
+    masks" as maximally as possible. That was wrong on the facts: head-swap
+    production does NOT disable face_refine -- chain.py's skip_refine=True
+    sets refine_max_face_frac=0.25, i.e. "refine when the face is under 25%
+    of frame". On a full-body shot the face is ~8% of frame (~84px at 1024
+    output), so production refines, and that pass is what carries identity.
+    Turning it off traded mask-freedom for an unusable result: identity had
+    84px to survive in, and did not.
+
+    This route is head-swap's pipeline with a different prompt; the
+    architecture is deliberately identical.
+    """
     src = _run_cell_source()
     assert '"simple_full_body_raw_model": True' in src
-    assert '"simple_full_body_face_refine": False' in src
+    assert '"simple_full_body_face_refine": False' not in src, (
+        "face_refine must stay enabled -- it is what carries identity on a "
+        "small face, and head-swap production runs it too"
+    )
+    assert '"simple_full_body_refine_max_face_frac": 0.25' in src, (
+        "mirror head-swap production's gate (chain.py skip_refine=True) "
+        "rather than inventing a different one"
+    )
+
+
+def test_sampling_recipe_is_not_overridden():
+    """ref_boost / denoise / cfg / seed / output resolution are a tuned
+    recipe shared with head-swap. A face swap is the same job with
+    different words, so the notebook must not fork those values."""
+    src = _run_cell_source()
+    for key in ('"ref_boost"', '"denoise"', '"cfg"', '"body_min_long_side"'):
+        assert key not in src, (
+            f"{key} is overridden here -- it should stay on the shared "
+            "head-swap recipe unless there is measured reason to fork it"
+        )
 
 
 def test_the_two_flags_this_notebook_relies_on_still_gate_what_it_thinks():
