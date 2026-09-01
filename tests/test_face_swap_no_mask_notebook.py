@@ -147,22 +147,49 @@ def test_run_cell_reads_uploads_from_disk_not_kernel_state():
     assert 'UPLOAD_DIR / f"face_{i:02d}.png"' in src
 
 
-def test_upload_cell_persists_files_on_selection():
-    """Cell 2 must write to disk via an observe handler, not merely hold
-    bytes in the widget -- that is what makes the run cell independent of
-    kernel state."""
+def _upload_cell_source() -> str:
     nb = json.loads(NB_PATH.read_text())
     code_cells = [
         "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
     ]
-    upload = [s for s in code_cells if "FileUpload(" in s]
-    assert len(upload) == 1, "expected exactly one cell that builds uploaders"
-    src = upload[0]
-    assert ".observe(" in src, "uploads must be persisted on selection"
-    assert 'names="value"' in src
-    assert ".save(path)" in src
-    # Stale files from an earlier run must not be picked up as real pairs.
+    upload = [s for s in code_cells if "files.upload()" in s]
+    assert len(upload) == 1, "expected exactly one cell that uploads images"
+    return upload[0]
+
+
+def test_upload_cell_uses_colabs_native_uploader():
+    """`ipywidgets.FileUpload` renders in Colab but its contents frequently
+    never sync back to the kernel -- an earlier version of this cell built
+    26 such buttons and silently saved nothing, so the run cell found an
+    empty directory. `google.colab.files.upload()` is the native picker and
+    returns the bytes directly.
+    """
+    src = _upload_cell_source()
+    assert "from google.colab import files" in src
+    assert "FileUpload(" not in src, (
+        "ipywidgets.FileUpload is unreliable in Colab -- its value often "
+        "never reaches the kernel"
+    )
+    assert "enable_custom_widget_manager" not in src, (
+        "this switches Colab to a widget manager that can break core "
+        "ipywidgets; it was added speculatively and is not needed"
+    )
+
+
+def test_upload_cell_persists_files_and_clears_stale_ones():
+    """Files must land on disk in the run cell's expected naming, and a
+    re-run must not leave older pairs behind to be picked up as real."""
+    src = _upload_cell_source()
+    assert 'UPLOAD_DIR / f"body_{i:02d}.png"' in src
+    assert 'UPLOAD_DIR / f"face_{i:02d}.png"' in src
     assert "CLEAR_PREVIOUS" in src
+
+
+def test_upload_cell_refuses_mismatched_counts():
+    """Pairing is positional, so an unequal number of bodies and faces
+    would silently mis-pair every image after the mismatch."""
+    src = _upload_cell_source()
+    assert "!=" in src and "must match 1:1" in src
 
 
 def test_run_reports_the_actual_route_taken():
