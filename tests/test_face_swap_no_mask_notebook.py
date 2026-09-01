@@ -139,6 +139,55 @@ def test_face_refine_is_the_only_composite_in_the_simple_route():
     )
 
 
+def _face_swap_prompt() -> str:
+    src = _run_cell_source()
+    ns: dict = {}
+    i = src.find("FACE_SWAP_PROMPT = (")
+    j = src.find("\n)\n", i)
+    assert 0 < i < j
+    exec(src[i:j + 2], {}, ns)  # noqa: S102
+    return ns["FACE_SWAP_PROMPT"]
+
+
+def test_prompt_leads_with_replacement_not_preservation():
+    """CHECKPOINT-10 measured that a clause buried after prohibitions is
+    simply not acted on. A 1574-char version of this prompt that was almost
+    entirely preservation instructions, with "take only facial identity
+    from the second image" sitting dead last, produced output where
+    identity did not transfer AT ALL -- the model preserved everything,
+    including the original face.
+
+    The replacement instruction must come first, before any preservation
+    clause, exactly as T4's working prompt does.
+    """
+    p = _face_swap_prompt()
+    i_replace = p.find("replace the face")
+    i_keep = p.find("Keep the first person")
+    assert i_replace >= 0 and i_keep > 0, p
+    assert i_replace < i_keep, (
+        "the replacement instruction must precede the preservation clause"
+    )
+
+
+def test_prompt_carries_the_forcing_phrase():
+    """T4 relies on "with none of the first person's head remaining" to
+    overcome img2img at denoise=0.85 keeping what is already in the source
+    latent. The face variant needs the equivalent."""
+    p = _face_swap_prompt()
+    assert "none of the first person's face remaining" in p
+
+
+def test_prompt_stays_near_t4_length():
+    """CHECKPOINT-11 measured that prompt LENGTH alone moves how much of
+    the face the model rebuilds. T4's approved text is 564 chars; the
+    1574-char version transferred no identity."""
+    p = _face_swap_prompt()
+    assert len(p) < 700, (
+        f"prompt is {len(p)} chars -- drifting back toward the bloated "
+        "version whose instructions the model stopped acting on"
+    )
+
+
 def test_headwear_is_kept_not_replaced():
     """The head-swap route REPLACES headwear with the donor's hair. A face
     swap must keep it."""
