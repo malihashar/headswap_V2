@@ -192,6 +192,57 @@ def test_upload_cell_refuses_mismatched_counts():
     assert "!=" in src and "must match 1:1" in src
 
 
+def _setup_cell_source() -> str:
+    nb = json.loads(NB_PATH.read_text())
+    code_cells = [
+        "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
+    ]
+    setup = [s for s in code_cells if "setup_colab.sh" in s]
+    assert len(setup) == 1, "expected exactly one setup cell"
+    return setup[0]
+
+
+def test_setup_cell_does_not_import_numpy_before_reinstalling_it():
+    """`import torch` pulls numpy into the kernel. setup_colab.sh then
+    force-reinstalls numpy on disk (repairing simple-lama's downgrade), so a
+    kernel that imported numpy first is left holding the OLD compiled
+    extension against NEW .py files. The first fresh submodule import during
+    a render then dies with "cannot import name '_slice' from
+    numpy._core.umath" -- 30+ seconds in, from an unrelated import chain.
+    GPU-confirmed twice.
+
+    The GPU check must therefore not import torch; nvidia-smi answers the
+    same question without loading numpy.
+    """
+    src = _setup_cell_source()
+    # Comments in this cell legitimately discuss `import torch` as the thing
+    # being avoided -- only executable lines are the contract.
+    code_lines = [
+        ln for ln in src.splitlines() if not ln.strip().startswith("#")
+    ]
+    assert not any("import torch" in ln for ln in code_lines), (
+        "importing torch here loads numpy before setup reinstalls it, which "
+        "leaves this kernel in a mixed numpy state"
+    )
+    assert "nvidia-smi" in src
+
+
+def test_setup_cell_verifies_numpy_in_a_subprocess():
+    """The kernel deliberately has not imported numpy, so the health check
+    has to happen in a fresh interpreter to mean anything."""
+    src = _setup_cell_source()
+    assert "numpy._core.strings" in src
+    assert "sys.executable" in src
+
+
+def test_run_cell_guards_against_a_mixed_numpy_state():
+    """If it happens anyway (e.g. a stale session), fail immediately with an
+    actionable message instead of deep inside a render."""
+    src = _run_cell_source()
+    assert "numpy._core.strings" in src
+    assert "Restart session" in src
+
+
 def test_run_reports_the_actual_route_taken():
     """The mask-tuning failure went unnoticed because nothing surfaced which
     path actually ran. The notebook must read the route back from meta and
