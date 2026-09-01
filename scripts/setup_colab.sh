@@ -102,6 +102,15 @@ echo "[2/3] Python dependencies (requirements.txt + editable headswap)"
 echo "  Note: do not install hf_xet; setup forces HF_HUB_DISABLE_XET=1."
 python3 -m pip install -q -r "$REPO_ROOT/requirements.txt"
 python3 -m pip install -q -e "$REPO_ROOT"
+# Resolving a plain onnxruntime pin alongside insightface==0.7.3 in the same
+# requirements.txt install made pip backtrack to 1.19.2, which has no Python
+# 3.13 wheel and fails the whole install outright -- GPU-confirmed on a fresh
+# Colab allocation (same class of conflict the pillow force-reinstall below
+# already exists for). --no-deps skips dependency-constraint checking for
+# this one package, so it lands at exactly this version regardless of what
+# triggered the backtrack. Bump the version here (not requirements.txt) if a
+# future Colab base image moves past 3.13 and needs a newer wheel.
+python3 -m pip install -q --force-reinstall --no-deps onnxruntime==1.20.0
 # Geometry-lock multi-person path needs InsightFace buffalo_l (auto-download).
 python3 "$REPO_ROOT/scripts/download_insightface.py" || echo "WARN: InsightFace download failed; box-paste fallback will be used."
 echo "  Done."
