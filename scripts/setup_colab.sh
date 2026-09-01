@@ -169,6 +169,41 @@ if [[ "$DOWNLOAD_KREA2" -eq 1 ]]; then
   echo
 fi
 
+# Materialise Drive-symlinked weights onto LOCAL disk on a low-RAM runtime.
+#
+# Models default to the Drive store so they survive runtime reconnects, and
+# are symlinked into ComfyUI. ComfyUI memory-maps safetensors, which is fine
+# on local disk (pages are file-backed and evictable) but not over a Drive
+# FUSE mount: there is no local page cache to fall back on. On a high-RAM
+# A100 VM (~80GB) the whole file is absorbed anyway and nobody notices. On a
+# 12GiB T4 the 13.14GB UNet gets the process KILLED at load -- no Python
+# traceback, the cell just stops. Diagnosed exactly that way.
+#
+# So when RAM is too small to absorb the largest weight file, copy the
+# symlink targets to local disk (Colab /content has ~170GB free). The Drive
+# copy stays as the cache, so the next session still skips re-downloading.
+LOW_RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+LOCAL_MODELS_MIN_GB="${LOCAL_MODELS_MIN_GB:-24}"
+if [[ "$LOW_RAM_KB" -gt 0 && "$LOW_RAM_KB" -lt $((LOCAL_MODELS_MIN_GB * 1024 * 1024)) ]]; then
+  echo "-> RAM is $((LOW_RAM_KB / 1024 / 1024))GB (< ${LOCAL_MODELS_MIN_GB}GB):"
+  echo "   copying Drive-symlinked weights to local disk so mmap has a real"
+  echo "   page cache. Without this, loading a >RAM checkpoint over the Drive"
+  echo "   FUSE mount kills the kernel with no traceback."
+  while IFS= read -r link; do
+    target="$(readlink -f "$link" || true)"
+    [[ -f "$target" ]] || continue
+    case "$target" in
+      "$HEADSWAP_MODEL_STORE"*) ;;
+      *) continue ;;
+    esac
+    sz=$(stat -c%s "$target" 2>/dev/null || echo 0)
+    echo "   $(basename "$link") ($((sz / 1000000000)).$(( (sz / 100000000) % 10 ))GB) ..."
+    cp -f "$target" "$link.tmp" && rm -f "$link" && mv "$link.tmp" "$link"
+  done < <(find "$COMFYUI_PATH/models" -maxdepth 2 -type l 2>/dev/null)
+  echo "   done."
+  echo
+fi
+
 # head_matte mask backend (segmentation.py): intersects the geometric ellipse
 # with a real foreground matte so the head mask follows the actual silhouette
 # instead of enclosing background. Without rembg this silently degrades to the
