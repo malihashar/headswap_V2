@@ -419,3 +419,33 @@ def test_run_reports_the_actual_route_taken():
     assert '"mode": "simple_full_body"' in KREA2
     assert '"edit_mode": "simple_full_body"' in KREA2
     assert "WARNING" in src and "simple_full_body" in src
+
+
+def test_refine_mask_top_extend_defaults_to_existing_behaviour():
+    """face_refine is a SEPARATE generation composited back through
+    build_head_hair_mask. Its top extent was mask_top_extend (1.30), i.e.
+    1.3 face-heights above the face box -- squarely into the hair. So the
+    refine re-generated hair by construction, undoing any main-pass hair
+    preservation, and generated hair does not look real.
+
+    refine_mask_top_extend lets the face-swap route pull that boundary
+    down to the face. It MUST default to top_ext so every existing caller
+    (head swap included, where regenerating the donor's hair is the whole
+    point) is byte-for-byte unchanged.
+
+    This narrows an existing composite's reach; it does not add a mask.
+    """
+    i = KREA2.index('self.cfg.get("refine_mask_top_extend"')
+    window = KREA2[i:i + 80]
+    assert "top_ext" in window, (
+        "must default to top_ext, or enabling this key silently changes "
+        "head-swap behaviour too"
+    )
+    # And it must actually be the value handed to the mask builder.
+    j = KREA2.index("refine_top_ext = float(")
+    k = KREA2.index("build_head_hair_mask(", j)
+    seg = KREA2[k:k + 400]
+    assert "top_extend=refine_top_ext" in seg, (
+        "the new key is computed but not used -- the exact class of bug "
+        "that made a mask-widening 'fix' silently never apply earlier"
+    )

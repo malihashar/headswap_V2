@@ -6226,6 +6226,25 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 refine_bot_ext = float(
                     self.cfg.get("refine_mask_bot_extend", 0.06)
                 )
+                # Same argument as refine_mask_bot_extend above, applied to
+                # the TOP of the blend mask.
+                #
+                # mask_top_extend (1.30) reaches 1.3 * face_height ABOVE the
+                # face box, which is squarely into the hair -- so the refine,
+                # being a SEPARATE generation, composites its own render of
+                # the hair over the main frame. For a HEAD swap that is
+                # correct: the donor's hairstyle is the point. For a FACE
+                # swap it is actively harmful, because it re-generates hair
+                # the main pass was asked to preserve, and generated hair
+                # does not look real.
+                #
+                # Defaults to top_ext, so every existing caller is unchanged;
+                # the face-swap route lowers it so the refine touches the
+                # face and leaves the hair alone. This NARROWS an existing
+                # composite's reach -- it does not add a mask.
+                refine_top_ext = float(
+                    self.cfg.get("refine_mask_top_extend", top_ext)
+                )
                 face_mask, mask_info = build_head_hair_mask(
                     out,
                     self.cache_dir,
@@ -6233,7 +6252,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     face_box=selected_face,
                     expand_px=int(self.cfg.get("mask_expand_px", 18)),
                     blur_px=int(self.cfg.get("mask_blur_px", 12)),
-                    top_extend=top_ext,
+                    top_extend=refine_top_ext,
                     side_extend=side_ext,
                     bot_extend=refine_bot_ext,
                 )
@@ -6243,6 +6262,13 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     f"-> reaches y={int(selected_face.y1) + refine_bot_ext * _fh_r:.0f} "
                     f"(chin y={int(selected_face.y1)}); keeps the refine off the "
                     "shoulders so it cannot composite a second render of them",
+                    flush=True,
+                )
+                print(
+                    f"[krea2 face_refine] mask top_extend={refine_top_ext} "
+                    f"-> reaches y={int(selected_face.y0) - refine_top_ext * _fh_r:.0f} "
+                    f"(face top y={int(selected_face.y0)}); lower this to keep "
+                    "the refine out of the hair",
                     flush=True,
                 )
                 out = feathered_soft_composite(
