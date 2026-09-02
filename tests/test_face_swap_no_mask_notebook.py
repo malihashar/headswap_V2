@@ -225,6 +225,33 @@ def test_prompt_asks_for_head_replacement_not_face_only():
     )
 
 
+def test_keep_original_hair_runs_after_the_original_head_union():
+    """GPU-measured regression: an earlier version subtracted hair+
+    accessories from the keep-mask BEFORE the "unioned ORIGINAL head
+    footprint" step ran. That step exists specifically to make sure the
+    previous person's hair is REPLACED -- it re-adds the original head
+    region to "generated wins" because segmenter recall on the GENERATED
+    frame alone misses hair strands. Running the subtraction first meant
+    the union silently undid it a few lines later: the keep mask shrank
+    71608->64278px, then grew right back to include hair/headwear. The
+    hat was replaced anyway despite the flag being on.
+
+    The subtraction must be the LAST mutation of the keep-mask before it
+    is used, i.e. positioned after this union in source order.
+    """
+    i_union = KREA2.index(
+        "unioned ORIGINAL head footprint"
+    )
+    i_keep = KREA2.index(
+        "simple_full_body_restore_keep_original_hair"
+    )
+    assert i_union < i_keep, (
+        "keep_original_hair must run AFTER the original-head-footprint "
+        "union, or that union re-adds hair/headwear to the keep-mask and "
+        "silently undoes the subtraction"
+    )
+
+
 def test_prompt_carries_the_forcing_phrase():
     """T4 relies on "with none of the first person's head remaining" to
     overcome img2img at denoise=0.85 keeping what is already in the source

@@ -6399,56 +6399,6 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         "original tone while its pair is recoloured",
                         flush=True,
                     )
-                # FACE-SWAP CONTROL: keep the ORIGINAL hair and headwear.
-                #
-                # The keep-mask above means "generated pixels win here", and
-                # it includes hair and accessories. That is correct for a
-                # HEAD swap, where the donor's hairstyle is the whole point.
-                # A FACE swap wants the opposite: donor face, target's own
-                # hair and hat. Measured: without this, a strong identity
-                # prompt gave a good donor face but also replaced a winged
-                # hat with a plain one and swapped the hairstyle.
-                #
-                # Subtracting hair+accessories (NOT face-skin) drops them out
-                # of "generated wins", so the restore puts the original hair
-                # and headwear back verbatim while the new face survives.
-                if bool(self.cfg.get(
-                    "simple_full_body_restore_keep_original_hair", False
-                )) and _head is not None:
-                    try:
-                        from headswap.skin_harmonize import (  # noqa: PLC0415
-                            semantic_hair_accessories_mask,
-                        )
-                        _hair_acc = semantic_hair_accessories_mask(
-                            np.asarray(out.convert("RGB"), dtype=np.uint8)
-                        )
-                        if _hair_acc is not None:
-                            _before_hair = int((_head > 0.5).sum())
-                            _head = _head * (
-                                1.0 - np.clip(_hair_acc, 0.0, 1.0)
-                            )
-                            print(
-                                "[krea2 body_restore] keep_original_hair: "
-                                f"keep mask {_before_hair} -> "
-                                f"{int((_head > 0.5).sum())}px; original hair "
-                                "and headwear are restored instead of the "
-                                "generated ones",
-                                flush=True,
-                            )
-                        else:
-                            print(
-                                "[krea2 body_restore] keep_original_hair: "
-                                "segmenter unavailable; generated hair/"
-                                "headwear will be kept as before",
-                                flush=True,
-                            )
-                    except Exception as _hexc:  # noqa: BLE001
-                        print(
-                            "[krea2 body_restore] keep_original_hair skipped "
-                            f"({type(_hexc).__name__}: {_hexc})",
-                            flush=True,
-                        )
-
                 _orig_head = _sem_head_only(
                     np.asarray(body_full.convert("RGB"), dtype=np.uint8)
                 )
@@ -6527,6 +6477,64 @@ class Krea2IdentityEditPipeline(BasePipeline):
                         "so the previous person's hair is replaced, not restored",
                         flush=True,
                     )
+
+                # FACE-SWAP CONTROL: keep the ORIGINAL hair and headwear.
+                #
+                # Must run AFTER the ORIGINAL-head-footprint union just above,
+                # not before it. That union exists to make sure the previous
+                # person's hair is REPLACED (it re-adds the original head
+                # region to "generated wins" precisely because segmenter
+                # recall on the GENERATED frame alone misses hair strands).
+                # An earlier version of this control ran before that union,
+                # so the union silently put hair/headwear right back into
+                # "generated wins" a few lines later -- keep mask shrank
+                # 71608->64278px here, then grew right back via the union.
+                # Measured on GPU: the hat was replaced anyway.
+                #
+                # The keep-mask means "generated pixels win here", and
+                # normally includes hair and accessories -- correct for a
+                # HEAD swap, where the donor's hairstyle is the whole point.
+                # A FACE swap wants the opposite: donor face, target's own
+                # hair and hat. Subtracting hair+accessories (NOT face-skin)
+                # from the FINAL keep-mask drops them out of "generated
+                # wins", so the restore puts the original hair and headwear
+                # back verbatim while the new face still survives.
+                if bool(self.cfg.get(
+                    "simple_full_body_restore_keep_original_hair", False
+                )) and _head is not None:
+                    try:
+                        from headswap.skin_harmonize import (  # noqa: PLC0415
+                            semantic_hair_accessories_mask,
+                        )
+                        _hair_acc = semantic_hair_accessories_mask(
+                            np.asarray(out.convert("RGB"), dtype=np.uint8)
+                        )
+                        if _hair_acc is not None:
+                            _before_hair = int((_head > 0.5).sum())
+                            _head = _head * (
+                                1.0 - np.clip(_hair_acc, 0.0, 1.0)
+                            )
+                            print(
+                                "[krea2 body_restore] keep_original_hair: "
+                                f"keep mask {_before_hair} -> "
+                                f"{int((_head > 0.5).sum())}px; original hair "
+                                "and headwear are restored instead of the "
+                                "generated ones",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                "[krea2 body_restore] keep_original_hair: "
+                                "segmenter unavailable; generated hair/"
+                                "headwear will be kept as before",
+                                flush=True,
+                            )
+                    except Exception as _hexc:  # noqa: BLE001
+                        print(
+                            "[krea2 body_restore] keep_original_hair skipped "
+                            f"({type(_hexc).__name__}: {_hexc})",
+                            flush=True,
+                        )
             except Exception as _sexc:  # noqa: BLE001
                 # Was a bare swallow. That made an exception here look
                 # identical to "segmenter unavailable" and to "mask below
@@ -7153,13 +7161,34 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 "reconcile.",
                 flush=True,
             )
-        elif _head_restored and _wash_default:
+        # _wash_default is the computed INTENT (would the wash help, if
+        # nothing overrode it). It is not what actually runs -- that is
+        # decided at the real gate a few lines below this block, which
+        # reads the same cfg key this print used to ignore. Printing
+        # intent alone lies whenever a caller explicitly overrides that
+        # key, same disease as the raw_model log this comment sits next
+        # to: it told this exact investigation "LAB wash ON" on a render
+        # where the wash had been explicitly disabled and never ran.
+        # Compute the real outcome once here, print that instead.
+        _wash_will_run = not _raw_model and bool(
+            self.cfg.get("simple_full_body_skin_harmonize", _wash_default)
+        )
+        if _head_restored and _wash_will_run:
             print(
                 f"[krea2 skin] LAB wash ON - the restore succeeded but the model "
                 f"did not recolour the body: face L={tone_diag.get('face_L')} vs "
                 f"body skin L={tone_diag.get('body_L')} (dL={tone_diag.get('dL')}, "
                 f"over the {tone_diag.get('threshold')} threshold). Correcting the "
                 "residual on the SEMANTIC skin mask.",
+                flush=True,
+            )
+        elif _head_restored and _wash_default and not _wash_will_run:
+            print(
+                "[krea2 skin] LAB wash OFF (explicit cfg override) - the tone "
+                f"check would have wanted it on (dL={tone_diag.get('dL')}, over "
+                f"the {tone_diag.get('threshold')} threshold) but "
+                "simple_full_body_skin_harmonize=False was set explicitly, so "
+                "the residual tone mismatch is NOT corrected.",
                 flush=True,
             )
         elif _head_restored:
@@ -7169,13 +7198,21 @@ class Krea2IdentityEditPipeline(BasePipeline):
                 f"({tone_diag or 'tone check unavailable'}).",
                 flush=True,
             )
-        else:
+        elif _wash_will_run:
             print(
                 "[krea2 skin] LAB wash ON - person-skin restore did not run, "
                 f"so the ORIGINAL body was restored and the model's skin was "
                 f"discarded. Measured reason: "
                 f"{locals().get('_head_fail') or 'restore disabled or no face'}. "
                 "Falling back to the wash so the skin still changes.",
+                flush=True,
+            )
+        else:
+            print(
+                "[krea2 skin] LAB wash OFF (explicit cfg override) - "
+                "person-skin restore did not run, so the ORIGINAL body was "
+                "restored and the model's skin was discarded, and nothing is "
+                "correcting the resulting tone mismatch.",
                 flush=True,
             )
         # Post-render diff correction: restore ORIGINAL garment pixels
