@@ -493,7 +493,9 @@ def test_region_restore_blurs_a_continuous_field_not_a_binary_mask():
     # The blurred field is `w`. Thresholding IT would reinstate the hard
     # edge the blur exists to remove. (`skin > 0.5` is fine -- that is a
     # pixel-count diagnostic, not the blend weight.)
-    assert "(w > " not in body, (
+    # `(w > 0.5)` appears only in the veto's pixel-count log lines, which
+    # measure the field -- they never threshold the field used for blending.
+    assert "w = np.where" not in body and "w = (w >" not in body, (
         "must not threshold the blurred field -- that reinstates the hard "
         "edge the blur exists to remove"
     )
@@ -627,3 +629,25 @@ def test_erode_defaults_to_zero():
     body = _fn_body(SKIN_HARM, "def restore_all_but_face_and_skin(")
     assert "erode_px: int = 0" in body
     assert 'self.cfg.get("face_skin_restore_erode_px", 0)' in KREA2
+
+
+def test_clothes_and_hair_are_vetoed_after_the_blur():
+    """GPU-observed: generated skin overlapped the collar and crept under
+    the hat. Two things push the field outward -- the class masks resize
+    with INTER_LINEAR so their edges are fractional, and the blur spreads
+    the field by ~half a kernel.
+
+    Erosion was tried first and made it WORSE: shrinking the mask exposes a
+    ring of the TARGET's own original face around the swapped one -- a
+    different person, so the boundary becomes more visible, not less.
+    (Measured: 9561 -> 4312px kept, and the result was judged worse.)
+
+    Vetoing by label removes exactly the overlap and takes nothing off the
+    face interior. It must run AFTER the blur, or the blur re-spreads the
+    field back over the vetoed region.
+    """
+    body = _fn_body(SKIN_HARM, "def restore_all_but_face_and_skin(")
+    i_blur = body.index("cv2.GaussianBlur(")
+    i_veto = body.index("semantic_clothes_mask")
+    assert i_blur < i_veto, "veto must run after the blur, or the blur undoes it"
+    assert "semantic_hair_accessories_mask" in body

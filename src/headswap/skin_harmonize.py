@@ -1592,6 +1592,37 @@ def restore_all_but_face_and_skin(
     # edge for the blend to reveal.
     blur_k = max(3, (int(feather_px) // 2) * 2 + 1)
     w = cv2.GaussianBlur(skin, (blur_k, blur_k), 0)
+
+    # HARD VETO on clothing and hair, applied AFTER the blur.
+    #
+    # This is the fix for "near the hairline and on the neck it overlaps the
+    # clothing". Two things push the keep field outward: the class masks are
+    # resized with INTER_LINEAR so their edges are fractional, and the blur
+    # above spreads the field by ~half a kernel. Both let generated skin
+    # creep over the collar and under the hat.
+    #
+    # Erosion was tried first and is WRONG here: it shrinks the whole face,
+    # and the ring it exposes is not neutral skin -- it is the TARGET's own
+    # original face, a different person, so the boundary gets more visible,
+    # not less. Vetoing by label removes exactly the overlap without taking
+    # a single pixel off the face interior.
+    for _name, _fn in (("clothes", semantic_clothes_mask),
+                       ("hair", semantic_hair_accessories_mask)):
+        try:
+            _veto = _fn(rend)
+        except Exception:  # noqa: BLE001
+            _veto = None
+        if _veto is not None:
+            _before = float((w > 0.5).sum())
+            w = w * (1.0 - np.clip(_veto, 0.0, 1.0))
+            _removed = int(_before - float((w > 0.5).sum()))
+            if _removed > 0:
+                print(
+                    f"[skin_harm] vetoed {_removed}px of {_name} out of the "
+                    "keep field, so generated skin cannot overlap it",
+                    flush=True,
+                )
+
     w = np.clip(w, 0.0, 1.0)[..., None]
 
     out = np.clip(
