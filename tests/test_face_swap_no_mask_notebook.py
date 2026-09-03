@@ -517,3 +517,33 @@ def test_region_restore_is_off_by_default_and_runs_after_refine():
             > KREA2.index("[krea2 face_refine] mask bot_extend=")), (
         "must run after face_refine, or it keeps the low-resolution face"
     )
+
+
+def test_refine_identity_overrides_default_to_inheriting():
+    """The refine pass can now sample harder than the main pass, with its
+    own prompt -- but all three knobs must default to None = inherit, so
+    head swap is byte-for-byte unchanged.
+
+    Sampling harder in the refine is safe ONLY because the region stage
+    runs after it: everything the refine renders outside face+skin is
+    replaced by original pixels, so it cannot damage hair, clothing or
+    background however far it travels.
+    """
+    for key in ("simple_full_body_refine_denoise",
+                "simple_full_body_refine_ref_boost"):
+        i = KREA2.index(f'self.cfg.get("{key}")')
+        # no default argument => None => inherit
+        assert KREA2[i:i + len(key) + 22].rstrip().endswith('")'), (
+            f"{key} must default to None (inherit), not a literal value"
+        )
+
+
+def test_refine_restores_main_pass_conditioning_afterwards():
+    """The overrides are written into self.cfg, which is shared. Without a
+    finally-restore they would leak into every later render in the same
+    kernel -- exactly the sticky-config class of bug already fixed once in
+    chain.py this project."""
+    i = KREA2.index('_rf_prev = {')
+    seg = KREA2[i:i + 2600]
+    assert "finally:" in seg
+    assert "self.cfg[_k] = _v" in seg

@@ -6194,16 +6194,61 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     refine_scene = resize_max_keep_ar(
                         refine_scene, refine_long_side, div_by=div_by
                     )
-                with _stage(timings, "face_refine_sampling"):
-                    refine_sample = self._sample_edit(
-                        rt,
-                        bundle,
-                        refine_scene,
-                        face_crop,
-                        timings,
-                        prompt=prompt,
-                        edit_cache_info=edit_cache_info,
+                # IDENTITY PASS: let the refine sample harder than the main
+                # pass, with its own prompt.
+                #
+                # The refine previously inherited the main pass's denoise,
+                # ref_boost and whole-frame prompt. That prompt spends most
+                # of its text on clothing, pose and background -- none of
+                # which exist in a head crop -- and the main pass's denoise
+                # is tuned to PRESERVE the frame, which is the opposite of
+                # what a face crop wants.
+                #
+                # Sampling harder here is safe by construction when
+                # simple_full_body_keep_original_except_face_skin is on:
+                # everything this pass renders outside face+skin is
+                # discarded and replaced by the ORIGINAL pixels afterwards,
+                # so it cannot damage hair, clothing or background no
+                # matter how far it travels.
+                #
+                # All three default to None = inherit exactly what the main
+                # pass used, so head swap is byte-for-byte unchanged.
+                _rf_prev = {
+                    "denoise": self.cfg.get("denoise"),
+                    "ref_boost": self.cfg.get("ref_boost"),
+                }
+                _rf_dn = self.cfg.get("simple_full_body_refine_denoise")
+                _rf_rb = self.cfg.get("simple_full_body_refine_ref_boost")
+                _rf_prompt = str(
+                    self.cfg.get("simple_full_body_refine_prompt", "") or ""
+                ).strip() or prompt
+                if _rf_dn is not None:
+                    self.cfg["denoise"] = float(_rf_dn)
+                if _rf_rb is not None:
+                    self.cfg["ref_boost"] = float(_rf_rb)
+                if _rf_dn is not None or _rf_rb is not None or _rf_prompt is not prompt:
+                    print(
+                        "[krea2 face_refine] identity pass: "
+                        f"denoise={self.cfg.get('denoise')} "
+                        f"ref_boost={self.cfg.get('ref_boost')} "
+                        f"prompt_chars={len(_rf_prompt)}"
+                        + (" (own prompt)" if _rf_prompt is not prompt else ""),
+                        flush=True,
                     )
+                try:
+                    with _stage(timings, "face_refine_sampling"):
+                        refine_sample = self._sample_edit(
+                            rt,
+                            bundle,
+                            refine_scene,
+                            face_crop,
+                            timings,
+                            prompt=_rf_prompt,
+                            edit_cache_info=edit_cache_info,
+                        )
+                finally:
+                    for _k, _v in _rf_prev.items():
+                        self.cfg[_k] = _v
                 refined_crop = refine_sample["edited"]
                 # Back down to the box's native size so the composite lands
                 # in the original coordinate frame (feathered_soft_composite
