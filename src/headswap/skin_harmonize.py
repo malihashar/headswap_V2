@@ -1458,3 +1458,102 @@ def build_garment_containment_mask(
     if mask.size != (W, H):
         mask = mask.resize((W, H), Image.Resampling.BILINEAR)
     return mask, info
+
+
+def restore_all_but_face_and_skin(
+    rendered: Image.Image,
+    original: Image.Image,
+    *,
+    feather_px: int = 9,
+    min_skin_px: int = 500,
+) -> tuple[Image.Image, dict]:
+    """Keep the generated FACE and BARE SKIN. Take everything else from the
+    ORIGINAL, verbatim.
+
+    Why this exists, and why it is shaped exactly like this.
+
+    A face swap needs three regions treated in three different ways, and no
+    single global setting can do that -- ``denoise`` is one number applied to
+    the whole frame, so it cannot preserve hair and transform skin at once:
+
+      * hair, headwear, clothing, background -> must be the ORIGINAL pixels.
+        Measured repeatedly: generated hair does not look real, no matter
+        how it is prompted or conditioned.
+      * face -> must be regenerated, that is the entire point.
+      * bare skin -> must be regenerated in the donor's tone, which is why
+        the route stays full-frame; a face crop never shows the model the
+        arms.
+
+    So the boundaries are unavoidable. What matters is WHERE they land.
+
+    Every seam this project has produced came from a boundary drawn through
+    HAIR -- ``semantic_person_skin_mask`` is hair u accessories u face-skin u
+    body-skin, so the "generated wins" region ended at fine hair strands, the
+    hardest edge in the image to blend. That is the ring around the head.
+
+    This uses ``_semantic_skin_mask`` instead: face-skin u body-skin ONLY,
+    with hair, accessories and clothes excluded by label. The boundary
+    therefore falls on the hairline, the collar and the sleeve -- real edges
+    that exist in BOTH images at the SAME pixel coordinates, because the
+    render is img2img from the original's own latent and is pixel-aligned
+    with it. A boundary hidden on a real edge is the one you do not see.
+
+    Skin-to-skin has no boundary at all: the mask is a blurred continuous
+    field, not a binary cut, following the same reasoning as
+    ``extend_skin_harmonization`` ("a binary mask ALWAYS has an edge").
+
+    Fails closed: returns ``rendered`` untouched if the segmenter is
+    unavailable or finds too little skin to be believable, so a bad
+    segmentation degrades to today's behaviour instead of shredding a frame.
+    """
+    info: dict = {"applied": False}
+    W, H = rendered.size
+    rend = np.asarray(rendered.convert("RGB"), dtype=np.uint8)
+    orig = np.asarray(original.convert("RGB"), dtype=np.uint8)
+    if orig.shape[:2] != (H, W):
+        orig = cv2.resize(orig, (W, H), interpolation=cv2.INTER_LINEAR)
+
+    skin = _semantic_skin_mask(rend)
+    if skin is None:
+        info["reason"] = "segmenter_unavailable"
+        print(
+            "[skin_harm] restore_all_but_face_and_skin skipped -- semantic "
+            "segmenter unavailable; shipping the render unchanged",
+            flush=True,
+        )
+        return rendered, info
+
+    skin = np.clip(skin, 0.0, 1.0)
+    skin_px = int((skin > 0.5).sum())
+    info["skin_px"] = skin_px
+    if skin_px < min_skin_px:
+        info["reason"] = f"too_little_skin:{skin_px}<{min_skin_px}"
+        print(
+            f"[skin_harm] restore_all_but_face_and_skin skipped -- only "
+            f"{skin_px}px classified face/body skin (< {min_skin_px}); "
+            "a restore on that would be driven by noise",
+            flush=True,
+        )
+        return rendered, info
+
+    # Continuous field, not a binary cut. Blur the FIELD so there is no mask
+    # edge for the blend to reveal.
+    blur_k = max(3, (int(feather_px) // 2) * 2 + 1)
+    w = cv2.GaussianBlur(skin, (blur_k, blur_k), 0)
+    w = np.clip(w, 0.0, 1.0)[..., None]
+
+    out = np.clip(
+        rend.astype(np.float32) * w + orig.astype(np.float32) * (1.0 - w),
+        0, 255,
+    ).astype(np.uint8)
+
+    kept_frac = float((skin > 0.5).mean())
+    info.update(applied=True, kept_frac=round(kept_frac, 4),
+                feather_px=int(feather_px))
+    print(
+        f"[skin_harm] restore_all_but_face_and_skin: generated FACE+SKIN kept "
+        f"on {skin_px}px ({kept_frac:.2%} of frame); hair, headwear, clothing "
+        "and background are the ORIGINAL pixels, verbatim",
+        flush=True,
+    )
+    return Image.fromarray(out), info

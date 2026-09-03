@@ -7310,6 +7310,43 @@ class Krea2IdentityEditPipeline(BasePipeline):
             except Exception as exc:  # noqa: BLE001
                 skin_diag = {"applied": False, "reason": f"failed: {exc}"}
 
+        # REGION CONTROL for a face swap: keep the generated face and bare
+        # skin, take hair / headwear / clothing / background from the
+        # ORIGINAL verbatim.
+        #
+        # Runs AFTER face_refine, so the face it keeps is the high-resolution
+        # one, and works with raw_model=True (unlike body_restore, which
+        # raw_model disables) because it is a single blend rather than the
+        # multi-stage restore whose head-shaped boundary produced a visible
+        # ring.
+        #
+        # DEFAULT OFF -- head swap must be untouched by this.
+        _face_skin_diag: dict = {"applied": False}
+        if bool(self.cfg.get(
+            "simple_full_body_keep_original_except_face_skin", False
+        )):
+            try:
+                from headswap.skin_harmonize import (  # noqa: PLC0415
+                    restore_all_but_face_and_skin,
+                )
+                out, _face_skin_diag = restore_all_but_face_and_skin(
+                    out,
+                    body_full,
+                    feather_px=int(
+                        self.cfg.get("face_skin_restore_feather_px", 9)
+                    ),
+                )
+            except Exception as _fsexc:  # noqa: BLE001
+                _face_skin_diag = {
+                    "applied": False,
+                    "reason": f"{type(_fsexc).__name__}: {_fsexc}",
+                }
+                print(
+                    f"[krea2 face_skin_restore] FAILED - {_fsexc}; shipping "
+                    "the render unrestored",
+                    flush=True,
+                )
+
         # Opt-in mask diagnostics. Enabled with a single cfg flag so a normal
         # render produces the overlay -- the notebook does not keep the
         # intermediate images alive, so an after-the-fact script has nothing
@@ -7362,6 +7399,7 @@ class Krea2IdentityEditPipeline(BasePipeline):
             "raw_model": _raw_model,
             "skin_harmonize": skin_diag,
             "restore_stripped_garment": restore_diag,
+            "keep_original_except_face_skin": _face_skin_diag,
             # Per-stage wall time. Every stage in this route is already
             # wrapped in _stage(), which accumulates into `timings` -- the
             # numbers existed all along and were simply never surfaced, so

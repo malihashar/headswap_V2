@@ -449,3 +449,71 @@ def test_refine_mask_top_extend_defaults_to_existing_behaviour():
         "the new key is computed but not used -- the exact class of bug "
         "that made a mask-widening 'fix' silently never apply earlier"
     )
+
+
+SKIN_HARM = (ROOT / "src" / "headswap" / "skin_harmonize.py").read_text()
+
+
+def _fn_body(text: str, def_line: str) -> str:
+    i = text.index(def_line)
+    j = text.find("\ndef ", i + 10)
+    return text[i:j if j > 0 else len(text)]
+
+
+def test_region_restore_uses_the_skin_only_mask_not_the_hair_one():
+    """THE fix for the visible ring around the head.
+
+    Every seam this project produced came from a keep-mask that included
+    HAIR: semantic_person_skin_mask is hair u accessories u face-skin u
+    body-skin, so the "generated wins" region ended on fine hair strands --
+    the hardest edge in the image to blend.
+
+    _semantic_skin_mask is face-skin u body-skin ONLY; hair, accessories and
+    clothes are excluded by label. The boundary then falls on the hairline,
+    collar and sleeve -- real edges present in BOTH images at the SAME pixel
+    coordinates, since the render is img2img from the original's own latent
+    and is pixel-aligned with it.
+    """
+    body = _fn_body(SKIN_HARM, "def restore_all_but_face_and_skin(")
+    assert "_semantic_skin_mask(" in body
+    # Match CALLS, not prose -- the docstring names the rejected mask on
+    # purpose, to record why it is rejected.
+    assert "semantic_person_skin_mask(" not in body, (
+        "that mask includes hair -- using it puts the boundary back through "
+        "hair strands, which is the ring around the head"
+    )
+    assert "semantic_hair_accessories_mask(" not in body
+
+
+def test_region_restore_blurs_a_continuous_field_not_a_binary_mask():
+    """Skin-to-skin must have no boundary at all. Same reasoning as
+    extend_skin_harmonization: 'a binary mask ALWAYS has an edge'."""
+    body = _fn_body(SKIN_HARM, "def restore_all_but_face_and_skin(")
+    assert "GaussianBlur" in body
+    # The blurred field is `w`. Thresholding IT would reinstate the hard
+    # edge the blur exists to remove. (`skin > 0.5` is fine -- that is a
+    # pixel-count diagnostic, not the blend weight.)
+    assert "(w > " not in body, (
+        "must not threshold the blurred field -- that reinstates the hard "
+        "edge the blur exists to remove"
+    )
+    assert "* w + " in body, "the blend must use the continuous field"
+
+
+def test_region_restore_fails_closed():
+    body = _fn_body(SKIN_HARM, "def restore_all_but_face_and_skin(")
+    assert body.count("return rendered, info") >= 2, (
+        "segmenter-unavailable and too-little-skin must both ship the "
+        "render untouched rather than blend against a bad mask"
+    )
+
+
+def test_region_restore_is_off_by_default_and_runs_after_refine():
+    """Head swap must be untouched, and the face it keeps must be the
+    high-resolution one the refine pass produced."""
+    i = KREA2.index('"simple_full_body_keep_original_except_face_skin"')
+    assert "False" in KREA2[i:i + 80]
+    assert (KREA2.index("restore_all_but_face_and_skin(")
+            > KREA2.index("[krea2 face_refine] mask bot_extend=")), (
+        "must run after face_refine, or it keeps the low-resolution face"
+    )
