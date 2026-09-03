@@ -119,6 +119,65 @@ echo
 
 mkdir -p "$HEADSWAP_MODEL_STORE" "$HEADSWAP_STAGING_DIR" "$COMFYUI_PATH/models"
 
+# Skin-vs-clothes segmenter for skin_harmonize.py. Without this model the
+# skin mask falls back to colour only, which cannot tell skin from
+# skin-coloured fabric -- GPU-observed repainting a cream dress (its "skin"
+# region measured L=197, i.e. the garment) by 59 L-points. The face-swap
+# region restore is inert without it and silently ships an unprotected
+# render, which is exactly how a full debugging cycle was lost.
+#
+# Fetched HERE, before the multi-GB weight downloads, not after them. This
+# script runs under `set -euo pipefail`, so when it sat last any earlier
+# failure (a killed or timed-out weight download) aborted the run before the
+# segmenter was ever fetched -- while the big weights, already on Drive,
+# survived. Setup then "looked done" with no tflite.
+#
+# Cached on Drive alongside those weights for the same reason: /content is
+# EPHEMERAL and is wiped on every reconnect, so a /content-only copy silently
+# disappears while everything else persists.
+echo "-> Selfie multiclass segmenter (skin vs clothes)..."
+mkdir -p /content/models
+SEG_NAME=selfie_multiclass_256x256.tflite
+SEG_TFLITE=/content/models/$SEG_NAME
+SEG_CACHE="$HEADSWAP_MODEL_STORE/$SEG_NAME"
+SEG_URL="https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/$SEG_NAME"
+
+# Verify by SIZE, not just existence: a failed curl leaves a short HTML error
+# body behind, which -f would accept and the pipeline would then treat as a
+# working model.
+seg_ok() { [ -f "$1" ] && [ "$(wc -c < "$1")" -ge 100000 ]; }
+
+if ! seg_ok "$SEG_CACHE"; then
+  rm -f "$SEG_CACHE"
+  curl -fsSL --retry 3 --retry-delay 2 -o "$SEG_CACHE" "$SEG_URL" \
+    || echo "   WARN: segmenter download failed"
+fi
+if seg_ok "$SEG_CACHE"; then
+  cp -f "$SEG_CACHE" "$SEG_TFLITE"
+  echo "   segmenter OK ($(wc -c < "$SEG_TFLITE") bytes, cached on Drive)"
+else
+  rm -f "$SEG_CACHE"
+  # Drive unavailable or fetch failed -- try ephemeral /content directly so a
+  # no-Drive run still works for this session.
+  if ! seg_ok "$SEG_TFLITE"; then
+    rm -f "$SEG_TFLITE"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$SEG_TFLITE" "$SEG_URL" \
+      || echo "   WARN: segmenter download failed"
+  fi
+  if seg_ok "$SEG_TFLITE"; then
+    echo "   segmenter OK ($(wc -c < "$SEG_TFLITE") bytes, NOT cached -- will"
+    echo "   need re-downloading after a reconnect)"
+  else
+    rm -f "$SEG_TFLITE"
+    echo "   ####################################################"
+    echo "   WARN: segmenter UNUSABLE. The face-swap region restore"
+    echo "   will SKIP, shipping a render with no hair/clothing"
+    echo "   protection, and skin/clothes separation will be off."
+    echo "   ####################################################"
+  fi
+fi
+echo
+
 DL_COMMON=(
   --comfy "$COMFYUI_PATH"
   --store-dir "$HEADSWAP_MODEL_STORE"
@@ -248,32 +307,6 @@ pip install -q mediapipe 2>&1 | tail -2 || echo "   WARN: mediapipe install fail
 python -c "import mediapipe" 2>/dev/null \
   && echo "   mediapipe OK" \
   || echo "   WARN: mediapipe not importable; skin harmonization will fall back to the coarse geometric limb mask"
-
-# Skin-vs-clothes segmenter for skin_harmonize.py. Without this model the
-# skin mask falls back to colour only, which cannot tell skin from
-# skin-coloured fabric -- GPU-observed repainting a cream dress (its "skin"
-# region measured L=197, i.e. the garment) by 59 L-points.
-echo "-> Downloading selfie multiclass segmenter (skin vs clothes)..."
-mkdir -p /content/models
-SEG_TFLITE=/content/models/selfie_multiclass_256x256.tflite
-# Verify by SIZE, not just existence: a failed curl leaves a short HTML error
-# body behind, which -f would accept and the pipeline would then treat as a
-# working model. Observed downstream as a run where the semantic restore
-# silently fell back and the skin changed by nothing at all.
-if [ ! -f "$SEG_TFLITE" ] || [ "$(wc -c < "$SEG_TFLITE")" -lt 100000 ]; then
-  rm -f "$SEG_TFLITE"
-  curl -fsSL --retry 3 --retry-delay 2 -o "$SEG_TFLITE" \
-    "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite" \
-    || echo "   WARN: segmenter download failed"
-fi
-if [ -f "$SEG_TFLITE" ] && [ "$(wc -c < "$SEG_TFLITE")" -ge 100000 ]; then
-  echo "   selfie multiclass segmenter OK ($(wc -c < "$SEG_TFLITE") bytes)"
-else
-  rm -f "$SEG_TFLITE"
-  echo "   WARN: segmenter UNUSABLE - skin/clothes separation will be off,"
-  echo "         the original body will be restored, and the pipeline will"
-  echo "         fall back to the LAB wash for skin tone."
-fi
 
 echo "Setup complete."
 echo "COMFYUI_PATH=$COMFYUI_PATH"

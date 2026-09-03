@@ -547,3 +547,43 @@ def test_refine_restores_main_pass_conditioning_afterwards():
     seg = KREA2[i:i + 2600]
     assert "finally:" in seg
     assert "self.cfg[_k] = _v" in seg
+
+
+SETUP_SH = (ROOT / "scripts" / "setup_colab.sh").read_text()
+
+
+def test_segmenter_is_fetched_before_the_big_weight_downloads():
+    """setup_colab.sh runs under `set -euo pipefail`. With the segmenter
+    fetch sitting LAST, any earlier failure -- a killed or timed-out
+    multi-GB weight download -- aborted the run before it, while those
+    weights, already on Drive, survived. Setup then looked complete with no
+    tflite, and the region restore silently skipped."""
+    i_seg = SETUP_SH.index("selfie_multiclass_256x256.tflite")
+    i_dl = SETUP_SH.index("DL_COMMON=(")
+    assert i_seg < i_dl, (
+        "the segmenter must be fetched before the large model downloads"
+    )
+
+
+def test_segmenter_is_cached_on_drive():
+    """/content is ephemeral and wiped on every Colab reconnect, so a
+    /content-only copy vanishes while the Drive-backed weights persist --
+    which is how it went missing in the first place."""
+    i = SETUP_SH.index("SEG_CACHE=")
+    assert "HEADSWAP_MODEL_STORE" in SETUP_SH[i:i + 120]
+
+
+def test_both_segmenter_checks_use_the_same_size_gate():
+    """_semantic_skin_mask used exists() only while the loader also required
+    >100_000 bytes, so a truncated download passed one gate and failed the
+    other with a different message about the same broken file."""
+    assert SKIN_HARM.count("getsize(") >= 3
+    i = SKIN_HARM.index("def _semantic_skin_mask(")
+    body = SKIN_HARM[i:i + 1800]
+    assert "100_000" in body
+
+
+def test_preflight_helper_exists_for_callers_to_refuse_to_run():
+    """A caller must be able to fail loudly rather than ship a render with
+    no region protection -- the silent skip cost a full debugging cycle."""
+    assert "def semantic_segmenter_available(" in SKIN_HARM

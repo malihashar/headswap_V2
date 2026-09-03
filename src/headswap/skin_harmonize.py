@@ -413,11 +413,25 @@ def _semantic_skin_mask(rgb_np: np.ndarray) -> np.ndarray | None:
     """
     import os as _os  # noqa: PLC0415
 
-    model_path = next((p for p in _SEM_MODEL_PATHS if _os.path.exists(p)), None)
+    # Size gate, not just exists() -- must match _semantic_category_mask's
+    # own check (>100_000). A failed curl leaves a short HTML error body
+    # behind: exists() accepts it, the loader rejects it, and the two
+    # disagree with different messages about the same broken file.
+    model_path = next(
+        (p for p in _SEM_MODEL_PATHS
+         if _os.path.exists(p) and _os.path.getsize(p) > 100_000),
+        None,
+    )
     if model_path is None:
+        _found = [
+            (p, _os.path.getsize(p))
+            for p in _SEM_MODEL_PATHS if _os.path.exists(p)
+        ]
         print(
-            "[skin_harm] semantic segmenter model not found -- falling back to "
-            "colour-only skin detection (skin-coloured CLOTHING may be recoloured)",
+            "[skin_harm] semantic segmenter model not usable -- searched "
+            f"{list(_SEM_MODEL_PATHS)}, found {_found or 'nothing'}. Falling "
+            "back to colour-only skin detection (skin-coloured CLOTHING may "
+            "be recoloured). Re-run scripts/setup_colab.sh to fetch it.",
             flush=True,
         )
         return None
@@ -1557,3 +1571,28 @@ def restore_all_but_face_and_skin(
         flush=True,
     )
     return Image.fromarray(out), info
+
+
+def semantic_segmenter_available() -> tuple[bool, str]:
+    """Is the multiclass selfie segmenter usable? (ok, human-readable reason)
+
+    Exists so a caller can REFUSE to run rather than silently ship a render
+    with no region protection. That silent skip is not hypothetical: a full
+    debugging cycle was spent judging an image whose log carried one line --
+    "restore_all_but_face_and_skin skipped -- semantic segmenter
+    unavailable" -- while the architecture under evaluation had never
+    executed.
+
+    The model lives on ephemeral /content, so it disappears on every Colab
+    reconnect while the Drive-cached weights survive; setup then looks
+    complete with no tflite present.
+    """
+    import os as _os  # noqa: PLC0415
+
+    for q in _SEM_MODEL_PATHS:
+        if _os.path.exists(q):
+            n = _os.path.getsize(q)
+            if n > 100_000:
+                return True, f"{q} ({n} bytes)"
+            return False, f"{q} exists but is only {n} bytes (truncated download)"
+    return False, f"not found in any of {list(_SEM_MODEL_PATHS)}"
