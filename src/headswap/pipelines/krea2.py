@@ -7380,6 +7380,9 @@ class Krea2IdentityEditPipeline(BasePipeline):
                     feather_px=int(
                         self.cfg.get("face_skin_restore_feather_px", 9)
                     ),
+                    erode_px=int(
+                        self.cfg.get("face_skin_restore_erode_px", 0)
+                    ),
                 )
             except Exception as _fsexc:  # noqa: BLE001
                 _face_skin_diag = {

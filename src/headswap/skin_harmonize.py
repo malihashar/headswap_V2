@@ -1479,10 +1479,16 @@ def restore_all_but_face_and_skin(
     original: Image.Image,
     *,
     feather_px: int = 9,
+    erode_px: int = 0,
     min_skin_px: int = 500,
 ) -> tuple[Image.Image, dict]:
     """Keep the generated FACE and BARE SKIN. Take everything else from the
     ORIGINAL, verbatim.
+
+    ``erode_px`` shrinks the keep mask before blurring, which is the only
+    thing that actually MOVES the blend boundary (blurring softens it in
+    place). Use it to pull the boundary off the hairline and into flat
+    forehead/cheek skin. Default 0 = previous behaviour.
 
     Why this exists, and why it is shaped exactly like this.
 
@@ -1549,6 +1555,38 @@ def restore_all_but_face_and_skin(
             flush=True,
         )
         return rendered, info
+
+    # ERODE BEFORE BLURRING -- this is what actually moves the boundary.
+    #
+    # Blurring a mask does NOT move its 0.5 crossing; it only softens it in
+    # place. At feather_px=9 the kernel is 5px, so the boundary was still
+    # sitting exactly ON the hairline, merely 5px soft there -- the hardest
+    # place in the image to hide a seam, and where the reported top-of-head
+    # artifact appeared.
+    #
+    # The original reasoning (see this function's docstring) was that the
+    # hairline is a real edge at identical coordinates in both images,
+    # because the render is img2img from the original's own latent. That
+    # premise breaks at denoise=0.85: the generated hairline shifts a few
+    # pixels, so generated-forehead meets original-hair, offset. The
+    # artifact is evidence the alignment assumption failed.
+    #
+    # Eroding first relocates the 0.5 crossing INTO mid-forehead and cheek,
+    # where both sides are flat skin of the same tone and a few pixels of
+    # misregistration are invisible. Default 0 keeps the previous behaviour
+    # exactly.
+    if erode_px > 0:
+        k = 2 * int(erode_px) + 1
+        kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        _before = int((skin > 0.5).sum())
+        skin = cv2.erode(skin, kern)
+        info["eroded_px"] = int(erode_px)
+        print(
+            f"[skin_harm] eroded the keep mask by {erode_px}px before "
+            f"blurring: {_before} -> {int((skin > 0.5).sum())}px, moving the "
+            "blend boundary off the hairline and into forehead/cheek skin",
+            flush=True,
+        )
 
     # Continuous field, not a binary cut. Blur the FIELD so there is no mask
     # edge for the blend to reveal.

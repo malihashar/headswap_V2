@@ -599,3 +599,31 @@ def test_preflight_checks_the_mediapipe_package_not_just_the_weights():
     body = SKIN_HARM[i:i + 2000]
     assert "import mediapipe" in body
     assert "pip install mediapipe" in body
+
+
+def test_erode_runs_before_the_blur():
+    """Blurring a mask does NOT move its 0.5 crossing -- it softens it in
+    place. At feather_px=9 the kernel is 5px, so the boundary sat exactly
+    ON the hairline, merely 5px soft: the hardest place in the image to
+    hide a seam, and where the top-of-head artifact appeared.
+
+    Eroding FIRST relocates the crossing into forehead/cheek skin, where
+    both sides are flat tone and misregistration is invisible. Verified
+    numerically: erode_px=0 -> boundary at the mask edge; erode_px=6 ->
+    6px inside it.
+    """
+    body = _fn_body(SKIN_HARM, "def restore_all_but_face_and_skin(")
+    i_erode = body.index("cv2.erode(")
+    i_blur = body.index("cv2.GaussianBlur(")
+    assert i_erode < i_blur, (
+        "erode must precede the blur -- eroding after would soften an "
+        "already-placed boundary instead of moving it"
+    )
+
+
+def test_erode_defaults_to_zero():
+    """Default must be a no-op so head swap and the previous face-swap
+    behaviour are byte-for-byte unchanged."""
+    body = _fn_body(SKIN_HARM, "def restore_all_but_face_and_skin(")
+    assert "erode_px: int = 0" in body
+    assert 'self.cfg.get("face_skin_restore_erode_px", 0)' in KREA2
