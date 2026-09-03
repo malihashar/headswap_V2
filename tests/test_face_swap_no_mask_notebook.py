@@ -587,3 +587,15 @@ def test_preflight_helper_exists_for_callers_to_refuse_to_run():
     """A caller must be able to fail loudly rather than ship a render with
     no region protection -- the silent skip cost a full debugging cycle."""
     assert "def semantic_segmenter_available(" in SKIN_HARM
+
+
+def test_preflight_checks_the_mediapipe_package_not_just_the_weights():
+    """GPU-observed: the .tflite was present (16MB) so the preflight
+    returned True, the run proceeded, and the region restore then skipped
+    anyway with ModuleNotFoundError: No module named 'mediapipe'. Checking
+    the weights alone recreates the exact silent degradation this helper
+    exists to prevent."""
+    i = SKIN_HARM.index("def semantic_segmenter_available(")
+    body = SKIN_HARM[i:i + 2000]
+    assert "import mediapipe" in body
+    assert "pip install mediapipe" in body

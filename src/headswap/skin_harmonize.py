@@ -1589,10 +1589,23 @@ def semantic_segmenter_available() -> tuple[bool, str]:
     """
     import os as _os  # noqa: PLC0415
 
+    # The PACKAGE, not just the weights. An earlier version of this check
+    # verified only the .tflite and returned True while `import mediapipe`
+    # raised ModuleNotFoundError -- so the caller proceeded and the region
+    # restore skipped anyway, which is precisely the silent degradation this
+    # function exists to make impossible.
+    try:
+        import mediapipe  # noqa: F401,PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return False, (
+            f"mediapipe not importable ({type(exc).__name__}: {exc}) -- "
+            "run: pip install mediapipe"
+        )
+
     for q in _SEM_MODEL_PATHS:
         if _os.path.exists(q):
             n = _os.path.getsize(q)
             if n > 100_000:
-                return True, f"{q} ({n} bytes)"
+                return True, f"mediapipe OK, weights {q} ({n} bytes)"
             return False, f"{q} exists but is only {n} bytes (truncated download)"
-    return False, f"not found in any of {list(_SEM_MODEL_PATHS)}"
+    return False, f"weights not found in any of {list(_SEM_MODEL_PATHS)}"
